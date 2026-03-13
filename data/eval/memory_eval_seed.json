@@ -1,0 +1,16 @@
+[
+  {
+    "assistantId": "assistant_demo",
+    "sessionId": "session_demo",
+    "query": "我之前说过我喜欢什么？",
+    "expectedMemoryHints": ["喜欢", "偏好"],
+    "notes": "检查偏好类记忆召回"
+  },
+  {
+    "assistantId": "assistant_demo",
+    "sessionId": "session_demo",
+    "query": "我们上次聊到哪里了？",
+    "expectedMemoryHints": ["上次", "继续"],
+    "notes": "检查近期会话记忆召回"
+  }
+]

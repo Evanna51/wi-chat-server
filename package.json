@@ -1,0 +1,31 @@
+{
+  "name": "character-push-server",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js",
+    "check": "node -e \"require('./src/index'); console.log('ok')\"",
+    "sidecar:hnsw": "node scripts/hnsw-sidecar.js",
+    "indexer:once": "node -e \"require('./src/workers/memoryIndexer').runIndexerOnce().then((n)=>{console.log('processed',n);process.exit(0);}).catch((e)=>{console.error(e);process.exit(1);})\"",
+    "eval:memory": "node scripts/eval-memory.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@langchain/openai": "^1.2.13",
+    "@qdrant/js-client-rest": "^1.17.0",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.6.1",
+    "hnswlib-node": "^3.0.0",
+    "langchain": "^1.2.32",
+    "node-cron": "^4.2.1",
+    "pg": "^8.20.0",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  }
+}
