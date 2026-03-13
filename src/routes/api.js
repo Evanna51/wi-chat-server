@@ -11,12 +11,18 @@ const {
 const { ingestInteraction } = require("../services/memoryIngestService");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
 const { generateWithMemory } = require("../services/langchainQwenService");
+const {
+  shouldRetrieveMemory,
+  formatMemoryLines,
+  buildMemoryGuidance,
+} = require("../services/memoryDecisionService");
 const config = require("../config");
 
 const router = express.Router();
 
 const authMiddleware = (req, res, next) => {
-  const required = process.env.APP_API_KEY || "dev-local-key";
+  if (!config.requireApiKey) return next();
+  const required = config.appApiKey;
   const provided = req.header("x-api-key");
   if (!provided || provided !== required) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
@@ -114,6 +120,69 @@ router.post("/chat-with-memory", authMiddleware, async (req, res) => {
       ok: true,
       answer,
       memories: memories.map((item) => ({ id: item.id, score: item.score })),
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+router.post("/tool/memory-context", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    sessionId: z.string().min(1),
+    userInput: z.string().min(1),
+    topK: z.number().int().positive().max(20).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+
+  const { assistantId, sessionId, userInput, topK } = parsed.data;
+  const decision = await shouldRetrieveMemory({ userInput });
+  if (!config.memoryRetrievalEnabled) {
+    return res.json({
+      ok: true,
+      shouldRetrieve: false,
+      intent: "small_talk",
+      reason: "memory_retrieval_disabled",
+      decisionSource: "system",
+      memoryLines: [],
+    });
+  }
+
+  if (!decision.shouldRetrieve) {
+    return res.json({
+      ok: true,
+      shouldRetrieve: false,
+      intent: decision.intent || "small_talk",
+      reason: decision.reason,
+      decisionSource: decision.source,
+      memoryLines: [],
+    });
+  }
+
+  try {
+    const memories = await retrieveMemory({
+      assistantId,
+      sessionId,
+      query: decision.query || userInput,
+      topK: topK || config.retrievalTopK,
+    });
+    const memoryLines = formatMemoryLines(memories);
+    const memoryGuidance = buildMemoryGuidance(memoryLines);
+    return res.json({
+      ok: true,
+      shouldRetrieve: true,
+      intent: decision.intent || "fact_query",
+      reason: decision.reason,
+      decisionSource: decision.source,
+      retrievalQuery: decision.query || userInput,
+      memoryLines,
+      memoryGuidance,
+      memories: memories.map((item) => ({
+        id: item.id,
+        content: item.content,
+        score: item.score,
+      })),
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });

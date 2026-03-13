@@ -7,6 +7,7 @@ const { runIndexerOnce } = require("../workers/memoryIndexer");
 const router = express.Router();
 
 function authMiddleware(req, res, next) {
+  if (!config.requireApiKey) return next();
   const provided = req.header("x-api-key");
   if (!provided || provided !== config.appApiKey) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
