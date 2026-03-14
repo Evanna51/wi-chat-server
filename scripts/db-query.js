@@ -6,8 +6,15 @@ function parseArgs(argv) {
   const args = {
     table: "interaction_log",
     assistantId: "",
+    userId: "",
+    name: "",
     sessionId: "",
     role: "",
+    memoryType: "",
+    messageType: "",
+    runType: "",
+    status: "",
+    life: false,
     from: "",
     to: "",
     limit: 20,
@@ -18,8 +25,15 @@ function parseArgs(argv) {
     const token = argv[i];
     if (token === "--table") args.table = String(argv[++i] || args.table);
     else if (token === "--assistant") args.assistantId = String(argv[++i] || "");
+    else if (token === "--user") args.userId = String(argv[++i] || "");
+    else if (token === "--name") args.name = String(argv[++i] || "");
     else if (token === "--session") args.sessionId = String(argv[++i] || "");
     else if (token === "--role") args.role = String(argv[++i] || "");
+    else if (token === "--memory-type") args.memoryType = String(argv[++i] || "");
+    else if (token === "--message-type") args.messageType = String(argv[++i] || "");
+    else if (token === "--run-type") args.runType = String(argv[++i] || "");
+    else if (token === "--status") args.status = String(argv[++i] || "");
+    else if (token === "--life") args.life = true;
     else if (token === "--from") args.from = String(argv[++i] || "");
     else if (token === "--to") args.to = String(argv[++i] || "");
     else if (token === "--limit") args.limit = Number(argv[++i] || 20);
@@ -46,9 +60,18 @@ function buildQuery(args) {
     "memory_facts",
     "memory_retrieval_log",
     "outbox_events",
+    "autonomous_run_log",
+    "assistant_profile",
+    "proactive_message_log",
+    "local_outbox_messages",
+    "local_subscribers",
+    "push_token",
   ]);
   if (!allowedTables.has(args.table)) {
     throw new Error(`unsupported table: ${args.table}`);
+  }
+  if (args.life) {
+    args.table = "memory_items";
   }
 
   const where = [];
@@ -60,18 +83,49 @@ function buildQuery(args) {
     "memory_facts",
     "memory_retrieval_log",
     "memory_vectors",
+    "autonomous_run_log",
+    "assistant_profile",
+    "proactive_message_log",
+    "local_outbox_messages",
   ]).has(args.table);
+  const hasUserId = new Set(["local_outbox_messages", "local_subscribers", "push_token"]).has(
+    args.table
+  );
   const hasSessionId = new Set([
     "interaction_log",
     "conversation_turns",
     "memory_items",
     "memory_facts",
     "memory_retrieval_log",
+    "autonomous_run_log",
+    "proactive_message_log",
+    "local_outbox_messages",
   ]).has(args.table);
+  const supportsNameLookup = hasAssistantId || args.table === "assistant_profile";
+
+  if (args.name && !supportsNameLookup) {
+    throw new Error(`--name is not supported for table: ${args.table}`);
+  }
 
   if (args.assistantId && hasAssistantId) {
     where.push("assistant_id = ?");
     values.push(args.assistantId);
+  }
+  if (args.userId && hasUserId) {
+    where.push("user_id = ?");
+    values.push(args.userId);
+  }
+  if (args.name) {
+    if (args.table === "assistant_profile") {
+      where.push("character_name LIKE ?");
+      values.push(`%${args.name}%`);
+    } else if (hasAssistantId) {
+      // Join-like filter: resolve assistant ids by character name first, then query target table.
+      where.push(
+        "assistant_id IN (SELECT assistant_id FROM assistant_profile WHERE character_name LIKE ?)"
+      );
+      values.push(`%${args.name}%`);
+    }
   }
   if (args.sessionId && hasSessionId) {
     where.push("session_id = ?");
@@ -81,6 +135,24 @@ function buildQuery(args) {
     where.push("role = ?");
     values.push(args.role);
   }
+  if (args.runType && args.table === "autonomous_run_log") {
+    where.push("run_type = ?");
+    values.push(args.runType);
+  }
+  if (args.status && (args.table === "autonomous_run_log" || args.table === "local_outbox_messages")) {
+    where.push("status = ?");
+    values.push(args.status);
+  }
+  if (args.messageType && args.table === "local_outbox_messages") {
+    where.push("message_type = ?");
+    values.push(args.messageType);
+  }
+  if (args.life) {
+    where.push("memory_type IN ('life_event', 'work_event')");
+  } else if (args.memoryType && args.table === "memory_items") {
+    where.push("memory_type = ?");
+    values.push(args.memoryType);
+  }
 
   const hasCreatedAt = new Set([
     "interaction_log",
@@ -89,6 +161,11 @@ function buildQuery(args) {
     "memory_facts",
     "memory_retrieval_log",
     "outbox_events",
+    "autonomous_run_log",
+    "proactive_message_log",
+    "local_outbox_messages",
+    "push_token",
+    "local_subscribers",
   ]).has(args.table);
   const timeColumn = hasCreatedAt ? "created_at" : "updated_at";
 
@@ -107,12 +184,20 @@ function printHelp() {
   console.log(`
 Usage:
   npm run db:query -- --table interaction_log --assistant <assistant_id> --limit 20
+  npm run db:query -- --life --assistant <assistant_id> --limit 20
 
 Options:
-  --table      interaction_log|conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events
+  --table      interaction_log|conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events|autonomous_run_log|assistant_profile|proactive_message_log|local_outbox_messages|local_subscribers|push_token
   --assistant  filter assistant_id
+  --user       filter user_id (local_outbox_messages|local_subscribers|push_token)
+  --name       fuzzy filter character_name, then map to assistant_id (supports multi-match)
   --session    filter session_id
   --role       filter role (only interaction_log)
+  --memory-type  filter memory_type (only memory_items, e.g. life_event|work_event|user_turn|assistant_turn)
+  --message-type  filter message_type (only local_outbox_messages, e.g. character_proactive)
+  --run-type   filter run_type (only autonomous_run_log, e.g. life_tick|proactive_message_tick)
+  --status     filter status (autonomous_run_log|local_outbox_messages)
+  --life       shortcut: query memory_items and keep life_event/work_event
   --from       start time (unix ms or ISO), default 0
   --to         end time (unix ms or ISO), default now
   --limit      result size (1-200), default 20
@@ -121,6 +206,12 @@ Options:
 
 Examples:
   npm run db:query -- --table interaction_log --assistant d244... --limit 10
+  npm run db:query -- --table interaction_log --name 金琉 --limit 10
+  npm run db:query -- --table autonomous_run_log --assistant d244... --run-type life_tick --limit 10
+  npm run db:query -- --table local_outbox_messages --user default-user --status pending --limit 20
+  npm run db:query -- --table proactive_message_log --assistant d244... --limit 20
+  npm run db:query -- --life --assistant d244... --limit 10
+  npm run db:query -- --table memory_items --assistant d244... --memory-type life_event --limit 10
   npm run db:query -- --table memory_items --assistant d244... --from "2026-03-13T00:00:00+08:00" --json
   `);
 }

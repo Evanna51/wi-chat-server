@@ -1,10 +1,9 @@
 const config = require("../config");
 const { db } = require("../db");
 
-function tryAcquireSchedulerLock() {
+function tryAcquireSchedulerLock(lockName = config.legacyFcmProactiveLockName) {
   const now = Date.now();
   const leaseUntil = now + config.schedulerLockTtlMs;
-  const lockName = config.schedulerLockName;
   const leaderId = config.schedulerLeaderId;
 
   const tx = db.transaction(() => {

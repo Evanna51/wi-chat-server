@@ -3,12 +3,19 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
+function parseAssistantIds(raw = "") {
+  return String(raw)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 const config = {
   port: Number(process.env.PORT || 8787),
   host: process.env.HOST || "127.0.0.1",
   databasePath:
     process.env.DATABASE_PATH ||
-    path.join(__dirname, "..", "data", "character-push.db"),
+    path.join(__dirname, "..", "data", "character-behavior.db"),
   vectorIndexPath:
     process.env.VECTOR_INDEX_PATH ||
     path.join(__dirname, "..", "data", "vector-index.bin"),
@@ -34,8 +41,45 @@ const config = {
   indexerPollMs: Number(process.env.INDEXER_POLL_MS || 2000),
   schedulerLeaderId: process.env.SCHEDULER_LEADER_ID || "local-1",
   schedulerLockTtlMs: Number(process.env.SCHEDULER_LOCK_TTL_MS || 60000),
-  schedulerLockName: process.env.SCHEDULER_LOCK_NAME || "proactive_tick",
-  proactiveCron: process.env.PROACTIVE_CRON || "*/15 * * * *",
+  legacyFcmProactiveLockName:
+    process.env.LEGACY_FCM_PROACTIVE_LOCK_NAME || "legacy_fcm_proactive_tick",
+  legacyFcmProactiveCron: process.env.LEGACY_FCM_PROACTIVE_CRON || "off",
+  lifeMemoryCron: process.env.LIFE_MEMORY_CRON || "*/30 * * * *",
+  proactiveMessageCron: process.env.PROACTIVE_MESSAGE_CRON || "*/5 * * * *",
+  lifeMemoryLockName: process.env.LIFE_MEMORY_LOCK_NAME || "life_memory_tick",
+  proactiveMessageLockName:
+    process.env.PROACTIVE_MESSAGE_LOCK_NAME || "proactive_message_tick",
+  autonomousAssistantIds: parseAssistantIds(process.env.AUTONOMOUS_ASSISTANT_IDS || ""),
+  autonomousDryRun: (process.env.AUTONOMOUS_DRY_RUN || "1") === "1",
+  autonomousQuietHours: process.env.AUTONOMOUS_QUIET_HOURS || "0-7",
+  autonomousMinMessageIntervalMs: Number(
+    process.env.AUTONOMOUS_MIN_MESSAGE_INTERVAL_MS || 2 * 60 * 60 * 1000
+  ),
+  autonomousRecentUserSilenceMs: Number(
+    process.env.AUTONOMOUS_RECENT_USER_SILENCE_MS || 30 * 60 * 1000
+  ),
+  autonomousSkipAfterInteractionMs: Number(
+    process.env.AUTONOMOUS_SKIP_AFTER_INTERACTION_MS || 10 * 60 * 1000
+  ),
+  autonomousMessageCheckIntervalMs: Number(
+    process.env.AUTONOMOUS_MESSAGE_CHECK_INTERVAL_MS || 60 * 60 * 1000
+  ),
+  autonomousInactive7dThresholdMs: Number(
+    process.env.AUTONOMOUS_INACTIVE_7D_THRESHOLD_MS || 7 * 24 * 60 * 60 * 1000
+  ),
+  autonomousInactive30dThresholdMs: Number(
+    process.env.AUTONOMOUS_INACTIVE_30D_THRESHOLD_MS || 30 * 24 * 60 * 60 * 1000
+  ),
+  autonomousMessageIntervalAfter7dMs: Number(
+    process.env.AUTONOMOUS_MESSAGE_INTERVAL_AFTER_7D_MS || 24 * 60 * 60 * 1000
+  ),
+  autonomousMessageIntervalAfter30dMs: Number(
+    process.env.AUTONOMOUS_MESSAGE_INTERVAL_AFTER_30D_MS || 7 * 24 * 60 * 60 * 1000
+  ),
+  localPullMessageTtlMs: Number(
+    process.env.LOCAL_PULL_MESSAGE_TTL_MS || 7 * 24 * 60 * 60 * 1000
+  ),
+  localPullRepullGapMs: Number(process.env.LOCAL_PULL_REPULL_GAP_MS || 15 * 1000),
   fcmProjectId: process.env.FCM_PROJECT_ID || "",
   fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || "",
   appApiKey: process.env.APP_API_KEY || "dev-local-key",

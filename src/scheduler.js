@@ -1,14 +1,28 @@
 const cron = require("node-cron");
 const config = require("./config");
-const { db, upsertCharacterState } = require("./db");
+const {
+  db,
+  upsertCharacterState,
+  insertAutonomousRunLog,
+  listAutoLifeAssistantProfiles,
+  listProactiveAssistantProfiles,
+  updateAssistantProactiveCheckAt,
+  getLastAssistantInteractionAt,
+  listLocalSubscriberIds,
+  enqueueLocalOutboxMessage,
+} = require("./db");
 const { sendFcmMessage } = require("./services/fcm");
 const { retrieveMemory } = require("./services/memoryRetrievalService");
 const { generateWithMemory } = require("./services/langchainQwenService");
 const { tryAcquireSchedulerLock } = require("./services/schedulerLockService");
+const { generateLifeMemory } = require("./services/lifeMemoryService");
+const { shouldGenerateProactiveMessage } = require("./services/proactiveMessageDecisionService");
 const {
   getTimeBucket,
   shouldTriggerProactive,
   buildProactivePrompt,
+  parseQuietHours,
+  shouldAllowAutonomousMessage,
 } = require("./services/characterEngine");
 
 function pickMessage({ assistantName, timeBucket, familiarity }) {
@@ -17,8 +31,40 @@ function pickMessage({ assistantName, timeBucket, familiarity }) {
   return `${timeBucket}好，我是${assistantName}，${seed}。`;
 }
 
-async function runProactiveTick() {
-  if (!tryAcquireSchedulerLock()) {
+let didWarnAutoLifeCount = false;
+
+function getAssistantState(assistantId) {
+  return (
+    db.prepare("SELECT * FROM character_state WHERE assistant_id = ?").get(assistantId) || {
+      assistant_id: assistantId,
+      familiarity: 0,
+      last_user_message_at: null,
+      last_proactive_at: null,
+    }
+  );
+}
+
+function warnIfAutoLifeTooMany(profiles = []) {
+  if (profiles.length <= 10 || didWarnAutoLifeCount) return;
+  didWarnAutoLifeCount = true;
+  console.warn(`[scheduler] allowAutoLife assistants exceed 10: current=${profiles.length}`);
+}
+
+function resolveMessageCheckIntervalMs(lastInteractionAt, now = Date.now()) {
+  if (!lastInteractionAt) return config.autonomousMessageIntervalAfter30dMs;
+  const idleMs = now - lastInteractionAt;
+  if (idleMs > config.autonomousInactive30dThresholdMs) {
+    return config.autonomousMessageIntervalAfter30dMs;
+  }
+  if (idleMs > config.autonomousInactive7dThresholdMs) {
+    return config.autonomousMessageIntervalAfter7dMs;
+  }
+  return config.autonomousMessageCheckIntervalMs;
+}
+
+// Legacy FCM push path (temporarily unused, kept for rollback/debug only).
+async function runLegacyFCMProactiveTick() {
+  if (!tryAcquireSchedulerLock(config.legacyFcmProactiveLockName)) {
     console.log("[scheduler] skip tick (leader lock not acquired)");
     return;
   }
@@ -92,15 +138,374 @@ async function runProactiveTick() {
   }
 }
 
-function startScheduler() {
+function filterByConfiguredAssistantIds(profiles = [], overrideAssistantIds = null) {
+  const ids =
+    Array.isArray(overrideAssistantIds) && overrideAssistantIds.length
+      ? overrideAssistantIds
+      : config.autonomousAssistantIds;
+  if (!ids.length) return profiles;
+  const wanted = new Set(ids);
+  return profiles.filter((item) => wanted.has(item.assistant_id));
+}
+
+async function runLifeMemoryTick(options = {}) {
+  if (!options.ignoreLock && !tryAcquireSchedulerLock(config.lifeMemoryLockName)) {
+    console.log("[scheduler] skip life tick (leader lock not acquired)");
+    return { skippedByLock: true, checked: 0, persisted: 0, skipped: 0, error: 0 };
+  }
+
+  const now = Date.now();
+  const profiles = filterByConfiguredAssistantIds(
+    listAutoLifeAssistantProfiles(),
+    options.assistantIds
+  );
+  const stats = { skippedByLock: false, checked: 0, persisted: 0, skipped: 0, error: 0 };
+  warnIfAutoLifeTooMany(profiles);
+  for (const profile of profiles) {
+    stats.checked += 1;
+    const state = getAssistantState(profile.assistant_id);
+    const sessionId = profile.last_session_id || state.active_session_id || `persona:${profile.assistant_id}`;
+    try {
+      const result = await generateLifeMemory({
+        assistantId: profile.assistant_id,
+        sessionId,
+        state,
+        assistantProfile: {
+          characterName: profile.character_name,
+          characterBackground: profile.character_background,
+        },
+        now,
+      });
+      const status = !result.ok ? "error" : result.persisted ? "persisted" : "skipped";
+      insertAutonomousRunLog({
+        runType: "life_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPersist: result.decision.shouldPersist,
+        status,
+        reason: result.decision.why || result.error || "",
+        input: { now, assistantId: profile.assistant_id },
+        result: {
+          ok: result.ok,
+          persisted: result.persisted,
+          memoryId: result.memoryId || null,
+          decision: result.decision,
+        },
+        errorMessage: result.error || "",
+        createdAt: now,
+      });
+      if (!result.ok) stats.error += 1;
+      else if (result.persisted) stats.persisted += 1;
+      else stats.skipped += 1;
+    } catch (error) {
+      insertAutonomousRunLog({
+        runType: "life_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPersist: false,
+        status: "error",
+        reason: "life_tick_exception",
+        input: { now, assistantId: profile.assistant_id },
+        result: {},
+        errorMessage: error.message,
+        createdAt: now,
+      });
+      console.error("[scheduler] life tick failed:", error.message);
+      stats.error += 1;
+    }
+  }
+  return stats;
+}
+
+async function runProactiveTick(options = {}) {
+  if (!options.ignoreLock && !tryAcquireSchedulerLock(config.proactiveMessageLockName)) {
+    console.log("[scheduler] skip proactive message tick (leader lock not acquired)");
+    return {
+      skippedByLock: true,
+      checked: 0,
+      sent: 0,
+      dryRun: 0,
+      skipped: 0,
+      error: 0,
+      noSession: 0,
+    };
+  }
+
+  const now = Date.now();
+  const timeBucket = getTimeBucket(new Date(now));
+  const quietHours = parseQuietHours(config.autonomousQuietHours);
+  const profiles = filterByConfiguredAssistantIds(
+    listProactiveAssistantProfiles(),
+    options.assistantIds
+  );
+  const localUserIds = Array.from(
+    new Set(listLocalSubscriberIds().map((item) => item.user_id).filter(Boolean))
+  );
+  const stats = {
+    skippedByLock: false,
+    checked: 0,
+    sent: 0,
+    dryRun: 0,
+    skipped: 0,
+    error: 0,
+    noSession: 0,
+  };
+  const tokens = db.prepare("SELECT token FROM push_token").all();
+
+  for (const profile of profiles) {
+    stats.checked += 1;
+    const state = getAssistantState(profile.assistant_id);
+    const sessionId = profile.last_session_id || state.active_session_id;
+    if (!sessionId) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId: null,
+        shouldPushMessage: false,
+        status: "skipped",
+        reason: "missing_last_session",
+        input: { now, assistantId: profile.assistant_id },
+        result: {},
+        createdAt: now,
+      });
+      stats.noSession += 1;
+      continue;
+    }
+    const lastInteractionAt = getLastAssistantInteractionAt(profile.assistant_id) || 0;
+    const requiredCheckIntervalMs = resolveMessageCheckIntervalMs(lastInteractionAt, now);
+    const lastCheckAt = profile.last_proactive_check_at || 0;
+    if (now - lastCheckAt < requiredCheckIntervalMs) {
+      stats.skipped += 1;
+      continue;
+    }
+    if (lastInteractionAt > 0 && now - lastInteractionAt < config.autonomousSkipAfterInteractionMs) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPushMessage: false,
+        status: "skipped",
+        reason: "recent_interaction_within_skip_window",
+        input: {
+          now,
+          assistantId: profile.assistant_id,
+          lastInteractionAt,
+          requiredCheckIntervalMs,
+          skipWindowMs: config.autonomousSkipAfterInteractionMs,
+        },
+        result: {},
+        createdAt: now,
+      });
+      stats.skipped += 1;
+      continue;
+    }
+    if (
+      !shouldAllowAutonomousMessage({
+        state,
+        now,
+        minMessageIntervalMs: config.autonomousMinMessageIntervalMs,
+        recentUserSilenceMs: config.autonomousRecentUserSilenceMs,
+        quietHours,
+      })
+    ) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPushMessage: false,
+        status: "skipped",
+        reason: "gated_by_engine_rule",
+        input: { now, assistantId: profile.assistant_id },
+        result: {},
+        createdAt: now,
+      });
+      updateAssistantProactiveCheckAt(profile.assistant_id, now);
+      stats.skipped += 1;
+      continue;
+    }
+
+    const decisionResult = await shouldGenerateProactiveMessage({
+      assistantId: profile.assistant_id,
+      sessionId,
+      state,
+      assistantProfile: {
+        characterName: profile.character_name,
+        characterBackground: profile.character_background,
+      },
+      now,
+    });
+    updateAssistantProactiveCheckAt(profile.assistant_id, now);
+    const decision = decisionResult.decision;
+    if (!decision.shouldPushMessage) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPushMessage: false,
+        status: decisionResult.ok ? "skipped" : "error",
+        reason: decision.reason,
+        messageIntent: decision.messageIntent,
+        draftMessage: decision.draft,
+        input: { now, assistantId: profile.assistant_id },
+        result: { decision, ok: decisionResult.ok },
+        errorMessage: decisionResult.error || "",
+        createdAt: now,
+      });
+      if (decisionResult.ok) stats.skipped += 1;
+      else stats.error += 1;
+      continue;
+    }
+    if (!tokens.length) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPushMessage: true,
+        status: "skipped",
+        reason: "no_push_token",
+        messageIntent: decision.messageIntent,
+        draftMessage: decision.draft,
+        input: { now, assistantId: profile.assistant_id },
+        result: { decision },
+        createdAt: now,
+      });
+      stats.skipped += 1;
+      continue;
+    }
+
+    const assistantName = profile.character_name || profile.assistant_id;
+    let message =
+      (decision.draft || "").trim() ||
+      pickMessage({
+        assistantName,
+        timeBucket,
+        familiarity: state.familiarity || 0,
+      });
+    const llmPrompt = buildProactivePrompt({
+      assistantName,
+      familiarity: state.familiarity || 0,
+      timeBucket,
+    });
+
+    if (config.memoryRetrievalEnabled) {
+      try {
+        const memories = await retrieveMemory({
+          assistantId: profile.assistant_id,
+          sessionId,
+          query: `${timeBucket} ${decision.messageIntent} 主动发起`,
+          topK: config.retrievalTopK,
+        });
+        message = await generateWithMemory({
+          assistantName,
+          userPrompt: `${llmPrompt}\n意图: ${decision.messageIntent}\n草稿: ${decision.draft || "无"}`,
+          memories,
+          fallbackText: message,
+        });
+      } catch (error) {
+        console.error("[scheduler] proactive message retrieval/generation failed:", error.message);
+      }
+    }
+
+    if (config.autonomousDryRun) {
+      insertAutonomousRunLog({
+        runType: "proactive_message_tick",
+        assistantId: profile.assistant_id,
+        sessionId,
+        shouldPushMessage: true,
+        status: "dry_run",
+        reason: decision.reason,
+        messageIntent: decision.messageIntent,
+        draftMessage: message,
+        input: { now, assistantId: profile.assistant_id, dryRun: true },
+        result: { decision, finalMessage: message },
+        createdAt: now,
+      });
+      stats.dryRun += 1;
+      continue;
+    }
+
+    for (const userId of localUserIds) {
+      enqueueLocalOutboxMessage({
+        userId,
+        assistantId: profile.assistant_id,
+        sessionId,
+        messageType: "character_proactive",
+        title: `${assistantName} 发来新消息`,
+        body: message,
+        payload: {
+          type: "character_proactive",
+          assistantId: profile.assistant_id,
+          sessionId,
+          message,
+        },
+        availableAt: now,
+        expiresAt: now + config.localPullMessageTtlMs,
+      });
+    }
+
+    const insertResult = db
+      .prepare(
+        `INSERT INTO proactive_message_log
+         (assistant_id, session_id, time_bucket, message, pushed, created_at)
+         VALUES (?, ?, ?, ?, 0, ?)`
+      )
+      .run(profile.assistant_id, sessionId, timeBucket, `${message}\n\n[prompt] ${llmPrompt}`, now);
+    for (const item of tokens) {
+      try {
+        await sendFcmMessage(item.token, {
+          title: `${assistantName} 发来新消息`,
+          body: message,
+          data: {
+            type: "character_proactive",
+            assistantId: profile.assistant_id,
+            sessionId,
+            message,
+          },
+        });
+      } catch (error) {
+        console.error("FCM send failed:", error.message);
+      }
+    }
+
+    db.prepare("UPDATE proactive_message_log SET pushed = 1 WHERE id = ?").run(insertResult.lastInsertRowid);
+    upsertCharacterState(profile.assistant_id, { last_proactive_at: now });
+    insertAutonomousRunLog({
+      runType: "proactive_message_tick",
+      assistantId: profile.assistant_id,
+      sessionId,
+      shouldPushMessage: true,
+      status: "sent",
+      reason: decision.reason,
+      messageIntent: decision.messageIntent,
+      draftMessage: message,
+      input: { now, assistantId: profile.assistant_id },
+      result: { decision, proactiveLogId: insertResult.lastInsertRowid },
+      createdAt: now,
+    });
+    stats.sent += 1;
+  }
+  return stats;
+}
+
+function scheduleIfEnabled(cronExpr, label, runner) {
+  if (!cronExpr || String(cronExpr).toLowerCase() === "off") {
+    console.log(`[scheduler] ${label} disabled`);
+    return;
+  }
   cron.schedule(
-    config.proactiveCron,
+    cronExpr,
     () => {
-      runProactiveTick().catch((e) => console.error("proactive tick error:", e));
+      runner().catch((error) => console.error(`[scheduler] ${label} error:`, error));
     },
     { timezone: config.timezone }
   );
-  console.log(`[scheduler] proactive cron = ${config.proactiveCron} (${config.timezone})`);
+  console.log(`[scheduler] ${label} cron = ${cronExpr} (${config.timezone})`);
 }
 
-module.exports = { startScheduler, runProactiveTick };
+function startScheduler() {
+  scheduleIfEnabled(config.legacyFcmProactiveCron, "legacy-fcm-proactive", runLegacyFCMProactiveTick);
+  scheduleIfEnabled(config.lifeMemoryCron, "life-memory", runLifeMemoryTick);
+  scheduleIfEnabled(config.proactiveMessageCron, "proactive-message", runProactiveTick);
+}
+
+module.exports = { startScheduler, runLegacyFCMProactiveTick, runLifeMemoryTick, runProactiveTick };

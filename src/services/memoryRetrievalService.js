@@ -28,7 +28,7 @@ function graphBoost(assistantId, memoryId) {
 
 async function retrieveMemory({
   assistantId,
-  sessionId,
+  sessionId = "",
   query,
   topK = config.retrievalTopK,
   strategy = config.retrievalStrategy,
@@ -59,22 +59,23 @@ async function retrieveMemory({
       const recency = scoreRecency(row.created_at, now);
       const salience = row.salience || 0.5;
       const confidence = row.confidence || 0.5;
-      const roleBoost = row.session_id === sessionId ? 1 : 0.5;
+      // Keep assistant-level recall as primary behavior. Session only provides a tiny tie-break boost.
+      const sessionBoost = sessionId && row.session_id === sessionId ? 0.02 : 0;
       const edgeBoost = graphBoost(assistantId, row.id);
       const finalScore =
-        semantic * 0.45 +
+        semantic * 0.48 +
         recency * 0.2 +
         salience * 0.15 +
         confidence * 0.1 +
-        roleBoost * 0.05 +
-        edgeBoost * 0.05;
+        edgeBoost * 0.05 +
+        sessionBoost;
 
       return {
         id: row.id,
         content: row.content,
         sessionId: row.session_id,
         score: finalScore,
-        breakdown: { semantic, recency, salience, confidence, roleBoost, edgeBoost },
+        breakdown: { semantic, recency, salience, confidence, edgeBoost, sessionBoost },
       };
     })
     .sort((a, b) => b.score - a.score)

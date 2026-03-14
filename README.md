@@ -36,6 +36,22 @@ Service default address: `http://127.0.0.1:8787`
 - `npm run indexer:once` - run one indexer batch manually
 - `npm run eval:memory` - run retrieval eval seed dataset
 - `npm run db:query -- ...` - query SQLite quickly with filters
+- `npm run autonomous:run -- ...` - run autonomous cron tasks on demand
+
+### Run autonomous task quickly (without manual DB insert)
+
+Use this util to execute scheduler tasks directly (life/message/all), instead of manually inserting mock outbox rows.
+
+```bash
+# run both life + message tasks
+npm run autonomous:run -- --job all
+
+# run only proactive message for one role
+npm run autonomous:run -- --job message --assistant d244644b-e851-416a-ad98-b557fb991b99
+
+# run only life for multiple roles
+npm run autonomous:run -- --job life --assistants d244...,869e...
+```
 
 ### Quick DB query tool
 
@@ -47,11 +63,35 @@ Examples:
 # latest 10 chat turns by assistant
 npm run db:query -- --table interaction_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 10
 
+# latest 10 chat turns by character name (fuzzy)
+npm run db:query -- --table interaction_log --name 金琉 --limit 10
+
 # memory items in a time window (ISO or unix ms)
 npm run db:query -- --table memory_items --assistant d244644b-e851-416a-ad98-b557fb991b99 --from "2026-03-13T00:00:00+08:00" --to "2026-03-14T00:00:00+08:00"
 
 # JSON output for scripts
 npm run db:query -- --table outbox_events --assistant d244644b-e851-416a-ad98-b557fb991b99 --json
+```
+
+### Query examples: autonomous life/push + role
+
+Use these commands when you want to quickly inspect recent autonomous runs and role-level data (all via Quick DB query tool).
+
+```bash
+# 1) recent autonomous life runs (latest 20)
+npm run db:query -- --table autonomous_run_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type life_tick --limit 20
+
+# 2) recent autonomous proactive message runs (latest 20)
+npm run db:query -- --table autonomous_run_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type proactive_message_tick --limit 20
+
+# 3) recent local pull outbox records by user
+npm run db:query -- --table local_outbox_messages --user default-user --limit 20
+
+# 4) query one role profile by assistant_id
+npm run db:query -- --table assistant_profile --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 1
+
+# 5) recent life/work memories for one role
+npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 20
 ```
 
 ## Auth
@@ -76,7 +116,7 @@ npm run db:query -- --table outbox_events --assistant d244644b-e851-416a-ad98-b5
 - Body:
 ```json
 {
-  "userId": "user_1",
+  "userId": "default-user",
   "token": "fcm_token_xxx",
   "platform": "android"
 }
@@ -108,7 +148,63 @@ npm run db:query -- --table outbox_events --assistant d244644b-e851-416a-ad98-b5
 }
 ```
 
-### 4) Tool Endpoint: Memory Context (recommended for app integration)
+### 4) Register Local Inbox Subscriber (for pull mode)
+
+- `POST /api/register-local-inbox`
+- Body:
+```json
+{
+  "userId": "default-user",
+  "deviceId": "android-001"
+}
+```
+
+### 5) Pull Pending Local Messages
+
+- `GET /api/pull-messages?limit=20&since=0&userId=default-user`
+- `userId` supports 3 ways:
+  - query `userId`
+  - header `x-user-id`
+  - omit both only when exactly one local subscriber exists (auto fallback)
+- Response:
+```json
+{
+  "ok": true,
+  "userId": "default-user",
+  "since": 0,
+  "count": 1,
+  "messages": [
+    {
+      "id": "019595f0-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "assistantId": "assistant_demo",
+      "sessionId": "session_1",
+      "messageType": "character_proactive",
+      "title": "assistant_demo 发来新消息",
+      "body": "你好，想和你聊聊。",
+      "payload": { "type": "character_proactive" },
+      "createdAt": 1773409142807,
+      "availableAt": 1773409142807,
+      "expiresAt": 1774013942807,
+      "pullCount": 1
+    }
+  ],
+  "now": 1773409142900
+}
+```
+
+### 6) Ack Pulled Message
+
+- `POST /api/ack-message`
+- Body:
+```json
+{
+  "userId": "default-user",
+  "messageId": "019595f0-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "ackStatus": "received"
+}
+```
+
+### 7) Tool Endpoint: Memory Context (recommended for app integration)
 
 - `POST /api/tool/memory-context`
 - Purpose: AI decides whether to retrieve memory and returns memory hints for your chat model.
@@ -157,7 +253,7 @@ Notes:
 - `memoryGuidance` is returned only when `shouldRetrieve=true`.
 - `intent` values include: `fact_query`, `continuation`, `care_response`, `small_talk`, `task_only`.
 
-### 5) Chat With Memory (server-side generation)
+### 8) Chat With Memory (server-side generation)
 
 - `POST /api/chat-with-memory`
 - Purpose: server performs retrieval + generates answer with local Qwen.
@@ -170,17 +266,17 @@ Notes:
 }
 ```
 
-### 6) Admin: Metrics
+### 9) Admin: Metrics
 
 - `GET /admin/memory-metrics`
 - Purpose: outbox/retrieval counters
 
-### 7) Admin: Run Indexer Once
+### 10) Admin: Run Indexer Once
 
 - `POST /admin/run-indexer-once`
 - Purpose: manual outbox consume/index trigger
 
-### 8) Admin: Replay Dead Letter
+### 11) Admin: Replay Dead Letter
 
 - `POST /admin/replay-dead-letter`
 - Body:

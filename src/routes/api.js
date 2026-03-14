@@ -6,6 +6,12 @@ const {
   insertConversationTurn,
   insertMemoryItem,
   insertOutboxEvent,
+  upsertAssistantProfile,
+  countAllowAutoLifeAssistants,
+  updateAssistantLastSession,
+  upsertLocalSubscriber,
+  pullPendingMessagesForUser,
+  ackPulledMessage,
   withTransaction,
 } = require("../db");
 const { ingestInteraction } = require("../services/memoryIngestService");
@@ -19,6 +25,7 @@ const {
 const config = require("../config");
 
 const router = express.Router();
+let didWarnAutoLifeCount = false;
 
 const authMiddleware = (req, res, next) => {
   if (!config.requireApiKey) return next();
@@ -47,6 +54,145 @@ router.post("/register-push-token", authMiddleware, (req, res) => {
     "INSERT OR IGNORE INTO push_token (user_id, token, platform, created_at) VALUES (?, ?, ?, ?)"
   ).run(userId, token, platform, Date.now());
   res.json({ ok: true });
+});
+
+router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    characterName: z.string().min(1),
+    characterBackground: z.string().default(""),
+    allowAutoLife: z.boolean(),
+    allowProactiveMessage: z.boolean(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const {
+    assistantId,
+    characterName,
+    characterBackground,
+    allowAutoLife,
+    allowProactiveMessage,
+  } = parsed.data;
+
+  const row = upsertAssistantProfile({
+    assistantId,
+    characterName,
+    characterBackground,
+    allowAutoLife,
+    allowProactiveMessage,
+  });
+
+  const autoLifeCount = countAllowAutoLifeAssistants();
+  if (autoLifeCount > 10 && !didWarnAutoLifeCount) {
+    didWarnAutoLifeCount = true;
+    console.warn(
+      `[assistant-profile] allowAutoLife assistants exceed 10: current=${autoLifeCount}`
+    );
+  }
+
+  res.json({
+    ok: true,
+    profile: {
+      assistantId: row.assistant_id,
+      characterName: row.character_name,
+      characterBackground: row.character_background,
+      allowAutoLife: row.allow_auto_life === 1,
+      allowProactiveMessage: row.allow_proactive_message === 1,
+      lastSessionId: row.last_session_id || null,
+      lastProactiveCheckAt: row.last_proactive_check_at || null,
+      updatedAt: row.updated_at,
+    },
+    autoLifeCount,
+  });
+});
+
+router.post("/register-local-inbox", authMiddleware, (req, res) => {
+  const schema = z.object({
+    userId: z.string().min(1),
+    deviceId: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const row = upsertLocalSubscriber({
+    userId: parsed.data.userId,
+    deviceId: parsed.data.deviceId || "",
+  });
+  res.json({
+    ok: true,
+    subscriber: {
+      userId: row.user_id,
+      deviceId: row.device_id || "",
+      updatedAt: row.updated_at,
+    },
+  });
+});
+
+router.get("/pull-messages", authMiddleware, (req, res) => {
+  const schema = z.object({
+    userId: z.string().trim().min(1).optional(),
+    since: z.coerce.number().int().min(0).default(0),
+    limit: z.coerce.number().int().positive().max(100).default(20),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { since, limit } = parsed.data;
+  let userId = parsed.data.userId || String(req.header("x-user-id") || "").trim();
+  if (!userId) {
+    const subscribers = db
+      .prepare("SELECT user_id FROM local_subscribers ORDER BY updated_at DESC LIMIT 2")
+      .all();
+    if (subscribers.length === 1) {
+      userId = subscribers[0].user_id;
+    } else {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_user_id: provide query userId or header x-user-id",
+      });
+    }
+  }
+  const now = Date.now();
+  const rows = pullPendingMessagesForUser({
+    userId,
+    since,
+    limit,
+    now,
+    repullGapMs: config.localPullRepullGapMs,
+  });
+  res.json({
+    ok: true,
+    userId,
+    since,
+    count: rows.length,
+    messages: rows.map((item) => ({
+      id: item.id,
+      assistantId: item.assistant_id,
+      sessionId: item.session_id,
+      messageType: item.message_type,
+      title: item.title,
+      body: item.body,
+      payload: JSON.parse(item.payload_json || "{}"),
+      createdAt: item.created_at,
+      availableAt: item.available_at,
+      expiresAt: item.expires_at,
+      pullCount: item.pull_count + 1,
+    })),
+    now,
+  });
+});
+
+router.post("/ack-message", authMiddleware, (req, res) => {
+  const schema = z.object({
+    userId: z.string().min(1),
+    messageId: z.string().min(1),
+    ackStatus: z.string().default("received"),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const ok = ackPulledMessage(parsed.data);
+  if (!ok) {
+    return res.status(404).json({ ok: false, error: "message_not_found_or_user_mismatch" });
+  }
+  return res.json({ ok: true, messageId: parsed.data.messageId, ackStatus: parsed.data.ackStatus });
 });
 
 router.post("/report-interaction", authMiddleware, (req, res) => {
@@ -85,6 +231,7 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
       familiarity,
       last_user_message_at: role === "user" ? now : current.last_user_message_at || null,
     });
+    updateAssistantLastSession(assistantId, sessionId);
   });
   res.json({ ok: true, familiarity, totalTurns });
 });
