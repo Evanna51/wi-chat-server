@@ -1,5 +1,6 @@
 const express = require("express");
 const { z } = require("zod");
+const { db } = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
 const config = require("../config");
 
@@ -47,6 +48,55 @@ router.post("/push", authMiddleware, (req, res) => {
       skipped: result.skipped,
       rejected: result.rejected,
       details: result.details,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+const stateSchema = z.object({
+  assistantId: z.string().trim().min(1).optional(),
+  deviceId: z.string().trim().min(1).optional(),
+});
+
+router.get("/state", authMiddleware, (req, res) => {
+  const parsed = stateSchema.safeParse(req.query || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { assistantId, deviceId } = parsed.data;
+  const now = Date.now();
+  try {
+    const totalRow = db
+      .prepare("SELECT COUNT(1) AS c FROM conversation_turns")
+      .get();
+    let assistantTurnCount = null;
+    let lastTurnAt = null;
+    if (assistantId) {
+      const ar = db
+        .prepare("SELECT COUNT(1) AS c FROM conversation_turns WHERE assistant_id = ?")
+        .get(assistantId);
+      assistantTurnCount = ar?.c || 0;
+      const lastRow = db
+        .prepare(
+          "SELECT MAX(created_at) AS m FROM conversation_turns WHERE assistant_id = ?"
+        )
+        .get(assistantId);
+      lastTurnAt = lastRow?.m || null;
+    } else {
+      const lastRow = db
+        .prepare("SELECT MAX(created_at) AS m FROM conversation_turns")
+        .get();
+      lastTurnAt = lastRow?.m || null;
+    }
+    return res.json({
+      ok: true,
+      now,
+      assistantId: assistantId || null,
+      deviceId: deviceId || null,
+      assistantTurnCount,
+      totalTurnCount: totalRow?.c || 0,
+      lastTurnAt,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });

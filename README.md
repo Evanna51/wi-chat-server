@@ -425,7 +425,28 @@ curl -sS -X POST "http://127.0.0.1:8787/api/sync/push" \
   --data "$PAYLOAD"
 ```
 
-#### 10.2 sync-replay 脚本
+#### 10.2 GET /api/sync/state
+
+```
+GET /api/sync/state?assistantId=<id>&deviceId=<id>
+```
+
+Response：
+```json
+{
+  "ok": true,
+  "now": 1777200000000,
+  "assistantId": "assistant_demo",
+  "deviceId": "android-001",
+  "assistantTurnCount": 1234,
+  "totalTurnCount": 5678,
+  "lastTurnAt": 1777199000000
+}
+```
+
+`assistantId` 不传时 `assistantTurnCount = null`，`lastTurnAt` 退化为全表 MAX。`deviceId` 当前不影响结果，仅作 phone 端契约预留。
+
+#### 10.3 sync-replay 脚本
 
 ```bash
 # 1) 生成 50 条本地缓存
