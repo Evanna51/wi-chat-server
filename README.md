@@ -283,17 +283,49 @@ Notes:
 }
 ```
 
-### 9) Admin: Metrics
+### 9) Search (FTS5 over conversation + memory)
+
+- `POST /api/search`
+- Purpose: full-text search over `conversation_turns` and `memory_items` (BM25-ranked when query length >= 3; falls back to `LIKE` for shorter queries).
+- Body:
+```json
+{
+  "assistantId": "assistant_demo",
+  "q": "拿铁",
+  "scope": "both",
+  "limit": 20
+}
+```
+- `scope` is one of `conversation`, `memory`, `both` (default).
+- Response:
+```json
+{
+  "ok": true,
+  "hits": [
+    {
+      "kind": "conversation",
+      "id": "019dc...",
+      "content": "我喜欢喝拿铁，最近在学羽毛球",
+      "score": -6.51,
+      "role": "user",
+      "sessionId": "s1",
+      "createdAt": 1777204051655
+    }
+  ]
+}
+```
+
+### 10) Admin: Metrics
 
 - `GET /admin/memory-metrics`
 - Purpose: outbox/retrieval counters
 
-### 10) Admin: Run Indexer Once
+### 11) Admin: Run Indexer Once
 
 - `POST /admin/run-indexer-once`
 - Purpose: manual outbox consume/index trigger
 
-### 11) Admin: Replay Dead Letter
+### 12) Admin: Replay Dead Letter
 
 - `POST /admin/replay-dead-letter`
 - Body:

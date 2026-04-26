@@ -13,6 +13,8 @@ const {
   pullPendingMessagesForUser,
   ackPulledMessage,
   withTransaction,
+  searchConversation,
+  searchMemory,
 } = require("../db");
 const { ingestInteraction } = require("../services/memoryIngestService");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
@@ -328,6 +330,54 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
         score: item.score,
       })),
     });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+router.post("/search", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    q: z.string().min(1),
+    scope: z.enum(["conversation", "memory", "both"]).default("both"),
+    limit: z.coerce.number().int().positive().max(50).default(20),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, q, scope, limit } = parsed.data;
+
+  try {
+    const hits = [];
+    if (scope === "conversation" || scope === "both") {
+      const rows = searchConversation({ assistantId, q, limit });
+      for (const row of rows) {
+        hits.push({
+          kind: "conversation",
+          id: row.id,
+          content: row.content,
+          score: row.score,
+          role: row.role,
+          sessionId: row.session_id,
+          createdAt: row.created_at,
+        });
+      }
+    }
+    if (scope === "memory" || scope === "both") {
+      const rows = searchMemory({ assistantId, q, limit });
+      for (const row of rows) {
+        hits.push({
+          kind: "memory",
+          id: row.id,
+          content: row.content,
+          score: row.score,
+          memoryType: row.memory_type,
+          createdAt: row.created_at,
+        });
+      }
+    }
+    hits.sort((a, b) => a.score - b.score);
+    if (scope === "both" && hits.length > limit) hits.length = limit;
+    return res.json({ ok: true, hits });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

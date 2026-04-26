@@ -403,6 +403,72 @@ function ackPulledMessage({ userId, messageId, ackStatus = "received" }) {
   return result.changes > 0;
 }
 
+function escapeFtsQuery(q) {
+  const trimmed = String(q).trim();
+  if (!trimmed) return "";
+  return `"${trimmed.replace(/"/g, '""')}"`;
+}
+
+function searchConversation({ assistantId, q, limit = 20 }) {
+  if (!q || !assistantId) return [];
+  const normalized = String(q).trim();
+  if (normalized.length === 0) return [];
+  if (normalized.length < 3) {
+    const like = `%${normalized.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    return db
+      .prepare(
+        `SELECT id, role, content, session_id, created_at,
+                0 AS score
+         FROM conversation_turns
+         WHERE assistant_id = ? AND content LIKE ? ESCAPE '\\'
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(assistantId, like, limit);
+  }
+  return db
+    .prepare(
+      `SELECT t.id, t.role, t.content, t.session_id, t.created_at,
+              bm25(conversation_turns_fts) AS score
+       FROM conversation_turns_fts f
+       JOIN conversation_turns t ON t.rowid = f.rowid
+       WHERE f.content MATCH ? AND f.assistant_id = ?
+       ORDER BY score ASC
+       LIMIT ?`
+    )
+    .all(escapeFtsQuery(normalized), assistantId, limit);
+}
+
+function searchMemory({ assistantId, q, limit = 20 }) {
+  if (!q || !assistantId) return [];
+  const normalized = String(q).trim();
+  if (normalized.length === 0) return [];
+  if (normalized.length < 3) {
+    const like = `%${normalized.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    return db
+      .prepare(
+        `SELECT id, memory_type, content, created_at,
+                0 AS score
+         FROM memory_items
+         WHERE assistant_id = ? AND content LIKE ? ESCAPE '\\'
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(assistantId, like, limit);
+  }
+  return db
+    .prepare(
+      `SELECT m.id, m.memory_type, m.content, m.created_at,
+              bm25(memory_items_fts) AS score
+       FROM memory_items_fts f
+       JOIN memory_items m ON m.rowid = f.rowid
+       WHERE f.content MATCH ? AND f.assistant_id = ?
+       ORDER BY score ASC
+       LIMIT ?`
+    )
+    .all(escapeFtsQuery(normalized), assistantId, limit);
+}
+
 module.exports = {
   db,
   upsertCharacterState,
@@ -427,4 +493,6 @@ module.exports = {
   enqueueLocalOutboxMessage,
   pullPendingMessagesForUser,
   ackPulledMessage,
+  searchConversation,
+  searchMemory,
 };

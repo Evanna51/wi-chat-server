@@ -6,6 +6,9 @@ data/*.db-shm
 data/*.db-wal
 data/vector-index.bin
 data/vector-meta.json
+data/archive/
+data/backup/
+exports/
 
 npm-debug.log*
 
