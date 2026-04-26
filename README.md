@@ -111,6 +111,20 @@ npm run db:query -- --table assistant_profile --assistant d244644b-e851-416a-ad9
 npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 20
 ```
 
+## Visualizer & Management UI
+
+服务自带一个轻量的可视化与管理面板，无需额外部署：
+
+- 启动服务后访问 `http://<HOST>:<PORT>/`（默认 `http://127.0.0.1:8787/`），即可看到角色列表、概况指标、调度配置等。
+- 单角色页支持：概览 / 对话 / 记忆 / 行为日志 / Facts / 管理 共 6 个 Tab，并提供全文搜索（FTS5）入口。
+- 后端路由统一挂在 `GET|PATCH|POST /api/browse/*`，与已有 `/api` 一致受 `x-api-key` 保护。
+- 浏览器侧通过 `localStorage.apiKey` 读取 API key：开发态默认值是 `dev-local-key`，要改用真实 key 时在浏览器控制台执行 `localStorage.setItem('apiKey', '<your-key>')` 后刷新。当 `REQUIRE_API_KEY=0` 时（dev 模式默认）服务端跳过校验。
+- 管理页（角色 → 管理 Tab）可：
+  - 切换 `allowAutoLife` / `allowProactiveMessage` 开关（PATCH `/api/browse/assistants/:id/flags`）；
+  - 手动触发 life / proactive-message 任务（POST `/api/browse/assistants/:id/run`）。**dryRun 默认勾选**：勾选时不会写入 `memory_items`、不会推送 FCM、不会写 `local_outbox_messages`，只会写一条 `status=dry_run` 的 `character_behavior_journal`；取消勾选则等价于 cron 真实运行，会真实持久化记忆并按 push 配置推送。
+
+数据全部来自本地 SQLite，没有额外缓存层，刷新即所见。
+
 ## Auth
 
 - All `POST` admin/api endpoints require:

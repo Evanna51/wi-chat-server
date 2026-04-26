@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Character Visualizer</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="container app-header">
+    <nav>
+      <ul>
+        <li><strong><a href="#/" class="brand">Character Visualizer</a></strong></li>
+      </ul>
+      <ul>
+        <li><a href="#/">主页</a></li>
+        <li><a href="#/search">搜索</a></li>
+        <li><span id="health-indicator" class="health-dot health-dot--unknown" title="health"></span></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main class="container" id="app-root">
+    <article aria-busy="true">加载中…</article>
+  </main>
+
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
