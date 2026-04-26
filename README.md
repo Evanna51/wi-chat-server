@@ -457,6 +457,9 @@ npm run sync:replay -- --mode push --in /tmp/buf.json
 
 # 3) 一键端到端（generate + push 两次验证幂等）
 npm run sync:replay -- --mode test --assistant smoke-sync --count 20
+
+# 4) Phase 4 e2e（push + state + memory_items 校验）
+npm run sync:replay -- --mode e2e --assistant smoke-sync --count 30
 ```
 
 通用参数：`--api http://...` `--api-key dev-local-key` `--batch-size 100` `--device-id ...`。
