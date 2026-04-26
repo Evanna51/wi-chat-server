@@ -14,32 +14,63 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+function vectorToBlob(vec) {
+  const float32 = new Float32Array(vec);
+  return Buffer.from(float32.buffer, float32.byteOffset, float32.byteLength);
+}
+
+function blobToVector(buf) {
+  if (!buf || !buf.byteLength) return null;
+  const float32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+  return Array.from(float32);
+}
+
+function decodeRowVector(row) {
+  if (row.vector_blob) {
+    const vec = blobToVector(row.vector_blob);
+    if (vec) return vec;
+  }
+  if (row.vector_json) {
+    try {
+      return JSON.parse(row.vector_json);
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
+}
+
 function createSqliteVectorStore(db) {
   return {
     name: "sqlite",
     async upsert({ memoryId, assistantId, vector }) {
+      const blob = vectorToBlob(vector);
       db.prepare(
-        `INSERT INTO memory_vectors (memory_item_id, assistant_id, vector_json, vector_dim, updated_at)
+        `INSERT INTO memory_vectors (memory_item_id, assistant_id, vector_blob, vector_dim, updated_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(memory_item_id) DO UPDATE SET
             assistant_id=excluded.assistant_id,
-            vector_json=excluded.vector_json,
+            vector_blob=excluded.vector_blob,
             vector_dim=excluded.vector_dim,
             updated_at=excluded.updated_at`
-      ).run(memoryId, assistantId, JSON.stringify(vector), vector.length, Date.now());
+      ).run(memoryId, assistantId, blob, vector.length, Date.now());
     },
     async search({ assistantId, queryVector, topK = config.vectorK }) {
       const rows = db
-        .prepare("SELECT memory_item_id, vector_json FROM memory_vectors WHERE assistant_id = ?")
+        .prepare(
+          "SELECT memory_item_id, vector_blob, vector_json FROM memory_vectors WHERE assistant_id = ?"
+        )
         .all(assistantId);
       const scored = rows
         .map((row) => {
-          const vector = JSON.parse(row.vector_json);
+          const vector = decodeRowVector(row);
+          if (!vector) return null;
           return {
             memoryId: row.memory_item_id,
             score: cosineSimilarity(queryVector, vector),
           };
         })
+        .filter(Boolean)
         .sort((a, b) => b.score - a.score)
         .slice(0, topK);
       return scored;
