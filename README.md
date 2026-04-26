@@ -4,7 +4,7 @@ Backend service for proactive character messages + persistent memory retrieval (
 
 ## Architecture Overview
 
-- All chat turns are persisted in SQLite (`interaction_log`, `conversation_turns`).
+- All chat turns are persisted in SQLite (`conversation_turns`).
 - Memory units are extracted into `memory_items` and indexed asynchronously via outbox worker.
 - Vector retrieval uses pluggable provider:
   - default: `sqlite` fallback
@@ -78,10 +78,10 @@ Examples:
 
 ```bash
 # latest 10 chat turns by assistant
-npm run db:query -- --table interaction_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 10
+npm run db:query -- --table conversation_turns --assistant d244644b-e851-416a-ad98-b557fb991b99 --limit 10
 
 # latest 10 chat turns by character name (fuzzy)
-npm run db:query -- --table interaction_log --name 金琉 --limit 10
+npm run db:query -- --table conversation_turns --name 金琉 --limit 10
 
 # memory items in a time window (ISO or unix ms)
 npm run db:query -- --table memory_items --assistant d244644b-e851-416a-ad98-b557fb991b99 --from "2026-03-13T00:00:00+08:00" --to "2026-03-14T00:00:00+08:00"
@@ -96,10 +96,10 @@ Use these commands when you want to quickly inspect recent autonomous runs and r
 
 ```bash
 # 1) recent autonomous life runs (latest 20)
-npm run db:query -- --table autonomous_run_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type life_tick --limit 20
+npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type life_tick --limit 20
 
 # 2) recent autonomous proactive message runs (latest 20)
-npm run db:query -- --table autonomous_run_log --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type proactive_message_tick --limit 20
+npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type proactive_message_tick --limit 20
 
 # 3) recent local pull outbox records by user
 npm run db:query -- --table local_outbox_messages --user default-user --limit 20

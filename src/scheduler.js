@@ -3,7 +3,7 @@ const config = require("./config");
 const {
   db,
   upsertCharacterState,
-  insertAutonomousRunLog,
+  insertBehaviorJournalEntry,
   listAutoLifeAssistantProfiles,
   listProactiveAssistantProfiles,
   updateAssistantProactiveCheckAt,
@@ -16,6 +16,7 @@ const { retrieveMemory } = require("./services/memoryRetrievalService");
 const { generateWithMemory } = require("./services/langchainQwenService");
 const { tryAcquireSchedulerLock } = require("./services/schedulerLockService");
 const { generateLifeMemory } = require("./services/lifeMemoryService");
+const { runRetentionSweepOnce } = require("./workers/retentionSweeper");
 const { shouldGenerateProactiveMessage } = require("./services/proactiveMessageDecisionService");
 const {
   getTimeBucket,
@@ -195,7 +196,7 @@ async function runLifeMemoryTick(options = {}) {
       });
       stopIfCancelled(shouldStop);
       const status = !result.ok ? "error" : result.persisted ? "persisted" : "skipped";
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "life_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -219,7 +220,7 @@ async function runLifeMemoryTick(options = {}) {
       if (error && error.code === "SCHEDULER_RUN_PREEMPTED") {
         throw error;
       }
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "life_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -280,7 +281,7 @@ async function runProactiveTick(options = {}) {
     const state = getAssistantState(profile.assistant_id);
     const sessionId = profile.last_session_id || state.active_session_id;
     if (!sessionId) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId: null,
@@ -302,7 +303,7 @@ async function runProactiveTick(options = {}) {
       continue;
     }
     if (lastInteractionAt > 0 && now - lastInteractionAt < config.autonomousSkipAfterInteractionMs) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -331,7 +332,7 @@ async function runProactiveTick(options = {}) {
         quietHours,
       })
     ) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -362,7 +363,7 @@ async function runProactiveTick(options = {}) {
     updateAssistantProactiveCheckAt(profile.assistant_id, now);
     const decision = decisionResult.decision;
     if (!decision.shouldPushMessage) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -381,7 +382,7 @@ async function runProactiveTick(options = {}) {
       continue;
     }
     if (!config.autonomousPushEnabled) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -398,7 +399,7 @@ async function runProactiveTick(options = {}) {
       continue;
     }
     if (!tokens.length) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -452,7 +453,7 @@ async function runProactiveTick(options = {}) {
     }
 
     if (config.autonomousDryRun) {
-      insertAutonomousRunLog({
+      insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,
         sessionId,
@@ -518,7 +519,7 @@ async function runProactiveTick(options = {}) {
 
     db.prepare("UPDATE proactive_message_log SET pushed = 1 WHERE id = ?").run(insertResult.lastInsertRowid);
     upsertCharacterState(profile.assistant_id, { last_proactive_at: now });
-    insertAutonomousRunLog({
+    insertBehaviorJournalEntry({
       runType: "proactive_message_tick",
       assistantId: profile.assistant_id,
       sessionId,
@@ -561,10 +562,32 @@ function scheduleIfEnabled(cronExpr, label, runner) {
   infoLog(`[scheduler] ${label} cron = ${cronExpr} (${config.timezone})`);
 }
 
+async function runRetentionSweepTick() {
+  if (!tryAcquireSchedulerLock(config.retentionSweepLockName)) {
+    infoLog("[scheduler] skip retention sweep tick (leader lock not acquired)");
+    return { skippedByLock: true };
+  }
+  try {
+    const result = await runRetentionSweepOnce();
+    infoLog("[scheduler] retention sweep done:", JSON.stringify(result));
+    return result;
+  } catch (error) {
+    console.error("[scheduler] retention sweep failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 function startScheduler() {
   scheduleIfEnabled(config.legacyFcmProactiveCron, "legacy-fcm-proactive", runLegacyFCMProactiveTick);
   scheduleIfEnabled(config.lifeMemoryCron, "life-memory", runLifeMemoryTick);
   scheduleIfEnabled(config.proactiveMessageCron, "proactive-message", runProactiveTick);
+  scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick);
 }
 
-module.exports = { startScheduler, runLegacyFCMProactiveTick, runLifeMemoryTick, runProactiveTick };
+module.exports = {
+  startScheduler,
+  runLegacyFCMProactiveTick,
+  runLifeMemoryTick,
+  runProactiveTick,
+  runRetentionSweepTick,
+};

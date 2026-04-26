@@ -37,7 +37,7 @@ router.get("/autonomous-runs", (req, res) => {
   const rows = db
     .prepare(
       `SELECT id, run_type, assistant_id, session_id, should_persist, should_initiate AS should_push_message, status, reason, message_intent, draft_message, error_message, created_at
-       FROM autonomous_run_log
+       FROM character_behavior_journal
        ORDER BY created_at DESC
        LIMIT ?`
     )

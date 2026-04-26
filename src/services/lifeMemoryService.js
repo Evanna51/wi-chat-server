@@ -351,15 +351,7 @@ async function generateLifeMemory({
     aggregateType: "memory_item",
     aggregateId: memoryId,
     dedupeKey: `memory-index:${memoryId}`,
-    payload: {
-      memoryId,
-      assistantId,
-      sessionId,
-      role: "assistant",
-      content: summary,
-      turnId: sourceTurnId,
-      createdAt: now,
-    },
+    payload: { memoryId },
   });
   return {
     ok: true,

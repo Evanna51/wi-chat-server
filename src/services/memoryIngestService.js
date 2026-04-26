@@ -84,7 +84,7 @@ function ingestInteraction({
     aggregateType: "memory_item",
     aggregateId: memoryId,
     dedupeKey,
-    payload: { memoryId, assistantId, sessionId, role, content, turnId, createdAt: now },
+    payload: { memoryId },
   });
 
   return { turnId, memoryId, factCount: facts.length };

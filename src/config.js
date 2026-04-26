@@ -83,6 +83,13 @@ const config = {
     process.env.LOCAL_PULL_MESSAGE_TTL_MS || 7 * 24 * 60 * 60 * 1000
   ),
   localPullRepullGapMs: Number(process.env.LOCAL_PULL_REPULL_GAP_MS || 15 * 1000),
+  retentionSweepCron: process.env.RETENTION_SWEEP_CRON || "30 3 * * *",
+  retentionSweepLockName:
+    process.env.RETENTION_SWEEP_LOCK_NAME || "retention_sweep_tick",
+  retentionRetrievalLogDays: Number(process.env.RETENTION_RETRIEVAL_LOG_DAYS || 30),
+  retentionOutboxConsumedDays: Number(process.env.RETENTION_OUTBOX_CONSUMED_DAYS || 7),
+  retentionLocalAckedDays: Number(process.env.RETENTION_LOCAL_ACKED_DAYS || 30),
+  behaviorJournalPruneDays: Number(process.env.BEHAVIOR_JOURNAL_PRUNE_DAYS || 90),
   fcmProjectId: process.env.FCM_PROJECT_ID || "",
   fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || "",
   appApiKey: process.env.APP_API_KEY || "dev-local-key",

@@ -4,7 +4,7 @@ const config = require("../src/config");
 
 function parseArgs(argv) {
   const args = {
-    table: "interaction_log",
+    table: "conversation_turns",
     assistantId: "",
     userId: "",
     name: "",
@@ -54,13 +54,12 @@ function toTs(input, fallback) {
 
 function buildQuery(args) {
   const allowedTables = new Set([
-    "interaction_log",
     "conversation_turns",
     "memory_items",
     "memory_facts",
     "memory_retrieval_log",
     "outbox_events",
-    "autonomous_run_log",
+    "character_behavior_journal",
     "assistant_profile",
     "proactive_message_log",
     "local_outbox_messages",
@@ -77,13 +76,12 @@ function buildQuery(args) {
   const where = [];
   const values = [];
   const hasAssistantId = new Set([
-    "interaction_log",
     "conversation_turns",
     "memory_items",
     "memory_facts",
     "memory_retrieval_log",
     "memory_vectors",
-    "autonomous_run_log",
+    "character_behavior_journal",
     "assistant_profile",
     "proactive_message_log",
     "local_outbox_messages",
@@ -92,12 +90,11 @@ function buildQuery(args) {
     args.table
   );
   const hasSessionId = new Set([
-    "interaction_log",
     "conversation_turns",
     "memory_items",
     "memory_facts",
     "memory_retrieval_log",
-    "autonomous_run_log",
+    "character_behavior_journal",
     "proactive_message_log",
     "local_outbox_messages",
   ]).has(args.table);
@@ -131,15 +128,18 @@ function buildQuery(args) {
     where.push("session_id = ?");
     values.push(args.sessionId);
   }
-  if (args.role && args.table === "interaction_log") {
+  if (args.role && args.table === "conversation_turns") {
     where.push("role = ?");
     values.push(args.role);
   }
-  if (args.runType && args.table === "autonomous_run_log") {
+  if (args.runType && args.table === "character_behavior_journal") {
     where.push("run_type = ?");
     values.push(args.runType);
   }
-  if (args.status && (args.table === "autonomous_run_log" || args.table === "local_outbox_messages")) {
+  if (
+    args.status &&
+    (args.table === "character_behavior_journal" || args.table === "local_outbox_messages")
+  ) {
     where.push("status = ?");
     values.push(args.status);
   }
@@ -155,13 +155,12 @@ function buildQuery(args) {
   }
 
   const hasCreatedAt = new Set([
-    "interaction_log",
     "conversation_turns",
     "memory_items",
     "memory_facts",
     "memory_retrieval_log",
     "outbox_events",
-    "autonomous_run_log",
+    "character_behavior_journal",
     "proactive_message_log",
     "local_outbox_messages",
     "push_token",
@@ -183,20 +182,20 @@ function buildQuery(args) {
 function printHelp() {
   console.log(`
 Usage:
-  npm run db:query -- --table interaction_log --assistant <assistant_id> --limit 20
+  npm run db:query -- --table conversation_turns --assistant <assistant_id> --limit 20
   npm run db:query -- --life --assistant <assistant_id> --limit 20
 
 Options:
-  --table      interaction_log|conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events|autonomous_run_log|assistant_profile|proactive_message_log|local_outbox_messages|local_subscribers|push_token
+  --table      conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events|character_behavior_journal|assistant_profile|proactive_message_log|local_outbox_messages|local_subscribers|push_token
   --assistant  filter assistant_id
   --user       filter user_id (local_outbox_messages|local_subscribers|push_token)
   --name       fuzzy filter character_name, then map to assistant_id (supports multi-match)
   --session    filter session_id
-  --role       filter role (only interaction_log)
+  --role       filter role (only conversation_turns)
   --memory-type  filter memory_type (only memory_items, e.g. life_event|work_event|user_turn|assistant_turn)
   --message-type  filter message_type (only local_outbox_messages, e.g. character_proactive)
-  --run-type   filter run_type (only autonomous_run_log, e.g. life_tick|proactive_message_tick)
-  --status     filter status (autonomous_run_log|local_outbox_messages)
+  --run-type   filter run_type (only character_behavior_journal, e.g. life_tick|proactive_message_tick)
+  --status     filter status (character_behavior_journal|local_outbox_messages)
   --life       shortcut: query memory_items and keep life_event/work_event
   --from       start time (unix ms or ISO), default 0
   --to         end time (unix ms or ISO), default now
@@ -205,9 +204,9 @@ Options:
   --help       show help
 
 Examples:
-  npm run db:query -- --table interaction_log --assistant d244... --limit 10
-  npm run db:query -- --table interaction_log --name 金琉 --limit 10
-  npm run db:query -- --table autonomous_run_log --assistant d244... --run-type life_tick --limit 10
+  npm run db:query -- --table conversation_turns --assistant d244... --limit 10
+  npm run db:query -- --table conversation_turns --name 金琉 --limit 10
+  npm run db:query -- --table character_behavior_journal --assistant d244... --run-type life_tick --limit 10
   npm run db:query -- --table local_outbox_messages --user default-user --status pending --limit 20
   npm run db:query -- --table proactive_message_log --assistant d244... --limit 20
   npm run db:query -- --life --assistant d244... --limit 10

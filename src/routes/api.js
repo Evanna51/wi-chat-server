@@ -211,9 +211,6 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
   const familiarity = Math.min(100, Math.floor(totalTurns / 3));
 
   withTransaction(() => {
-    db.prepare(
-      "INSERT INTO interaction_log (assistant_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(assistantId, sessionId, role, content, now);
     ingestInteraction({
       db,
       assistantId,

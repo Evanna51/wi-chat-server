@@ -64,7 +64,9 @@ async function processEvent(event) {
     return;
   }
   const memory = db
-    .prepare("SELECT id, assistant_id, content FROM memory_items WHERE id = ?")
+    .prepare(
+      "SELECT id, assistant_id, session_id, content, created_at FROM memory_items WHERE id = ?"
+    )
     .get(payload.memoryId);
   if (!memory) {
     markDone(event.id);

@@ -11,7 +11,8 @@
     "indexer:once": "node -e \"require('./src/workers/memoryIndexer').runIndexerOnce().then((n)=>{console.log('processed',n);process.exit(0);}).catch((e)=>{console.error(e);process.exit(1);})\"",
     "eval:memory": "node scripts/eval-memory.js",
     "db:query": "node scripts/db-query.js",
-    "autonomous:run": "node scripts/run-autonomous-task.js"
+    "autonomous:run": "node scripts/run-autonomous-task.js",
+    "retention:run": "node -e \"require('./src/workers/retentionSweeper').runRetentionSweepOnce().then(r=>console.log(JSON.stringify(r,null,2)))\""
   },
   "engines": {
     "node": ">=22.0.0"
