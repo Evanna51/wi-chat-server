@@ -11,6 +11,11 @@ fs.mkdirSync(dbDir, { recursive: true });
 const db = new Database(config.databasePath);
 db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
+db.pragma("foreign_keys = ON");
+db.pragma("synchronous = NORMAL");
+db.pragma("mmap_size = 268435456");
+db.pragma("cache_size = -65536");
+db.pragma("wal_autocheckpoint = 1000");
 runMigrations(db, path.join(__dirname, "db", "migrations"));
 
 function upsertCharacterState(assistantId, patch = {}) {
@@ -127,7 +132,7 @@ function withTransaction(fn) {
   return db.transaction(fn)();
 }
 
-function insertAutonomousRunLog({
+function insertBehaviorJournalEntry({
   runType,
   assistantId,
   sessionId = null,
@@ -144,7 +149,7 @@ function insertAutonomousRunLog({
 }) {
   const id = uuidv7();
   db.prepare(
-    `INSERT INTO autonomous_run_log
+    `INSERT INTO character_behavior_journal
       (id, run_type, assistant_id, session_id, should_persist, should_initiate, status, reason, message_intent, draft_message, input_json, result_json, error_message, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
@@ -183,7 +188,7 @@ function getRecentAssistantInteractions({ assistantId, limit = 10 }) {
   return db
     .prepare(
       `SELECT role, content, session_id, created_at
-       FROM interaction_log
+       FROM conversation_turns
        WHERE assistant_id = ?
        ORDER BY created_at DESC
        LIMIT ?`
@@ -195,7 +200,7 @@ function getLastAssistantInteractionAt(assistantId) {
   const row = db
     .prepare(
       `SELECT created_at
-       FROM interaction_log
+       FROM conversation_turns
        WHERE assistant_id = ?
        ORDER BY created_at DESC
        LIMIT 1`
@@ -405,7 +410,7 @@ module.exports = {
   insertMemoryItem,
   insertOutboxEvent,
   withTransaction,
-  insertAutonomousRunLog,
+  insertBehaviorJournalEntry,
   getRecentConversationTurns,
   getRecentAssistantInteractions,
   getLastAssistantInteractionAt,
