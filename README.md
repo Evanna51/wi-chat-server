@@ -11,28 +11,45 @@ Backend service for proactive character messages + persistent memory retrieval (
   - optional: `hnswlib` sidecar (`npm run sidecar:hnsw`)
 - Retrieval decision is AI-driven (`localhost:1234` OpenAI-compatible endpoint).
 
-## Quick Start
+## Quick Start (cross-platform)
+
+Requires **Node.js 22 LTS** or newer.
 
 1. Install dependencies:
    - `npm install`
-2. Copy env:
-   - `cp .env.example .env`
+2. Initialize `.env` and `data/`:
+   - `npm run setup`
 3. Set required values in `.env`:
    - `APP_API_KEY`
    - `QWEN_BASE_URL` (default `http://127.0.0.1:1234/v1`)
    - `QWEN_MODEL`
-4. Start optional vector sidecar (recommended for ANN):
-   - `npm run sidecar:hnsw`
-5. Start API service:
+4. Start API service:
    - `npm run dev`
 
 Service default address: `http://127.0.0.1:8787`
 
+### Windows Notes
+
+- **Recommended branch**: use `main-win` for Windows-tuned config; `main` is developed on macOS/Linux.
+- **Vector backend**: stick with `VECTOR_PROVIDER=sqlite` (default in this branch). The optional `hnswlib` sidecar requires native compilation and is skipped automatically (`hnswlib-node` is in `optionalDependencies`).
+- **If you actually want the HNSW sidecar on Windows**: install Visual Studio Build Tools + Python 3, then `npm install hnswlib-node`.
+- **Path examples** in `.env`: forward slashes work in Node on Windows too. `FCM_SERVICE_ACCOUNT_PATH=C:/keys/firebase.json` is valid.
+- **Run as a service**: use [NSSM](https://nssm.cc/) to wrap `npm start` into a Windows Service for auto-start.
+- **Firewall**: first inbound request from another device on port 8787 will trigger a Windows Defender prompt — allow private networks.
+
+### Linux/macOS Notes
+
+If you want the HNSW sidecar:
+1. `npm install hnswlib-node` (will compile from source)
+2. `npm run sidecar:hnsw`
+3. Set `VECTOR_PROVIDER=hnswlib` in `.env`
+
 ## Scripts
 
+- `npm run setup` - create `.env` from `.env.example` and ensure `data/` exists (cross-platform)
 - `npm run dev` - start API + scheduler + memory indexer
 - `npm run start` - start production mode entry
-- `npm run sidecar:hnsw` - start local HNSW vector sidecar
+- `npm run sidecar:hnsw` - start local HNSW vector sidecar (optional, requires `hnswlib-node`)
 - `npm run indexer:once` - run one indexer batch manually
 - `npm run eval:memory` - run retrieval eval seed dataset
 - `npm run db:query -- ...` - query SQLite quickly with filters

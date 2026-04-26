@@ -1,7 +1,17 @@
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
-const { HierarchicalNSW } = require("hnswlib-node");
+
+let HierarchicalNSW;
+try {
+  ({ HierarchicalNSW } = require("hnswlib-node"));
+} catch (error) {
+  console.error("[sidecar] hnswlib-node not installed.");
+  console.error("[sidecar] On Windows: install Visual Studio Build Tools + Python, then run: npm install hnswlib-node");
+  console.error("[sidecar] Or skip this sidecar and use VECTOR_PROVIDER=sqlite (recommended).");
+  process.exit(1);
+}
+
 const config = require("../src/config");
 
 const app = express();
