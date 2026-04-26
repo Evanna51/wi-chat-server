@@ -10,6 +10,7 @@ fs.mkdirSync(dbDir, { recursive: true });
 
 const db = new Database(config.databasePath);
 db.pragma("journal_mode = WAL");
+db.pragma("busy_timeout = 5000");
 runMigrations(db, path.join(__dirname, "db", "migrations"));
 
 function upsertCharacterState(assistantId, patch = {}) {

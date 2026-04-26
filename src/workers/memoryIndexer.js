@@ -105,10 +105,43 @@ async function runIndexerOnce() {
 }
 
 function startMemoryIndexer() {
-  setInterval(() => {
-    runIndexerOnce().catch((error) => console.error("[indexer] tick failed:", error.message));
-  }, config.indexerPollMs);
-  console.log(`[indexer] started: poll=${config.indexerPollMs}ms provider=${vectorStore.name}`);
+  let inFlight = false;
+  let idleStreak = 0;
+
+  const scheduleNext = (delayMs) => {
+    setTimeout(tick, Math.max(100, delayMs));
+  };
+
+  const tick = async () => {
+    if (inFlight) {
+      scheduleNext(config.indexerPollMs);
+      return;
+    }
+    inFlight = true;
+    let processed = 0;
+    try {
+      processed = await runIndexerOnce();
+      if (processed > 0) idleStreak = 0;
+      else idleStreak = Math.min(idleStreak + 1, 8);
+    } catch (error) {
+      console.error("[indexer] tick failed:", error.message);
+    } finally {
+      inFlight = false;
+    }
+
+    const backoffMs = Math.min(
+      config.indexerMaxIdlePollMs,
+      config.indexerPollMs * 2 ** idleStreak
+    );
+    scheduleNext(processed > 0 ? config.indexerPollMs : backoffMs);
+  };
+
+  if (config.infoLogEnabled) {
+    console.log(
+      `[indexer] started: poll=${config.indexerPollMs}ms maxIdle=${config.indexerMaxIdlePollMs}ms provider=${vectorStore.name}`
+    );
+  }
+  tick().catch((error) => console.error("[indexer] bootstrap failed:", error.message));
 }
 
 module.exports = { startMemoryIndexer, runIndexerOnce };

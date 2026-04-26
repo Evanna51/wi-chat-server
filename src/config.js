@@ -39,18 +39,21 @@ const config = {
   indexerBatchSize: Number(process.env.INDEXER_BATCH_SIZE || 20),
   indexerRetryMax: Number(process.env.INDEXER_RETRY_MAX || 5),
   indexerPollMs: Number(process.env.INDEXER_POLL_MS || 2000),
+  indexerMaxIdlePollMs: Number(process.env.INDEXER_MAX_IDLE_POLL_MS || 30000),
+  infoLogEnabled: (process.env.INFO_LOG_ENABLED || "0") === "1",
   schedulerLeaderId: process.env.SCHEDULER_LEADER_ID || "local-1",
   schedulerLockTtlMs: Number(process.env.SCHEDULER_LOCK_TTL_MS || 60000),
   legacyFcmProactiveLockName:
     process.env.LEGACY_FCM_PROACTIVE_LOCK_NAME || "legacy_fcm_proactive_tick",
   legacyFcmProactiveCron: process.env.LEGACY_FCM_PROACTIVE_CRON || "off",
   lifeMemoryCron: process.env.LIFE_MEMORY_CRON || "*/30 * * * *",
-  proactiveMessageCron: process.env.PROACTIVE_MESSAGE_CRON || "*/5 * * * *",
+  proactiveMessageCron: process.env.PROACTIVE_MESSAGE_CRON || "*/10 * * * *",
   lifeMemoryLockName: process.env.LIFE_MEMORY_LOCK_NAME || "life_memory_tick",
   proactiveMessageLockName:
     process.env.PROACTIVE_MESSAGE_LOCK_NAME || "proactive_message_tick",
   autonomousAssistantIds: parseAssistantIds(process.env.AUTONOMOUS_ASSISTANT_IDS || ""),
   autonomousDryRun: (process.env.AUTONOMOUS_DRY_RUN || "1") === "1",
+  autonomousPushEnabled: (process.env.AUTONOMOUS_PUSH_ENABLED || "0") === "1",
   autonomousQuietHours: process.env.AUTONOMOUS_QUIET_HOURS || "0-7",
   autonomousMinMessageIntervalMs: Number(
     process.env.AUTONOMOUS_MIN_MESSAGE_INTERVAL_MS || 2 * 60 * 60 * 1000
