@@ -60,13 +60,29 @@ function upsertCharacterState(assistantId, patch = {}) {
   return next;
 }
 
-function insertConversationTurn({ assistantId, sessionId, role, content, createdAt = Date.now() }) {
-  const id = uuidv7();
+function insertConversationTurn({ id, assistantId, sessionId, role, content, createdAt = Date.now() }) {
+  const turnId = id || uuidv7();
   db.prepare(
-    `INSERT INTO conversation_turns (id, assistant_id, session_id, role, content, created_at)
+    `INSERT OR IGNORE INTO conversation_turns (id, assistant_id, session_id, role, content, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(id, assistantId, sessionId, role, content, createdAt);
-  return id;
+  ).run(turnId, assistantId, sessionId, role, content, createdAt);
+  return turnId;
+}
+
+function findConversationTurnById(id) {
+  if (!id) return undefined;
+  return db
+    .prepare("SELECT id, assistant_id, session_id, role, content, created_at FROM conversation_turns WHERE id = ?")
+    .get(id);
+}
+
+function findMemoryItemBySourceTurnId(sourceTurnId) {
+  if (!sourceTurnId) return undefined;
+  return db
+    .prepare(
+      "SELECT id, assistant_id, session_id, source_turn_id, memory_type, content, created_at FROM memory_items WHERE source_turn_id = ? LIMIT 1"
+    )
+    .get(sourceTurnId);
 }
 
 function insertMemoryItem({
@@ -495,4 +511,6 @@ module.exports = {
   ackPulledMessage,
   searchConversation,
   searchMemory,
+  findConversationTurnById,
+  findMemoryItemBySourceTurnId,
 };

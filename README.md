@@ -355,17 +355,102 @@ Notes:
 }
 ```
 
-### 10) Admin: Metrics
+### 10) Sync API (offline batch drain)
+
+离线对话同步入口，用于 chatbox-Android 在户外断网时缓存对话，回家进入家庭 WiFi 后批量推送补齐 server 状态。完整设计见 `docs/offline-sync-plan.md`，Android 落地清单见 `docs/android-sync-integration.md`。
+
+- 现有 `POST /api/report-interaction` 仍然是**单条实时上报**路径（在线时使用，低延迟体验）。
+- 新增 `POST /api/sync/push` 用于**离线 batch drain**，client-generated UUID v7 作为 turn id，**完美幂等**（同一条 turn 不论 push 多少次只落库一次）。
+- 新增 `GET /api/sync/state` 用于 phone 自检本地缓存与 server 状态是否一致。
+
+#### 10.1 POST /api/sync/push
+
+Body：
+```json
+{
+  "deviceId": "android-001",
+  "turns": [
+    {
+      "id": "019dca12-3b4c-7890-abcd-1234567890ab",
+      "assistantId": "assistant_demo",
+      "sessionId": "android-001-s1",
+      "role": "user",
+      "content": "在路上想到一个事...",
+      "createdAt": 1777200000000
+    }
+  ]
+}
+```
+
+约束：
+- `turns.length` 区间 `[1, 200]`，超过 200 返回 400（强制 phone 拆批）。
+- `id` 必须是 client-generated UUID v7（前缀含时间戳，天然有序）。
+- `createdAt` 是 phone 本地毫秒时间戳；server 端做 sanity check：若 `< 2020-01-01` 或 `> now + 1d`，会矫正为 `Date.now()`，details 里附 `reason: "clock_corrected"`，**仍然算 accepted**。
+
+Response：
+```json
+{
+  "ok": true,
+  "deviceId": "android-001",
+  "accepted": 47,
+  "skipped": 3,
+  "rejected": 0,
+  "details": [
+    { "id": "...", "status": "accepted" },
+    { "id": "...", "status": "skipped", "reason": "already_exists" }
+  ]
+}
+```
+
+幂等语义：
+- 同 `id` 第二次起 → `skipped: already_exists`，不会重复写 `memory_items` / `memory_facts` / `outbox_events`。
+- 单事务整批，单条 `rejected` 不会 roll back 其它 accepted 行。
+- `assistantId` **不强约束** `assistant_profile` 必须存在（角色由 phone 创建）。
+
+cURL 示例（push 一条 + 重推演示 skipped）：
+```bash
+TURN_ID=$(node -e "console.log(require('uuid').v7())")
+PAYLOAD=$(printf '{"deviceId":"demo","turns":[{"id":"%s","assistantId":"assistant_demo","sessionId":"demo-s1","role":"user","content":"户外离线消息","createdAt":%s}]}' "$TURN_ID" "$(date +%s000)")
+
+# 第一次 → accepted=1
+curl -sS -X POST "http://127.0.0.1:8787/api/sync/push" \
+  -H "x-api-key: dev-local-key" \
+  -H "content-type: application/json" \
+  --data "$PAYLOAD"
+
+# 第二次 → skipped=1
+curl -sS -X POST "http://127.0.0.1:8787/api/sync/push" \
+  -H "x-api-key: dev-local-key" \
+  -H "content-type: application/json" \
+  --data "$PAYLOAD"
+```
+
+#### 10.2 sync-replay 脚本
+
+```bash
+# 1) 生成 50 条本地缓存
+npm run sync:replay -- --mode generate --assistant smoke-sync --count 50 --out /tmp/buf.json
+
+# 2) push 上去
+npm run sync:replay -- --mode push --in /tmp/buf.json
+
+# 3) 一键端到端（generate + push 两次验证幂等）
+npm run sync:replay -- --mode test --assistant smoke-sync --count 20
+```
+
+通用参数：`--api http://...` `--api-key dev-local-key` `--batch-size 100` `--device-id ...`。
+
+### 11) Admin: Metrics
 
 - `GET /admin/memory-metrics`
 - Purpose: outbox/retrieval counters
 
-### 11) Admin: Run Indexer Once
+### 12) Admin: Run Indexer Once
 
 - `POST /admin/run-indexer-once`
 - Purpose: manual outbox consume/index trigger
 
-### 12) Admin: Replay Dead Letter
+### 13) Admin: Replay Dead Letter
 
 - `POST /admin/replay-dead-letter`
 - Body:

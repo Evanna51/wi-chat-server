@@ -21,6 +21,17 @@ function estimateSalience(role, content) {
   return Math.max(0.1, Math.min(1, 0.4 + roleBoost + lengthBoost));
 }
 
+/**
+ * 幂等地把一条 interaction 写入 conversation_turns + memory_items + facts + edges + outbox。
+ *
+ * 幂等策略（应用层 SELECT-then-INSERT）：
+ * - conversation_turns 由 db.js 的 INSERT OR IGNORE 兜底（PK 命中即 noop）。
+ * - memory_items 在写入前 SELECT findMemoryItemBySourceTurnId(turnId)；命中则整个 ingest 跳过。
+ * - facts / edges / outbox 与 memory_item 一对一，memoryItem 跳过则它们也跳过，
+ *   不会出现重复 fact / 重复 outbox event。
+ *
+ * 调用方可选传 `turnId`，传了就以它作为 conversation_turns 的 PK；不传由 server 端生成。
+ */
 function ingestInteraction({
   db,
   assistantId,
@@ -28,11 +39,35 @@ function ingestInteraction({
   role,
   content,
   now,
+  turnId: providedTurnId,
   insertConversationTurn,
   insertMemoryItem,
   insertOutboxEvent,
+  findMemoryItemBySourceTurnId,
 }) {
-  const turnId = insertConversationTurn({ assistantId, sessionId, role, content, createdAt: now });
+  const turnId = insertConversationTurn({
+    id: providedTurnId,
+    assistantId,
+    sessionId,
+    role,
+    content,
+    createdAt: now,
+  });
+
+  // 幂等检查：同一 source_turn_id 已有 memory_item 直接 short-circuit
+  const findFn = findMemoryItemBySourceTurnId;
+  if (typeof findFn === "function") {
+    const existing = findFn(turnId);
+    if (existing && existing.id) {
+      return {
+        turnId,
+        memoryId: existing.id,
+        factCount: 0,
+        skipped: true,
+      };
+    }
+  }
+
   const memoryId = insertMemoryItem({
     assistantId,
     sessionId,
@@ -87,7 +122,7 @@ function ingestInteraction({
     payload: { memoryId },
   });
 
-  return { turnId, memoryId, factCount: facts.length };
+  return { turnId, memoryId, factCount: facts.length, skipped: false };
 }
 
 module.exports = { ingestInteraction };

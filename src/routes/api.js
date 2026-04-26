@@ -15,6 +15,7 @@ const {
   withTransaction,
   searchConversation,
   searchMemory,
+  findMemoryItemBySourceTurnId,
 } = require("../db");
 const { ingestInteraction } = require("../services/memoryIngestService");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
@@ -223,6 +224,7 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
       insertConversationTurn,
       insertMemoryItem,
       insertOutboxEvent,
+      findMemoryItemBySourceTurnId,
     });
     upsertCharacterState(assistantId, {
       active_session_id: sessionId,

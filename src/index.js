@@ -5,6 +5,7 @@ require("./db");
 const apiRouter = require("./routes/api");
 const adminRouter = require("./routes/admin");
 const browseRouter = require("./routes/browse");
+const syncRouter = require("./routes/sync");
 const { startScheduler } = require("./scheduler");
 const { startMemoryIndexer } = require("./workers/memoryIndexer");
 
@@ -27,6 +28,7 @@ if (config.debugHttpLog) {
   });
 }
 
+app.use("/api/sync", syncRouter);
 app.use("/api", apiRouter);
 app.use("/api/browse", browseRouter);
 app.use("/admin", adminRouter);
