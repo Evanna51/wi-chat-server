@@ -284,6 +284,7 @@ async function generateLifeMemory({
   state,
   assistantProfile = {},
   now = Date.now(),
+  dryRun = false,
 }) {
   const recentTurns = getRecentConversationTurns({ assistantId, sessionId, limit: 8 });
   const recentInteractions = getRecentAssistantInteractions({ assistantId, limit: 10 });
@@ -330,6 +331,16 @@ async function generateLifeMemory({
     return {
       ok: true,
       persisted: false,
+      decision,
+      context: { recentTurns, recentInteractions, recentMemories },
+    };
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      persisted: false,
+      dryRun: true,
       decision,
       context: { recentTurns, recentInteractions, recentMemories },
     };

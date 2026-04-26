@@ -166,16 +166,17 @@ function filterByConfiguredAssistantIds(profiles = [], overrideAssistantIds = nu
 async function runLifeMemoryTick(options = {}) {
   if (!options.ignoreLock && !tryAcquireSchedulerLock(config.lifeMemoryLockName)) {
     infoLog("[scheduler] skip life tick (leader lock not acquired)");
-    return { skippedByLock: true, checked: 0, persisted: 0, skipped: 0, error: 0 };
+    return { skippedByLock: true, checked: 0, persisted: 0, skipped: 0, error: 0, dryRun: 0 };
   }
 
   const shouldStop = typeof options.shouldStop === "function" ? options.shouldStop : noop;
+  const dryRun = options.dryRun === true || config.autonomousDryRun === true;
   const now = Date.now();
   const profiles = filterByConfiguredAssistantIds(
     listAutoLifeAssistantProfiles(),
     options.assistantIds
   );
-  const stats = { skippedByLock: false, checked: 0, persisted: 0, skipped: 0, error: 0 };
+  const stats = { skippedByLock: false, checked: 0, persisted: 0, skipped: 0, error: 0, dryRun: 0 };
   warnIfAutoLifeTooMany(profiles);
   for (const profile of profiles) {
     if (shouldStop()) break;
@@ -193,9 +194,16 @@ async function runLifeMemoryTick(options = {}) {
           characterBackground: profile.character_background,
         },
         now,
+        dryRun,
       });
       stopIfCancelled(shouldStop);
-      const status = !result.ok ? "error" : result.persisted ? "persisted" : "skipped";
+      const status = !result.ok
+        ? "error"
+        : result.dryRun
+        ? "dry_run"
+        : result.persisted
+        ? "persisted"
+        : "skipped";
       insertBehaviorJournalEntry({
         runType: "life_tick",
         assistantId: profile.assistant_id,
@@ -214,6 +222,7 @@ async function runLifeMemoryTick(options = {}) {
         createdAt: now,
       });
       if (!result.ok) stats.error += 1;
+      else if (result.dryRun) stats.dryRun += 1;
       else if (result.persisted) stats.persisted += 1;
       else stats.skipped += 1;
     } catch (error) {
@@ -254,6 +263,7 @@ async function runProactiveTick(options = {}) {
   }
 
   const shouldStop = typeof options.shouldStop === "function" ? options.shouldStop : noop;
+  const dryRun = options.dryRun === true || config.autonomousDryRun === true;
   const now = Date.now();
   const timeBucket = getTimeBucket(new Date(now));
   const quietHours = parseQuietHours(config.autonomousQuietHours);
@@ -452,7 +462,7 @@ async function runProactiveTick(options = {}) {
       }
     }
 
-    if (config.autonomousDryRun) {
+    if (dryRun) {
       insertBehaviorJournalEntry({
         runType: "proactive_message_tick",
         assistantId: profile.assistant_id,

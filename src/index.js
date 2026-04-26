@@ -1,8 +1,10 @@
 const express = require("express");
+const path = require("path");
 const config = require("./config");
 require("./db");
 const apiRouter = require("./routes/api");
 const adminRouter = require("./routes/admin");
+const browseRouter = require("./routes/browse");
 const { startScheduler } = require("./scheduler");
 const { startMemoryIndexer } = require("./workers/memoryIndexer");
 
@@ -26,7 +28,9 @@ if (config.debugHttpLog) {
 }
 
 app.use("/api", apiRouter);
+app.use("/api/browse", browseRouter);
 app.use("/admin", adminRouter);
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.listen(config.port, config.host, () => {
   console.log(`[server] listening on ${config.host}:${config.port}`);
