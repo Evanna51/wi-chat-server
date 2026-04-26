@@ -37,6 +37,32 @@ Service default address: `http://127.0.0.1:8787`
 - **Run as a service**: use [NSSM](https://nssm.cc/) to wrap `npm start` into a Windows Service for auto-start.
 - **Firewall**: first inbound request from another device on port 8787 will trigger a Windows Defender prompt — allow private networks.
 
+### Expose WSL2 service to LAN (phone access)
+
+If the service runs inside **WSL2**, devices on the same WiFi can't reach it directly — WSL2 runs in a VM with its own (changing) IP. Two options:
+
+**Option A — Windows portproxy + firewall (works on all Win10/11)**
+
+1. In WSL `.env`, set `HOST=0.0.0.0` (otherwise the server binds to loopback only).
+2. From a Windows PowerShell (the script self-elevates to admin):
+   ```powershell
+   .\scripts\windows\expose-wsl-port.ps1
+   # custom port:
+   .\scripts\windows\expose-wsl-port.ps1 -Port 9000
+   ```
+   It detects the current WSL IP, adds a `netsh interface portproxy` rule, opens the firewall on the Private profile, and prints the LAN URLs you can hit from your phone.
+3. **Re-run after every WSL restart** — the WSL IP can change.
+4. To remove: `.\scripts\windows\teardown-wsl-port.ps1 -Port 8787`
+
+**Option B — WSL2 mirrored networking (Win11 22H2+)**
+
+Add to `%UserProfile%\.wslconfig`:
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+Then `wsl --shutdown` and restart WSL. WSL2 will share the host's NIC, no portproxy needed. Just open the firewall once (the script above also does this; or run only the `New-NetFirewallRule` part).
+
 ### Linux/macOS Notes
 
 If you want the HNSW sidecar:
