@@ -25,21 +25,6 @@ function blobToVector(buf) {
   return Array.from(float32);
 }
 
-function decodeRowVector(row) {
-  if (row.vector_blob) {
-    const vec = blobToVector(row.vector_blob);
-    if (vec) return vec;
-  }
-  if (row.vector_json) {
-    try {
-      return JSON.parse(row.vector_json);
-    } catch (_) {
-      return null;
-    }
-  }
-  return null;
-}
-
 function createSqliteVectorStore(db) {
   return {
     name: "sqlite",
@@ -57,13 +42,11 @@ function createSqliteVectorStore(db) {
     },
     async search({ assistantId, queryVector, topK = config.vectorK }) {
       const rows = db
-        .prepare(
-          "SELECT memory_item_id, vector_blob, vector_json FROM memory_vectors WHERE assistant_id = ?"
-        )
+        .prepare("SELECT memory_item_id, vector_blob FROM memory_vectors WHERE assistant_id = ?")
         .all(assistantId);
       const scored = rows
         .map((row) => {
-          const vector = decodeRowVector(row);
+          const vector = blobToVector(row.vector_blob);
           if (!vector) return null;
           return {
             memoryId: row.memory_item_id,
