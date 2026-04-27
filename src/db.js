@@ -225,6 +225,30 @@ function getLastAssistantInteractionAt(assistantId) {
   return row?.created_at || null;
 }
 
+function getRecentTurnsAcrossSessions({ assistantId, limit = 8 }) {
+  return db
+    .prepare(
+      `SELECT id, role, content, session_id, created_at
+       FROM conversation_turns
+       WHERE assistant_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(assistantId, limit);
+}
+
+function getConfidentFactsForAssistant({ assistantId, minConfidence = 0.5, limit = 30 }) {
+  return db
+    .prepare(
+      `SELECT id, fact_key, fact_value, confidence, memory_item_id, session_id, created_at
+       FROM memory_facts
+       WHERE assistant_id = ? AND confidence > ?
+       ORDER BY confidence DESC, created_at DESC
+       LIMIT ?`
+    )
+    .all(assistantId, minConfidence, limit);
+}
+
 function getRecentMemoryItems({ assistantId, memoryTypes = [], limit = 6 }) {
   let sql = `
     SELECT id, memory_type, content, salience, confidence, created_at
@@ -494,9 +518,11 @@ module.exports = {
   withTransaction,
   insertBehaviorJournalEntry,
   getRecentConversationTurns,
+  getRecentTurnsAcrossSessions,
   getRecentAssistantInteractions,
   getLastAssistantInteractionAt,
   getRecentMemoryItems,
+  getConfidentFactsForAssistant,
   upsertAssistantProfile,
   getAssistantProfile,
   updateAssistantLastSession,

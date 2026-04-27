@@ -589,6 +589,7 @@ async function runRetentionSweepTick() {
 
 function startScheduler() {
   scheduleIfEnabled(config.legacyFcmProactiveCron, "legacy-fcm-proactive", runLegacyFCMProactiveTick);
+  // life cron is deprecated by Phase A lazy catchup; honored only if env explicitly set != 'off'.
   scheduleIfEnabled(config.lifeMemoryCron, "life-memory", runLifeMemoryTick);
   scheduleIfEnabled(config.proactiveMessageCron, "proactive-message", runProactiveTick);
   scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick);

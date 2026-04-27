@@ -25,6 +25,7 @@ const {
   formatMemoryLines,
   buildMemoryGuidance,
 } = require("../services/memoryDecisionService");
+const { runCatchup } = require("../services/catchupService");
 const config = require("../config");
 
 const router = express.Router();
@@ -380,6 +381,30 @@ router.post("/search", authMiddleware, (req, res) => {
     hits.sort((a, b) => a.score - b.score);
     if (scope === "both" && hits.length > limit) hits.length = limit;
     return res.json({ ok: true, hits });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+router.post("/character/catchup", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    lastInteractionAt: z.number().int().min(0),
+    now: z.number().int().min(0).optional(),
+    maxEvents: z.number().int().min(1).max(8).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  try {
+    const result = await runCatchup({
+      assistantId: parsed.data.assistantId,
+      lastInteractionAt: parsed.data.lastInteractionAt,
+      now: parsed.data.now,
+      maxEvents: parsed.data.maxEvents,
+    });
+    return res.json({ ok: result.ok !== false, ...result });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

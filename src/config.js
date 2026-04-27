@@ -46,7 +46,7 @@ const config = {
   legacyFcmProactiveLockName:
     process.env.LEGACY_FCM_PROACTIVE_LOCK_NAME || "legacy_fcm_proactive_tick",
   legacyFcmProactiveCron: process.env.LEGACY_FCM_PROACTIVE_CRON || "off",
-  lifeMemoryCron: process.env.LIFE_MEMORY_CRON || "*/30 * * * *",
+  lifeMemoryCron: process.env.LIFE_MEMORY_CRON || "off",
   proactiveMessageCron: process.env.PROACTIVE_MESSAGE_CRON || "*/10 * * * *",
   lifeMemoryLockName: process.env.LIFE_MEMORY_LOCK_NAME || "life_memory_tick",
   proactiveMessageLockName:
