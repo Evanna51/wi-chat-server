@@ -2,6 +2,9 @@ const express = require("express");
 const { z } = require("zod");
 const { db } = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
+const {
+  cancelPendingPlansForAssistant,
+} = require("../services/proactivePlanService");
 const config = require("../config");
 
 const router = express.Router();
@@ -41,6 +44,21 @@ router.post("/push", authMiddleware, (req, res) => {
   const { deviceId, turns } = parsed.data;
   try {
     const result = ingestTurnsBatch({ deviceId, turns });
+    // For any user-role turn pushed in, cancel pending plans for that assistant.
+    const userAssistantIds = new Set();
+    for (const t of turns) {
+      if (t && t.role === "user" && t.assistantId) {
+        userAssistantIds.add(t.assistantId);
+      }
+    }
+    let cancelledPlans = 0;
+    for (const aid of userAssistantIds) {
+      try {
+        cancelledPlans += cancelPendingPlansForAssistant(aid, "user_active");
+      } catch (e) {
+        // ignore single-assistant cancel errors
+      }
+    }
     return res.json({
       ok: true,
       deviceId,
@@ -48,6 +66,7 @@ router.post("/push", authMiddleware, (req, res) => {
       skipped: result.skipped,
       rejected: result.rejected,
       details: result.details,
+      cancelledPlans,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });

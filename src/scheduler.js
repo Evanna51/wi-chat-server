@@ -19,6 +19,11 @@ const { generateLifeMemory } = require("./services/lifeMemoryService");
 const { runRetentionSweepOnce } = require("./workers/retentionSweeper");
 const { shouldGenerateProactiveMessage } = require("./services/proactiveMessageDecisionService");
 const {
+  generatePlans,
+  fetchDuePendingPlans,
+  markPlanSent,
+} = require("./services/proactivePlanService");
+const {
   getTimeBucket,
   shouldTriggerProactive,
   buildProactivePrompt,
@@ -587,12 +592,84 @@ async function runRetentionSweepTick() {
   }
 }
 
+async function runPlanGenerationTick() {
+  if (!tryAcquireSchedulerLock(config.planGenerationLockName)) {
+    infoLog("[scheduler] skip plan-generation tick (leader lock not acquired)");
+    return { skippedByLock: true };
+  }
+  try {
+    const result = await generatePlans({});
+    infoLog("[scheduler] plan generation done:", JSON.stringify(result));
+    return result;
+  } catch (error) {
+    console.error("[scheduler] plan generation failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+let planExecutorTimer = null;
+async function runPlanExecutorOnce() {
+  const now = Date.now();
+  let due = [];
+  try {
+    due = fetchDuePendingPlans(now);
+  } catch (e) {
+    console.error("[scheduler] plan executor fetch failed:", e.message);
+    return { dispatched: 0 };
+  }
+  if (!due.length) return { dispatched: 0 };
+  let dispatched = 0;
+  for (const plan of due) {
+    try {
+      enqueueLocalOutboxMessage({
+        userId: plan.user_id,
+        assistantId: plan.assistant_id,
+        sessionId: `persona:${plan.assistant_id}`,
+        messageType: "character_proactive",
+        title: plan.draft_title || "新消息",
+        body: plan.draft_body,
+        payload: {
+          type: "character_proactive",
+          assistantId: plan.assistant_id,
+          planId: plan.id,
+          triggerReason: plan.trigger_reason,
+          intent: plan.intent,
+          anchorTopic: plan.anchor_topic,
+          message: plan.draft_body,
+        },
+        availableAt: now,
+        expiresAt: now + config.localPullMessageTtlMs,
+      });
+      markPlanSent(plan.id, now);
+      dispatched += 1;
+    } catch (error) {
+      console.error("[scheduler] plan executor dispatch failed:", error.message, plan.id);
+    }
+  }
+  return { dispatched };
+}
+
+function startPlanExecutorLoop() {
+  if (planExecutorTimer) return;
+  const interval = Math.max(5000, Number(config.planExecutorIntervalMs) || 60000);
+  planExecutorTimer = setInterval(() => {
+    runPlanExecutorOnce().catch((error) => {
+      console.error("[scheduler] plan executor loop error:", error.message);
+    });
+  }, interval);
+  if (planExecutorTimer.unref) planExecutorTimer.unref();
+  infoLog(`[scheduler] plan-executor interval = ${interval}ms`);
+}
+
 function startScheduler() {
   scheduleIfEnabled(config.legacyFcmProactiveCron, "legacy-fcm-proactive", runLegacyFCMProactiveTick);
   // life cron is deprecated by Phase A lazy catchup; honored only if env explicitly set != 'off'.
   scheduleIfEnabled(config.lifeMemoryCron, "life-memory", runLifeMemoryTick);
+  // proactive-message cron is deprecated by Phase B plan table; honored only if env explicitly set != 'off'.
   scheduleIfEnabled(config.proactiveMessageCron, "proactive-message", runProactiveTick);
   scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick);
+  scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick);
+  startPlanExecutorLoop();
 }
 
 module.exports = {
@@ -601,4 +678,6 @@ module.exports = {
   runLifeMemoryTick,
   runProactiveTick,
   runRetentionSweepTick,
+  runPlanGenerationTick,
+  runPlanExecutorOnce,
 };

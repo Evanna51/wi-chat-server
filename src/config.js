@@ -51,6 +51,10 @@ const config = {
   lifeMemoryLockName: process.env.LIFE_MEMORY_LOCK_NAME || "life_memory_tick",
   proactiveMessageLockName:
     process.env.PROACTIVE_MESSAGE_LOCK_NAME || "proactive_message_tick",
+  planGenerationCron: process.env.PLAN_GENERATION_CRON || "0 6 * * *",
+  planGenerationLockName:
+    process.env.PLAN_GENERATION_LOCK_NAME || "plan_generation_tick",
+  planExecutorIntervalMs: Number(process.env.PLAN_EXECUTOR_INTERVAL_MS || 60000),
   autonomousAssistantIds: parseAssistantIds(process.env.AUTONOMOUS_ASSISTANT_IDS || ""),
   autonomousDryRun: (process.env.AUTONOMOUS_DRY_RUN || "1") === "1",
   autonomousPushEnabled: (process.env.AUTONOMOUS_PUSH_ENABLED || "0") === "1",

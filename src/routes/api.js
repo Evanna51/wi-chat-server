@@ -26,6 +26,14 @@ const {
   buildMemoryGuidance,
 } = require("../services/memoryDecisionService");
 const { runCatchup } = require("../services/catchupService");
+const {
+  generatePlans,
+  listPendingPlans,
+  listPlansByStatus,
+  cancelPlanById,
+  cancelPendingPlansForAssistant,
+  findPlanById,
+} = require("../services/proactivePlanService");
 const config = require("../config");
 
 const router = express.Router();
@@ -235,7 +243,15 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
     });
     updateAssistantLastSession(assistantId, sessionId);
   });
-  res.json({ ok: true, familiarity, totalTurns });
+  let cancelledPlans = 0;
+  if (role === "user") {
+    try {
+      cancelledPlans = cancelPendingPlansForAssistant(assistantId, "user_active");
+    } catch (e) {
+      cancelledPlans = 0;
+    }
+  }
+  res.json({ ok: true, familiarity, totalTurns, cancelledPlans });
 });
 
 router.post("/chat-with-memory", authMiddleware, async (req, res) => {
@@ -408,6 +424,70 @@ router.post("/character/catchup", authMiddleware, async (req, res) => {
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
+});
+
+router.post("/proactive/regenerate-plans", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  try {
+    const result = await generatePlans({ assistantId: parsed.data.assistantId || null });
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+router.get("/proactive/plans", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1).optional(),
+    status: z.enum(["pending", "sent", "cancelled", "failed"]).default("pending"),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { assistantId, status } = parsed.data;
+  const rows = status === "pending"
+    ? listPendingPlans({ assistantId })
+    : listPlansByStatus({ assistantId, status });
+  return res.json({
+    ok: true,
+    count: rows.length,
+    items: rows.map((r) => ({
+      id: r.id,
+      assistantId: r.assistant_id,
+      userId: r.user_id,
+      triggerReason: r.trigger_reason,
+      intent: r.intent,
+      draftTitle: r.draft_title,
+      draftBody: r.draft_body,
+      anchorTopic: r.anchor_topic,
+      rationale: r.rationale,
+      scheduledAt: r.scheduled_at,
+      status: r.status,
+      cancelledReason: r.cancelled_reason,
+      sentAt: r.sent_at,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    })),
+  });
+});
+
+router.delete("/proactive/plans/:id", authMiddleware, (req, res) => {
+  const schema = z.object({ reason: z.string().max(120).optional() });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const plan = findPlanById(req.params.id);
+  if (!plan) return res.status(404).json({ ok: false, error: "plan_not_found" });
+  const cancelled = cancelPlanById(req.params.id, parsed.data.reason || "manual");
+  return res.json({ ok: true, cancelled, planId: req.params.id });
 });
 
 module.exports = router;
