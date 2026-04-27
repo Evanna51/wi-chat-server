@@ -208,6 +208,8 @@ router.post("/ack-message", authMiddleware, (req, res) => {
 });
 
 router.post("/report-interaction", authMiddleware, (req, res) => {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Sunset", "Thu, 01 Apr 2027 00:00:00 GMT");
   const schema = z.object({
     assistantId: z.string().min(1),
     sessionId: z.string().min(1),
@@ -445,16 +447,37 @@ router.post("/proactive/regenerate-plans", authMiddleware, async (req, res) => {
 router.get("/proactive/plans", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().trim().min(1).optional(),
-    status: z.enum(["pending", "sent", "cancelled", "failed"]).default("pending"),
+    status: z.enum(["pending", "sent", "cancelled", "failed", "all"]).default("pending"),
+    limit: z.coerce.number().int().positive().max(500).optional(),
   });
   const parsed = schema.safeParse(req.query || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
-  const { assistantId, status } = parsed.data;
-  const rows = status === "pending"
-    ? listPendingPlans({ assistantId })
-    : listPlansByStatus({ assistantId, status });
+  const { assistantId, status, limit } = parsed.data;
+  let rows;
+  if (status === "all") {
+    const params = [];
+    let sql = "SELECT * FROM proactive_plans WHERE 1=1";
+    if (assistantId) {
+      sql += " AND assistant_id = ?";
+      params.push(assistantId);
+    }
+    sql += " ORDER BY scheduled_at DESC";
+    if (limit) {
+      sql += " LIMIT ?";
+      params.push(limit);
+    } else {
+      sql += " LIMIT 200";
+    }
+    rows = db.prepare(sql).all(...params);
+  } else if (status === "pending") {
+    rows = listPendingPlans({ assistantId });
+    if (limit) rows = rows.slice(0, limit);
+  } else {
+    rows = listPlansByStatus({ assistantId, status });
+    if (limit) rows = rows.slice(0, limit);
+  }
   return res.json({
     ok: true,
     count: rows.length,

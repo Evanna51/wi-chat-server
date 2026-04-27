@@ -185,6 +185,8 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 
 ### 3) Report Interaction (full chat log persistence)
 
+> ⚠️ DEPRECATED — use `/api/sync/push` instead. Will be removed in a future release. The endpoint now returns header `Deprecation: true` and `Sunset: Thu, 01 Apr 2027 00:00:00 GMT`.
+
 - `POST /api/report-interaction`
 - Use this for **every user/assistant turn**, including small talk.
 - Body:
@@ -481,6 +483,149 @@ npm run sync:replay -- --mode e2e --assistant smoke-sync --count 30
 ```json
 { "limit": 20 }
 ```
+
+### 14) WebSocket Push Channel
+
+实时推送通道，替代 `GET /api/pull-messages` 轮询。在线时 server → phone 直推，断线时落 `local_outbox_messages` 兜底，重连后 server 一次性 flush 积压。
+
+#### 14.1 握手
+
+```
+ws://<host>:<port>/api/ws?apiKey=<APP_API_KEY>&userId=<userId>
+```
+
+也支持 header：`x-api-key` + `x-user-id`。`REQUIRE_API_KEY=0` 时跳过 apiKey 校验。
+
+握手成功 server 立即发：
+- 一帧 `{ "op":"hello", "userId":"...", "ts":<ms> }`
+- 如果该 user 有积压消息，再发一帧 `queued_batch`（见下）
+
+#### 14.2 帧格式
+
+**Server → Client**
+
+`hello`（连接确认）：
+```json
+{ "op": "hello", "userId": "default-user", "ts": 1777200000000 }
+```
+
+`proactive`（主动消息推送）：
+```json
+{
+  "op": "proactive",
+  "id": "<plan-id>",
+  "assistantId": "...",
+  "sessionId": "...",
+  "title": "...",
+  "body": "...",
+  "messageType": "character_proactive",
+  "payload": { "planId": "...", "intent": "...", "anchorTopic": "...", "triggerReason": "..." },
+  "createdAt": 1777200000000
+}
+```
+
+`queued_batch`（重连时的积压消息）：
+```json
+{
+  "op": "queued_batch",
+  "messages": [
+    { "id": "...", "assistantId": "...", "sessionId": "...", "messageType": "character_proactive",
+      "title": "...", "body": "...", "payload": {...}, "createdAt": ..., "availableAt": ..., "expiresAt": ..., "pullCount": 1 }
+  ]
+}
+```
+
+`pong`（心跳响应）：
+```json
+{ "op": "pong", "ts": 1777200000000 }
+```
+
+`server_shutdown`（进程退出广播）：
+```json
+{ "op": "server_shutdown", "ts": 1777200000000 }
+```
+
+**Client → Server**
+
+`ping`（每 25s 一次）：
+```json
+{ "op": "ping", "ts": 1777200000000 }
+```
+
+`ack`（收到消息后）：
+```json
+{ "op": "ack", "id": "<message-id>", "status": "received" }
+```
+
+server 收到 ack 后将对应 `local_outbox_messages.status` 更新为 `acked`。
+
+`presence`（可选，告知客户端当前是否在 chat 界面）：
+```json
+{ "op": "presence", "state": "active|background", "assistantId": "..." }
+```
+
+`subscribe`（重发触发，可选）：
+```json
+{ "op": "subscribe", "userId": "..." }
+```
+
+#### 14.3 心跳
+
+- Client 每 25s 发一次 `ping`，server 回 `pong`
+- Server 还会通过 RFC 6455 ping 帧 (TCP-level) 每 25s 探活，超过一个周期未收到 pong 则 `terminate()`
+
+#### 14.4 测试客户端
+
+```
+npm run ws:test -- --user default-user --api-key dev-local-key
+```
+
+可选参数 `--host <host>` `--port <port>`。
+
+### 15) Character Catchup (lazy life memory)
+
+- `POST /api/character/catchup`
+- Body:
+```json
+{
+  "assistantId": "...",
+  "lastInteractionAt": 1777190000000,
+  "now": 1777200000000,
+  "maxEvents": 5
+}
+```
+- Response:
+```json
+{ "ok": true, "windowMs": 10000000, "generated": 3, "memories": [...] }
+```
+
+仅当 `now - lastInteractionAt >= 60min` 时才生成；否则返回 `generated: 0`。
+
+### 16) Proactive Plans
+
+#### 16.1 立即生成 plan
+
+```
+POST /api/proactive/regenerate-plans
+body: { "assistantId": "..." }   // 不传则跑全部 allow_proactive_message=1 的角色
+```
+
+#### 16.2 列出 plan
+
+```
+GET /api/proactive/plans?status=<pending|sent|cancelled|failed|all>&assistantId=<id>&limit=<n>
+```
+
+`status` 默认 `pending`；`assistantId` 可选；`limit` 可选。
+
+#### 16.3 取消 pending plan
+
+```
+DELETE /api/proactive/plans/:id
+body: { "reason": "..." }       // 可选
+```
+
+只对 `status=pending` 的 plan 生效。
 
 ## Recommended Calling Flow (chatbox-Android)
 

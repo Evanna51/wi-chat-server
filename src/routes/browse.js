@@ -9,6 +9,10 @@ const {
   getAssistantProfile,
 } = require("../db");
 const { runLifeMemoryTick, runProactiveTick } = require("../scheduler");
+const {
+  getActiveUserIds,
+  getActiveSocketCount,
+} = require("../ws/connections");
 
 const router = express.Router();
 
@@ -349,6 +353,12 @@ router.get("/stats", (_req, res) => {
       }
     }
   } catch {}
+  const wsActiveSockets = {};
+  try {
+    for (const uid of getActiveUserIds()) {
+      wsActiveSockets[uid] = getActiveSocketCount(uid);
+    }
+  } catch {}
   res.json({
     ok: true,
     db: {
@@ -367,6 +377,7 @@ router.get("/stats", (_req, res) => {
       pushEnabled: config.autonomousPushEnabled,
       quietHours: config.autonomousQuietHours,
     },
+    wsActiveSockets,
   });
 });
 
