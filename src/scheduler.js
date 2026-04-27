@@ -24,6 +24,10 @@ const {
   markPlanSent,
 } = require("./services/proactivePlanService");
 const {
+  broadcastToUser,
+  getActiveSocketCount,
+} = require("./ws/connections");
+const {
   getTimeBucket,
   shouldTriggerProactive,
   buildProactivePrompt,
@@ -607,6 +611,16 @@ async function runPlanGenerationTick() {
   }
 }
 
+function resolveSessionIdForPlan(plan) {
+  try {
+    const row = db
+      .prepare("SELECT last_session_id FROM assistant_profile WHERE assistant_id = ?")
+      .get(plan.assistant_id);
+    if (row && row.last_session_id) return row.last_session_id;
+  } catch {}
+  return `${plan.assistant_id}:proactive`;
+}
+
 let planExecutorTimer = null;
 async function runPlanExecutorOnce() {
   const now = Date.now();
@@ -615,16 +629,44 @@ async function runPlanExecutorOnce() {
     due = fetchDuePendingPlans(now);
   } catch (e) {
     console.error("[scheduler] plan executor fetch failed:", e.message);
-    return { dispatched: 0 };
+    return { dispatched: 0, viaWs: 0, viaOutbox: 0 };
   }
-  if (!due.length) return { dispatched: 0 };
+  if (!due.length) return { dispatched: 0, viaWs: 0, viaOutbox: 0 };
   let dispatched = 0;
+  let viaWs = 0;
+  let viaOutbox = 0;
   for (const plan of due) {
     try {
+      const sessionId = resolveSessionIdForPlan(plan);
+      const sockets = getActiveSocketCount(plan.user_id);
+      if (sockets > 0) {
+        const sent = broadcastToUser(plan.user_id, {
+          op: "proactive",
+          id: plan.id,
+          assistantId: plan.assistant_id,
+          sessionId,
+          title: plan.draft_title || "",
+          body: plan.draft_body,
+          messageType: "character_proactive",
+          payload: {
+            planId: plan.id,
+            intent: plan.intent,
+            anchorTopic: plan.anchor_topic,
+            triggerReason: plan.trigger_reason,
+          },
+          createdAt: now,
+        });
+        if (sent > 0) {
+          markPlanSent(plan.id, now);
+          dispatched += 1;
+          viaWs += 1;
+          continue;
+        }
+      }
       enqueueLocalOutboxMessage({
         userId: plan.user_id,
         assistantId: plan.assistant_id,
-        sessionId: `persona:${plan.assistant_id}`,
+        sessionId,
         messageType: "character_proactive",
         title: plan.draft_title || "新消息",
         body: plan.draft_body,
@@ -642,11 +684,12 @@ async function runPlanExecutorOnce() {
       });
       markPlanSent(plan.id, now);
       dispatched += 1;
+      viaOutbox += 1;
     } catch (error) {
       console.error("[scheduler] plan executor dispatch failed:", error.message, plan.id);
     }
   }
-  return { dispatched };
+  return { dispatched, viaWs, viaOutbox };
 }
 
 function startPlanExecutorLoop() {

@@ -17,7 +17,8 @@
     "retention:run": "node -e \"require('./src/workers/retentionSweeper').runRetentionSweepOnce().then(r=>console.log(JSON.stringify(r,null,2)))\"",
     "vectors:backfill": "node scripts/migrate-vectors-to-blob.js",
     "backup:monthly": "node scripts/backup.js monthly",
-    "sync:replay": "node scripts/sync-replay.js"
+    "sync:replay": "node scripts/sync-replay.js",
+    "ws:test": "node scripts/ws-test-client.js"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -37,6 +38,7 @@
     "node-cron": "^4.2.1",
     "pg": "^8.20.0",
     "uuid": "^13.0.0",
+    "ws": "^8.20.0",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
