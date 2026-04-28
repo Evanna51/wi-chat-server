@@ -1,5 +1,4 @@
-const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { getProvider } = require("../llm");
 
 const MEMORY_TRIGGER_REGEX =
   /(记得|上次|之前|喜欢|不喜欢|偏好|习惯|生日|工作|家人|最近|还记得|我们聊到)/;
@@ -50,7 +49,6 @@ function extractJsonObject(text = "") {
 }
 
 async function aiDecision(userInput) {
-  const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
   const prompt = [
     "你是记忆检索决策器。基于当前用户输入，判断是否需要检索历史记忆。",
     "仅输出一个JSON对象，不要输出任何额外文字。",
@@ -64,25 +62,11 @@ async function aiDecision(userInput) {
     `当前用户输入: ${userInput}`,
   ].join("\n");
 
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.qwenApiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.qwenModel,
-      temperature: 0,
-      max_tokens: 160,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  }, 30000);
-
-  if (!res.ok) {
-    throw new Error(`ai decision failed: ${res.status} ${await res.text()}`);
-  }
-  const body = await res.json();
-  const content = body?.choices?.[0]?.message?.content || "";
+  const { content } = await getProvider().complete({
+    messages: [{ role: "user", content: prompt }],
+    responseFormat: "json",
+    maxTokens: 160,
+  });
   const jsonText = extractJsonObject(content);
   if (!jsonText) {
     throw new Error("ai decision non-json output");
