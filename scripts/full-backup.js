@@ -87,9 +87,11 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
 
 module.exports = { runFullBackup };

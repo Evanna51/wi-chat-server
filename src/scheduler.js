@@ -17,6 +17,8 @@ const { generateWithMemory } = require("./services/langchainQwenService");
 const { tryAcquireSchedulerLock } = require("./services/schedulerLockService");
 const { generateLifeMemory } = require("./services/lifeMemoryService");
 const { runRetentionSweepOnce } = require("./workers/retentionSweeper");
+const { runDaily: runIncrBackup } = require("../scripts/backup");
+const { runFullBackup } = require("../scripts/full-backup");
 const { shouldGenerateProactiveMessage } = require("./services/proactiveMessageDecisionService");
 const {
   generatePlans,
@@ -581,6 +583,36 @@ function scheduleIfEnabled(cronExpr, label, runner) {
   infoLog(`[scheduler] ${label} cron = ${cronExpr} (${config.timezone})`);
 }
 
+async function runDailyBackupTick() {
+  if (!tryAcquireSchedulerLock(config.backupDailyLockName)) {
+    infoLog("[scheduler] skip daily backup tick (leader lock not acquired)");
+    return { skippedByLock: true };
+  }
+  try {
+    const result = await runIncrBackup();
+    infoLog("[scheduler] daily backup done:", result.outPath, `${result.totalRows} rows`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] daily backup failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+async function runWeeklyBackupTick() {
+  if (!tryAcquireSchedulerLock(config.backupWeeklyLockName)) {
+    infoLog("[scheduler] skip weekly backup tick (leader lock not acquired)");
+    return { skippedByLock: true };
+  }
+  try {
+    const result = runFullBackup();
+    infoLog("[scheduler] weekly full backup done:", result.destPath, result.skipped ? "(skipped)" : "");
+    return result;
+  } catch (error) {
+    console.error("[scheduler] weekly full backup failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 async function runRetentionSweepTick() {
   if (!tryAcquireSchedulerLock(config.retentionSweepLockName)) {
     infoLog("[scheduler] skip retention sweep tick (leader lock not acquired)");
@@ -712,6 +744,8 @@ function startScheduler() {
   scheduleIfEnabled(config.proactiveMessageCron, "proactive-message", runProactiveTick);
   scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick);
   scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick);
+  scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick);
+  scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick);
   startPlanExecutorLoop();
 }
 
@@ -723,4 +757,6 @@ module.exports = {
   runRetentionSweepTick,
   runPlanGenerationTick,
   runPlanExecutorOnce,
+  runDailyBackupTick,
+  runWeeklyBackupTick,
 };
