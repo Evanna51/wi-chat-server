@@ -1,4 +1,5 @@
 const { v7: uuidv7 } = require("uuid");
+const config = require("../config");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
 const {
