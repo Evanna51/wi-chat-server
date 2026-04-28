@@ -100,6 +100,8 @@ const config = {
   requireApiKey: (process.env.REQUIRE_API_KEY || "0") === "1",
   debugHttpLog: (process.env.DEBUG_HTTP_LOG || "0") === "1",
   timezone: process.env.SCHEDULER_TIMEZONE || "Asia/Shanghai",
+  llmProvider: process.env.LLM_PROVIDER || "qwen",
+  llmEmbedProvider: process.env.LLM_EMBED_PROVIDER || "",
   backupDailyCron: process.env.BACKUP_DAILY_CRON || "0 3 * * *",
   backupDailyLockName: process.env.BACKUP_DAILY_LOCK_NAME || "backup_daily_tick",
   backupWeeklyCron: process.env.BACKUP_WEEKLY_CRON || "30 2 * * 0",
