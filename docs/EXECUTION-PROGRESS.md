@@ -7,31 +7,49 @@
 
 ## 阶段 A: 自动备份
 
-**状态**: 进行中  
+**状态**: ✅ 已完成  
 **开始时间**: 2026-04-28  
-**完成时间**: —
+**完成时间**: 2026-04-28
 
 **子任务**
 
 | # | 任务 | 状态 | Commit |
 |---|------|------|--------|
-| A1 | 改 scripts/backup.js：月→日粒度，MAX(created_at,updated_at)，文件名 incr-YYYY-MM-DD，清理 8 天前 | 待办 | — |
-| A2 | 新建 scripts/full-backup.js：VACUUM INTO data/backups/full-YYYY-Www.sqlite，清理 5 周前 | 待办 | — |
-| A3 | 新建 scripts/restore.js：--from <full> --apply <incr...>，按时间 upsert | 待办 | — |
-| A4 | src/scheduler.js 加 daily_incr_backup (0 3 * * *) + weekly_full_backup (30 2 * * 0)，带 leader lock | 待办 | — |
-| A5 | .env.example 补 BACKUP_DAILY_CRON / BACKUP_WEEKLY_CRON / 保留窗口配置 | 待办 | — |
-| A6 | .gitignore 加 data/backups/ | 待办 | — |
-| A7 | README.md 增加"备份与恢复"小节（带具体命令示例） | 待办 | — |
-| A8 | 手动跑 full-backup + backup 验证产出（不 commit） | 待办 | — |
-| A9 | 更新此文档阶段 A 完成 + commit "docs(progress): 阶段 A 完成" | 待办 | — |
+| A1 | 改 scripts/backup.js：月→日粒度，MAX(created_at,updated_at)，文件名 incr-YYYY-MM-DD，清理 8 天前 | ✅ | 54f880a |
+| A2 | 新建 scripts/full-backup.js：VACUUM INTO data/backups/full-YYYY-Www.sqlite，清理 4 周前 | ✅ | a0bd939 |
+| A3 | 新建 scripts/restore.js：--from <full> --apply <incr...>，按时间 upsert | ✅ | 47108f5 |
+| A4 | src/scheduler.js 加 daily_incr_backup (0 3 * * *) + weekly_full_backup (30 2 * * 0)，带 leader lock | ✅ | 1923601 |
+| A5 | .env.example 补 BACKUP_DAILY_CRON / BACKUP_WEEKLY_CRON / 保留窗口配置 | ✅ | f22cc59 |
+| A6 | .gitignore 加 data/backups/ | ✅ | f22cc59 |
+| A7 | README.md 增加"备份与恢复"小节（带具体命令示例） | ✅ | f22cc59 |
+| A8 | 手动跑 full-backup + backup 验证产出（不 commit） | ✅ | — |
+| A9 | 更新此文档阶段 A 完成 + commit | ✅ | 本次 |
+
+**涉及文件**
+
+- `scripts/backup.js` — 改造（月→日，MAX time col，自动清理）
+- `scripts/full-backup.js` — 新建（VACUUM INTO + 周命名 + 清理）
+- `scripts/restore.js` — 新建（全量 + 增量恢复，带安全备份）
+- `src/scheduler.js` — 加两个 cron runner + exports
+- `src/config.js` — 加 backupDailyCron / backupWeeklyCron 等 6 个配置项
+- `.env.example` / `.gitignore` / `README.md` — 配套文档
 
 **关键决策**
 
 - 全量备份目录统一改为 `data/backups/`（复数），与原 `data/backup/`（旧增量）区分
 - 增量 `since` 采用固定 `now - 25h`（有 1h 重叠），不依赖状态文件，更易推断
-- VACUUM INTO 在 scheduler cron 中运行，需要 writable db 连接（非 readonly）
+- VACUUM INTO 在 scheduler cron 中运行时使用 writable db 连接
+- 全量备份已存在时跳过（幂等），scheduler 重启不会重复写
+- `require.main === module` 保护：scripts 被 scheduler require 时不触发 CLI 入口
 
-**未决/遗留**: —
+**验证结果**
+
+- `node scripts/full-backup.js` → `full-2026-W18.sqlite` 276 KB ✓
+- `node scripts/backup.js daily` → `incr-2026-04-28.jsonl.gz` 20 B（0 行，数据早于 25h 窗口，正常）✓
+- `node scripts/backup.js verify incr-2026-04-28.jsonl.gz` → `{"ok":true}` ✓
+- `node -e "require('./src/scheduler')"` → 加载正常，无副作用 ✓
+
+**未决/遗留**: 无
 
 ---
 
@@ -85,7 +103,9 @@
 
 ## 已完成阶段总览
 
-（本文档初版，所有阶段待办）
+| 阶段 | 描述 | 完成时间 | Commit 数 |
+|------|------|---------|-----------|
+| A | 自动备份（增量 + 全量 + 恢复 + scheduler 接入） | 2026-04-28 | 5 |
 
 ---
 
