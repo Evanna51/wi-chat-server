@@ -108,6 +108,8 @@ const config = {
   backupWeeklyLockName: process.env.BACKUP_WEEKLY_LOCK_NAME || "backup_weekly_tick",
   backupIncrKeepDays: Number(process.env.BACKUP_INCR_KEEP_DAYS || 8),
   backupFullKeepWeeks: Number(process.env.BACKUP_FULL_KEEP_WEEKS || 4),
+  memoryClassifyCron: process.env.MEMORY_CLASSIFY_CRON || "*/10 * * * *",
+  memoryClassifyLockName: process.env.MEMORY_CLASSIFY_LOCK_NAME || "memory_classify_tick",
 };
 
 module.exports = config;

@@ -628,6 +628,24 @@ async function runRetentionSweepTick() {
   }
 }
 
+async function runMemoryClassifyBackfillTick() {
+  if (!tryAcquireSchedulerLock(config.memoryClassifyLockName)) {
+    infoLog("[scheduler] skip memory-classify tick (leader lock not acquired)");
+    return { skippedByLock: true };
+  }
+  try {
+    const { backfillUnclassified } = require("./services/memoryClassificationService");
+    const result = await backfillUnclassified({ limit: 100 });
+    if (result.scanned > 0) {
+      infoLog("[scheduler] memory-classify backfill:", JSON.stringify(result));
+    }
+    return result;
+  } catch (error) {
+    console.error("[scheduler] memory-classify backfill failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 async function runPlanGenerationTick() {
   if (!tryAcquireSchedulerLock(config.planGenerationLockName)) {
     infoLog("[scheduler] skip plan-generation tick (leader lock not acquired)");
@@ -746,6 +764,7 @@ function startScheduler() {
   scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick);
   scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick);
   scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick);
+  scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick);
   startPlanExecutorLoop();
 }
 
@@ -759,4 +778,5 @@ module.exports = {
   runPlanExecutorOnce,
   runDailyBackupTick,
   runWeeklyBackupTick,
+  runMemoryClassifyBackfillTick,
 };
