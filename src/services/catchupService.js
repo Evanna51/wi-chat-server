@@ -1,6 +1,7 @@
 const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
 const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { buildStatePromptFragment } = require("./characterStateService");
 const {
   getAssistantProfile,
   getRecentTurnsAcrossSessions,
@@ -93,6 +94,7 @@ function buildCatchupPrompt({
   nEvents,
   anchorMin,
   seed,
+  stateFragment,
 }) {
   const turnLines = recentTurns
     .slice(0, 6)
@@ -115,6 +117,7 @@ function buildCatchupPrompt({
   return [
     `你正在为 AI 角色「${characterName}」写一份"在用户不在的这段时间里发生了什么"的私人日记。这是给角色自己的内部记录，不是要发给用户的内容。`,
     "",
+    ...(stateFragment ? [stateFragment, ""] : []),
     "【时间窗】",
     `开始：${formatHumanTs(lastInteractionAt)}（${lastInteractionAt} 时间戳）`,
     `现在：${formatHumanTs(now)}（${now} 时间戳）`,
@@ -322,6 +325,7 @@ async function runCatchup({
       nEvents,
       anchorMin,
       seed,
+      stateFragment: buildStatePromptFragment(assistantId, now),
     });
 
     let parsed;

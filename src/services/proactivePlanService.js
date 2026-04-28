@@ -1,6 +1,7 @@
 const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
 const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { buildStatePromptFragment } = require("./characterStateService");
 const {
   db,
   getAssistantProfile,
@@ -81,6 +82,7 @@ function buildPlanPrompt({
   userFacts,
   relevantMemories,
   recentDrafts,
+  stateFragment,
 }) {
   const turnLines = recentTurns
     .slice(0, 6)
@@ -108,6 +110,7 @@ function buildPlanPrompt({
   return [
     `你是 AI 角色「${characterName}」，要给用户主动发一条消息。这条消息是开场——发完之后用户会回，会展开成一段对话。`,
     "",
+    ...(stateFragment ? [stateFragment, ""] : []),
     "【触发原因】",
     `原因码：${triggerReason}`,
     `原因描述：${triggerExplanation}`,
@@ -464,6 +467,7 @@ async function generatePlanForAssistant({ profile, now, userId }) {
         userFacts,
         relevantMemories,
         recentDrafts,
+        stateFragment: buildStatePromptFragment(assistantId),
       });
       let raw;
       try {
