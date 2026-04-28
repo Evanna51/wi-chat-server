@@ -1,7 +1,7 @@
 # Agentic RAG: search_memory Tool 规格
 
 > 给 app 端 LLM（Claude / Qwen / 任意 tool-calling LLM）的工具定义。
-> Server 端只暴露 `POST /api/memory/search`，不做 decision，不跑 agent loop。
+> Server 端只暴露 `POST /api/tool/memory-recall`，不做 decision，不跑 agent loop。
 
 ## 设计理念
 
@@ -15,7 +15,7 @@
 ## Server 端点
 
 ```
-POST /api/memory/search
+POST /api/tool/memory-recall
 Content-Type: application/json
 Authorization: Bearer <APP_API_KEY>  (如启用)
 
@@ -126,9 +126,9 @@ Always rewrite vague queries to concrete terms BEFORE calling. E.g.:
 
 | 端点 | 类型 | 用途 |
 |------|------|------|
-| `/api/search` | FTS 关键词搜索 | 调试/管理用，关键词模糊查找 |
-| `/api/tool/memory-context` | "智能 RAG"（含 decision） | server 端用，自动判断要不要查、查什么 |
-| **`/api/memory/search`** | **纯向量搜索** | **app 端 tool call 直击，无 decision** |
+| `/api/admin/search-fts` | FTS 关键词搜索 | ops/调试用，关键词模糊查找 |
+| `/api/tool/memory-context` | "智能 RAG"（含 decision） | server 端用，自动判断要不要查 + 返回格式化 prompt 片段 |
+| **`/api/tool/memory-recall`** | **纯向量搜索** | **app 端 tool call 直击，无 decision，返回原始 memory 列表** |
 
 agentic 流程下用最后一个。前两个保留以兼容旧调用方。
 
@@ -138,17 +138,17 @@ agentic 流程下用最后一个。前两个保留以兼容旧调用方。
 
 ```bash
 # 默认查用户偏好
-curl -X POST http://192.168.5.7:8787/api/memory/search \
+curl -X POST http://192.168.5.7:8787/api/tool/memory-recall \
   -H "Content-Type: application/json" \
   -d '{"assistantId":"e2e_test_01","query":"钢琴","minQuality":"C"}'
 
 # 查角色侧（用户提到"你"）
-curl -X POST http://192.168.5.7:8787/api/memory/search \
+curl -X POST http://192.168.5.7:8787/api/tool/memory-recall \
   -H "Content-Type: application/json" \
   -d '{"assistantId":"e2e_test_01","query":"羽毛球","source":"character"}'
 
 # 限定分类
-curl -X POST http://192.168.5.7:8787/api/memory/search \
+curl -X POST http://192.168.5.7:8787/api/tool/memory-recall \
   -H "Content-Type: application/json" \
   -d '{"assistantId":"e2e_test_01","query":"工作","source":"user","category":"goals_plans"}'
 ```

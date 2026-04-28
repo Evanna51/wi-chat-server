@@ -379,7 +379,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
  * - 显式提到"你"或角色名时，app 端 LLM 应改传 source='character'
  * - 无 decision 逻辑（与 /tool/memory-context 区分）：LLM 已决定要查，server 直接执行
  */
-router.post("/memory/search", authMiddleware, async (req, res) => {
+router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
     query: z.string().min(1),
@@ -426,7 +426,8 @@ router.post("/memory/search", authMiddleware, async (req, res) => {
   }
 });
 
-router.post("/search", authMiddleware, (req, res) => {
+// FTS 关键词搜索：ops/调试用，非 tool 调用
+router.post("/admin/search-fts", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
     q: z.string().min(1),
