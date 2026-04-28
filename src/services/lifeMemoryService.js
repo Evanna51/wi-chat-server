@@ -1,7 +1,6 @@
 const { z } = require("zod");
 const { v7: uuidv7 } = require("uuid");
-const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { getProvider } = require("../llm");
 const {
   getRecentConversationTurns,
   getRecentAssistantInteractions,
@@ -256,25 +255,11 @@ function buildPrompt({
 }
 
 async function runAiDecision(prompt) {
-  const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.qwenApiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.qwenModel,
-      temperature: 0,
-      max_tokens: 180,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  }, 30000);
-  if (!res.ok) {
-    throw new Error(`life memory ai failed: ${res.status} ${await res.text()}`);
-  }
-  const body = await res.json();
-  const content = body?.choices?.[0]?.message?.content || "";
+  const { content } = await getProvider().complete({
+    messages: [{ role: "user", content: prompt }],
+    responseFormat: "json",
+    maxTokens: 180,
+  });
   const raw = parseStrictJsonObject(content);
   return lifeMemorySchema.parse(normalizeLifeMemoryDecision(raw));
 }
