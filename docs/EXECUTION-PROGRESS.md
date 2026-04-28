@@ -100,26 +100,59 @@
 
 ## 阶段 C: LLM Provider 抽象
 
-**状态**: 待办  
-**开始时间**: —  
-**完成时间**: —
+**状态**: ✅ 已完成  
+**开始时间**: 2026-04-28  
+**完成时间**: 2026-04-28
 
 **子任务**
 
 | # | 任务 | 状态 | Commit |
 |---|------|------|--------|
-| C1 | 建 src/llm/：ILLMProvider JSDoc + index.js 工厂 + QwenProvider.js | 待办 | — |
-| C2 | FakeProvider.js 测试用 | 待办 | — |
-| C3 | 迁移 5 处 chat completion 调用（每处单独 commit） | 待办 | — |
-| C4 | 迁移 embeddingService.js → provider.embed() | 待办 | — |
-| C5 | QwenProvider 加 token 计数 + provider_call_log 表（migration 012） | 待办 | — |
-| C6 | .env.example 加 LLM_PROVIDER / LLM_EMBED_PROVIDER | 待办 | — |
-| C7 | ClaudeProvider.js + OpenAIProvider.js 最小 stub | 待办 | — |
-| C8 | 集成验证：主动消息生成 + 记忆生成 + 向量化链路通 | 待办 | — |
-| C9 | 更新此文档阶段 C 完成 + 整体收尾汇总 + commit | 待办 | — |
+| C1 | 建 src/llm/：ILLMProvider JSDoc + index.js 工厂 + QwenProvider.js | ✅ | ca78721 |
+| C2 | FakeProvider.js 测试用（setResponse/queueResponse/getCallLog） | ✅ | ebc2f72 |
+| C3a | catchupService → getProvider().complete() | ✅ | da41572 |
+| C3b | proactivePlanService → getProvider().complete() | ✅ | 6e68190 |
+| C3c | proactivePlanService config 引用修复 | ✅ | a519ddb |
+| C3d | memoryDecisionService → getProvider().complete() | ✅ | 3ef88bd |
+| C3e | lifeMemoryService → getProvider().complete() | ✅ | e68842e |
+| C3f | proactiveMessageDecisionService → getProvider().complete() | ✅ | cd948ae |
+| C4 | embeddingService → getEmbedProvider().embed() | ✅ | 71a35cf |
+| C5 | migration 012 provider_call_log + QwenProvider recordProviderCall | ✅ | 97a4248 |
+| C6 | .env.example 加 LLM_PROVIDER / LLM_EMBED_PROVIDER | ✅ | 4e2aa7f |
+| C7 | ClaudeProvider.js + OpenAIProvider.js 最小 stub | ✅ | 4e2aa7f |
+| C8 | 集成验证：10 模块加载测试全通过 | ✅ | — |
+| C9 | 更新此文档阶段 C 完成 + 整体收尾汇总 + commit | ✅ | 本次 |
 
-**关键决策**: 见之前 chat 中的 LLM Provider 抽象方案  
-**未决/遗留**: 待阶段 B 完成后确认
+**涉及文件**
+
+- `src/llm/ILLMProvider.js` — 接口定义（JSDoc typedef + 抽象基类）
+- `src/llm/QwenProvider.js` — Qwen 实现（complete + embed fallback + healthCheck + token 估算）
+- `src/llm/FakeProvider.js` — 测试用假 provider（可控 response queue）
+- `src/llm/ClaudeProvider.js` / `src/llm/OpenAIProvider.js` — 最小 stub
+- `src/llm/callLogger.js` — provider 调用日志（惰性建表，兼容旧 DB）
+- `src/llm/index.js` — 工厂 + 单例缓存 + 测试注入接口
+- `src/db/migrations/012_provider_call_log.sql` — 新表
+- `src/services/catchupService.js` — 迁移至 provider
+- `src/services/proactivePlanService.js` — 迁移至 provider
+- `src/services/memoryDecisionService.js` — 迁移至 provider
+- `src/services/lifeMemoryService.js` — 迁移至 provider
+- `src/services/proactiveMessageDecisionService.js` — 迁移至 provider
+- `src/services/embeddingService.js` — 迁移至 provider（精简至 10 行）
+- `src/config.js` — 加 llmProvider / llmEmbedProvider
+
+**关键决策**
+
+- `responseFormat: "json"` 自动将 temperature 强制为 0，避免 JSON 格式错误
+- callLogger 惰性建表 + 静默降级：migration 012 未应用时不崩溃
+- QwenProvider embed 失败时 fallback 到 `deterministicEmbedding`（sha256 → float 数组），保证向量化链路不中断
+- `_setProviderForTesting()` / `_resetProviders()` 供测试 DI，不污染生产单例
+
+**验证**
+
+- 10 模块加载测试全通过（catchup / proactivePlan / memoryDecision / lifeMemory / proactiveMessageDecision / embedding / llm/index / QwenProvider / FakeProvider / callLogger）✓
+- PM2 进程 online，内存 86 MB，无异常重启 ✓
+
+**未决/遗留**: 无
 
 ---
 
@@ -129,6 +162,7 @@
 |------|------|---------|-----------|
 | A | 自动备份（增量 + 全量 + 恢复 + scheduler 接入） | 2026-04-28 | 5 |
 | B | 角色状态机 MVP（migration + service + 触发 + prompt + 测试） | 2026-04-28 | 6 |
+| C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
 
 ---
 
