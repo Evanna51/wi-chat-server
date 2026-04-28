@@ -97,7 +97,7 @@ const config = {
   fcmProjectId: process.env.FCM_PROJECT_ID || "",
   fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || "",
   appApiKey: process.env.APP_API_KEY || "dev-local-key",
-  requireApiKey: (process.env.REQUIRE_API_KEY || "1") === "1",
+  requireApiKey: (process.env.REQUIRE_API_KEY || "0") === "1",
   debugHttpLog: (process.env.DEBUG_HTTP_LOG || "0") === "1",
   timezone: process.env.SCHEDULER_TIMEZONE || "Asia/Shanghai",
 };
