@@ -1,6 +1,5 @@
 const { v7: uuidv7 } = require("uuid");
-const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
 const {
   getAssistantProfile,
@@ -176,28 +175,13 @@ function parseStrictJsonObject(text = "") {
   return parsed;
 }
 
-async function callLlmForCatchup(prompt, { temperature = 0.8, topP = 0.95, maxTokens = 900 } = {}) {
-  const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.qwenApiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.qwenModel,
-      temperature,
-      top_p: topP,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  }, 30000);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`catchup llm http ${res.status}: ${txt.slice(0, 200)}`);
-  }
-  const body = await res.json();
-  const content = body?.choices?.[0]?.message?.content || "";
+async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } = {}) {
+  const { content } = await getProvider().complete({
+    messages: [{ role: "user", content: prompt }],
+    temperature,
+    maxTokens,
+    responseFormat: "json",
+  });
   return parseStrictJsonObject(content);
 }
 
