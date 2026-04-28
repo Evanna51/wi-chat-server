@@ -5,6 +5,9 @@ const readline = require("readline");
 const Database = require("better-sqlite3");
 const config = require("../src/config");
 
+const INCR_KEEP_DAYS = Number(process.env.BACKUP_INCR_KEEP_DAYS || 8);
+const WINDOW_HOURS = 25;
+
 const TABLES = [
   { name: "conversation_turns", timeColumn: "created_at" },
   { name: "memory_items", timeColumn: "created_at" },
@@ -15,69 +18,80 @@ const TABLES = [
 ];
 
 function backupDir() {
-  return path.resolve(path.dirname(config.databasePath), "backup");
+  return path.resolve(path.dirname(config.databasePath), "backups");
 }
 
-function lastBackupAtPath() {
-  return path.join(backupDir(), ".last_backup_at");
-}
-
-function readLastBackupAt() {
-  const file = lastBackupAtPath();
-  if (!fs.existsSync(file)) return 0;
-  const raw = fs.readFileSync(file, "utf8").trim();
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function writeLastBackupAt(ts) {
-  fs.writeFileSync(lastBackupAtPath(), String(ts));
-}
-
-function monthlyFile() {
-  const now = new Date();
+function dailyFile(now = new Date()) {
   const yyyy = now.getFullYear();
   const mm = String(now.getMonth() + 1).padStart(2, "0");
-  return path.join(backupDir(), `incr-${yyyy}-${mm}.jsonl.gz`);
+  const dd = String(now.getDate()).padStart(2, "0");
+  return path.join(backupDir(), `incr-${yyyy}-${mm}-${dd}.jsonl.gz`);
 }
 
-function detectTimeColumn(db, tableName, fallback) {
+function detectColumns(db, tableName) {
   const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  const names = new Set(cols.map((c) => c.name));
-  if (fallback && names.has(fallback)) return fallback;
-  if (names.has("created_at")) return "created_at";
-  if (names.has("updated_at")) return "updated_at";
+  return new Set(cols.map((c) => c.name));
+}
+
+function buildSinceExpr(colSet, since) {
+  const hasCreated = colSet.has("created_at");
+  const hasUpdated = colSet.has("updated_at");
+  if (hasCreated && hasUpdated) {
+    return { expr: "MAX(created_at, updated_at) > ?", params: [since] };
+  }
+  if (hasCreated) {
+    return { expr: "created_at > ?", params: [since] };
+  }
+  if (hasUpdated) {
+    return { expr: "updated_at > ?", params: [since] };
+  }
   return null;
 }
 
-async function runMonthly() {
+function pruneOldIncrFiles(keepDays) {
+  const dir = backupDir();
+  if (!fs.existsSync(dir)) return;
+  const cutoffMs = Date.now() - keepDays * 24 * 60 * 60 * 1000;
+  for (const name of fs.readdirSync(dir)) {
+    if (!/^incr-\d{4}-\d{2}-\d{2}\.jsonl\.gz$/.test(name)) continue;
+    const fullPath = path.join(dir, name);
+    const stat = fs.statSync(fullPath);
+    if (stat.mtimeMs < cutoffMs) {
+      fs.unlinkSync(fullPath);
+      console.log(`pruned old incr: ${name}`);
+    }
+  }
+}
+
+async function runDaily(opts = {}) {
+  const now = opts.now instanceof Date ? opts.now : new Date();
+  const sinceMs = opts.sinceMs !== undefined ? opts.sinceMs : now.getTime() - WINDOW_HOURS * 3600 * 1000;
+
   fs.mkdirSync(backupDir(), { recursive: true });
-  const since = readLastBackupAt();
   const dbPath = path.resolve(config.databasePath);
   const db = new Database(dbPath, { readonly: true });
-  const outPath = monthlyFile();
-  const out = fs.createWriteStream(outPath, { flags: "a" });
+  const outPath = opts.outPath || dailyFile(now);
+  const out = fs.createWriteStream(outPath);
   const gz = zlib.createGzip();
   gz.pipe(out);
 
-  let maxTs = since;
+  let totalRows = 0;
   const summary = {};
   for (const t of TABLES) {
-    const timeCol = detectTimeColumn(db, t.name, t.timeColumn);
+    const colSet = detectColumns(db, t.name);
     let rows = [];
-    if (timeCol) {
+    const sinceExpr = buildSinceExpr(colSet, sinceMs);
+    if (sinceExpr) {
       rows = db
-        .prepare(`SELECT * FROM ${t.name} WHERE ${timeCol} > ? ORDER BY ${timeCol} ASC`)
-        .all(since);
+        .prepare(`SELECT * FROM ${t.name} WHERE ${sinceExpr.expr} ORDER BY rowid ASC`)
+        .all(...sinceExpr.params);
     } else {
       rows = db.prepare(`SELECT * FROM ${t.name}`).all();
     }
-    summary[t.name] = { rows: rows.length, timeCol };
+    summary[t.name] = rows.length;
+    totalRows += rows.length;
     for (const row of rows) {
-      const ts = timeCol ? Number(row[timeCol]) : null;
-      if (ts && ts > maxTs) maxTs = ts;
-      const obj = { _table: t.name, ...row };
-      gz.write(JSON.stringify(obj) + "\n");
+      gz.write(JSON.stringify({ _table: t.name, ...row }) + "\n");
     }
   }
   db.close();
@@ -87,29 +101,23 @@ async function runMonthly() {
   });
   await new Promise((resolve) => out.on("close", resolve));
 
-  if (maxTs > since) {
-    writeLastBackupAt(maxTs);
-  }
-  const fileSize = fs.statSync(outPath).size;
+  pruneOldIncrFiles(INCR_KEEP_DAYS);
 
-  console.log(`backup file: ${outPath}`);
-  console.log(`since:       ${since} (${since ? new Date(since).toISOString() : "epoch"})`);
-  console.log(`new max ts:  ${maxTs} (${maxTs ? new Date(maxTs).toISOString() : "n/a"})`);
-  console.log("table rows:");
-  for (const [tableName, s] of Object.entries(summary)) {
-    console.log(`  ${tableName.padEnd(32)} ${s.rows}  (timeCol=${s.timeCol || "ALL"})`);
+  const fileSize = fs.statSync(outPath).size;
+  console.log(`[backup] incr done: ${outPath}`);
+  console.log(`[backup] since: ${new Date(sinceMs).toISOString()} (window=${WINDOW_HOURS}h)`);
+  console.log(`[backup] rows: ${totalRows}  size: ${fileSize} bytes`);
+  for (const [tbl, count] of Object.entries(summary)) {
+    console.log(`         ${tbl.padEnd(34)} ${count}`);
   }
-  console.log(`file size: ${fileSize} bytes`);
+  return { outPath, fileSize, totalRows, summary };
 }
 
 async function runVerify(filePath) {
-  if (!filePath) {
-    throw new Error("usage: node scripts/backup.js verify <file>");
-  }
+  if (!filePath) throw new Error("usage: node scripts/backup.js verify <file>");
   const abs = path.resolve(filePath);
-  if (!fs.existsSync(abs)) {
-    throw new Error(`文件不存在: ${abs}`);
-  }
+  if (!fs.existsSync(abs)) throw new Error(`文件不存在: ${abs}`);
+
   const stream = fs.createReadStream(abs).pipe(zlib.createGunzip());
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
@@ -118,28 +126,20 @@ async function runVerify(filePath) {
   let lines = 0;
   for await (const line of rl) {
     lines += 1;
-    if (head.length < 5) {
-      head.push(line);
-    } else {
+    if (head.length < 5) head.push(line);
+    else {
       tail.push(line);
       if (tail.length > 5) tail.shift();
     }
   }
-
-  for (const line of head) {
-    JSON.parse(line);
-  }
-  for (const line of tail) {
-    JSON.parse(line);
-  }
-
+  for (const line of [...head, ...tail]) JSON.parse(line);
   console.log(JSON.stringify({ ok: true, lines, file: abs }, null, 2));
 }
 
 async function main() {
   const cmd = process.argv[2];
-  if (cmd === "monthly") {
-    await runMonthly();
+  if (cmd === "daily") {
+    await runDaily();
     return;
   }
   if (cmd === "verify") {
@@ -147,12 +147,14 @@ async function main() {
     return;
   }
   console.log("用法:");
-  console.log("  node scripts/backup.js monthly");
+  console.log("  node scripts/backup.js daily");
   console.log("  node scripts/backup.js verify <file>");
   process.exit(1);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
+main().catch((err) => {
+  console.error(err.message || err);
   process.exit(1);
 });
+
+module.exports = { runDaily };
