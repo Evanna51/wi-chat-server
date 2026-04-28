@@ -27,6 +27,7 @@ const {
 } = require("../services/memoryDecisionService");
 const { runCatchup } = require("../services/catchupService");
 const { onUserMessage: onUserMessageState, ensureDefaultState } = require("../services/characterStateService");
+const { classifyAndPersist } = require("../services/memoryClassificationService");
 const {
   generatePlans,
   listPendingPlans,
@@ -225,8 +226,9 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
   const totalTurns = (current.total_turns || 0) + (role === "user" ? 1 : 0);
   const familiarity = Math.min(100, Math.floor(totalTurns / 3));
 
+  let ingestResult = null;
   withTransaction(() => {
-    ingestInteraction({
+    ingestResult = ingestInteraction({
       db,
       assistantId,
       sessionId,
@@ -251,6 +253,11 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
       onUserMessageState(assistantId, { content, now });
     } catch (e) {
       // non-critical: don't fail the request if state update errors
+    }
+    if (ingestResult?.memoryId && !ingestResult.skipped) {
+      setImmediate(() => {
+        classifyAndPersist(ingestResult.memoryId, content).catch(() => {});
+      });
     }
   }
 
