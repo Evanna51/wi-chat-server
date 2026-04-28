@@ -1,6 +1,5 @@
 const { v7: uuidv7 } = require("uuid");
-const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
 const {
   db,
@@ -49,26 +48,12 @@ function parseStrictJsonObject(text = "") {
 }
 
 async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600 } = {}) {
-  const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.qwenApiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.qwenModel,
-      temperature,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  }, 30000);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`plan llm http ${res.status}: ${txt.slice(0, 200)}`);
-  }
-  const body = await res.json();
-  const content = body?.choices?.[0]?.message?.content || "";
+  const { content } = await getProvider().complete({
+    messages: [{ role: "user", content: prompt }],
+    temperature,
+    maxTokens,
+    responseFormat: "json",
+  });
   return parseStrictJsonObject(content);
 }
 
