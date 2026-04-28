@@ -10,6 +10,9 @@ data/archive/
 data/backup/
 exports/
 
+logs/
+.pm2/
+
 npm-debug.log*
 
 # Claude Code local worktrees / agent state — never commit

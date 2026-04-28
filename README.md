@@ -70,6 +70,34 @@ If you want the HNSW sidecar:
 2. `npm run sidecar:hnsw`
 3. Set `VECTOR_PROVIDER=hnswlib` in `.env`
 
+## 运行方式
+
+### 直接运行（开发调试）
+
+```bash
+npm run dev
+```
+
+进程前台运行，Ctrl-C 退出，日志直接打到终端。
+
+### PM2 托管（生产 / 长期运行）
+
+> 前置：`npm install -g pm2`
+
+```bash
+npm start          # 启动（后台，fork 模式）
+npm run status     # 查看进程状态
+npm run logs       # 实时日志（Ctrl-C 退出查看，进程继续运行）
+npm restart        # 热重启（重载代码但 PM2 进程不退出）
+npm stop           # 停止
+```
+
+日志文件落在 `./logs/`（已加入 `.gitignore`）。进程名：`wi-chat-server`。
+
+**SQLite 单写限制**：`ecosystem.config.js` 固定 `exec_mode: "fork"` + `instances: 1`，禁止改为 cluster，否则多进程并发写会损坏 WAL 文件。
+
+`kill_timeout` 设为 10 s，给在途 LLM 调用留足排空时间。
+
 ## Scripts
 
 - `npm run setup` - create `.env` from `.env.example` and ensure `data/` exists (cross-platform)
