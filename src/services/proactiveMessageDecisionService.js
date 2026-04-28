@@ -1,5 +1,6 @@
 const { z } = require("zod");
 const config = require("../config");
+const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
 const {
   getRecentConversationTurns,
   getRecentAssistantInteractions,
@@ -125,7 +126,7 @@ function buildPrompt({
 
 async function runAiDecision(prompt) {
   const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -137,7 +138,7 @@ async function runAiDecision(prompt) {
       max_tokens: 180,
       messages: [{ role: "user", content: prompt }],
     }),
-  });
+  }, 30000);
   if (!res.ok) {
     throw new Error(`proactive message ai failed: ${res.status} ${await res.text()}`);
   }

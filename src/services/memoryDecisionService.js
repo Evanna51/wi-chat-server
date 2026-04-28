@@ -1,4 +1,5 @@
 const config = require("../config");
+const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
 
 const MEMORY_TRIGGER_REGEX =
   /(记得|上次|之前|喜欢|不喜欢|偏好|习惯|生日|工作|家人|最近|还记得|我们聊到)/;
@@ -63,7 +64,7 @@ async function aiDecision(userInput) {
     `当前用户输入: ${userInput}`,
   ].join("\n");
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -75,7 +76,7 @@ async function aiDecision(userInput) {
       max_tokens: 160,
       messages: [{ role: "user", content: prompt }],
     }),
-  });
+  }, 30000);
 
   if (!res.ok) {
     throw new Error(`ai decision failed: ${res.status} ${await res.text()}`);

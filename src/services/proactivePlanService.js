@@ -1,5 +1,6 @@
 const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
+const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
 const {
   db,
   getAssistantProfile,
@@ -48,7 +49,7 @@ function parseStrictJsonObject(text = "") {
 
 async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600 } = {}) {
   const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -60,7 +61,7 @@ async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
-  });
+  }, 30000);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`plan llm http ${res.status}: ${txt.slice(0, 200)}`);

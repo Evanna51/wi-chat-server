@@ -1,5 +1,6 @@
 const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
+const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
 const {
   getAssistantProfile,
   getRecentTurnsAcrossSessions,
@@ -174,7 +175,7 @@ function parseStrictJsonObject(text = "") {
 
 async function callLlmForCatchup(prompt, { temperature = 0.8, topP = 0.95, maxTokens = 900 } = {}) {
   const endpoint = `${config.qwenBaseUrl.replace(/\/$/, "")}/chat/completions`;
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -187,7 +188,7 @@ async function callLlmForCatchup(prompt, { temperature = 0.8, topP = 0.95, maxTo
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
-  });
+  }, 30000);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`catchup llm http ${res.status}: ${txt.slice(0, 200)}`);
