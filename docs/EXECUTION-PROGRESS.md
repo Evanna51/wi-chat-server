@@ -141,6 +141,64 @@ POST /api/report-interaction { content: "项目终于成功了！太棒了，做
 
 ---
 
+## 阶段 D：用户记忆分类 + 质量评级 + 引用计数
+
+**状态**: ✅ 已完成  
+**开始时间**: 2026-04-28  
+**完成时间**: 2026-04-28
+
+**子任务**
+
+| # | 任务 | 状态 | Commit |
+|---|------|------|--------|
+| D1 | Migration 013：memory_items 加 6 列（category/confidence/method/grade/cite_count/last_cited_at）+ 2 索引 | ✅ | 7bda723 |
+| D2 | memoryClassificationService.js：启发式 + LLM 两段策略，合并 category+quality 一次调用 | ✅ | 7bda723 |
+| D3 | api.js report-interaction 写入后 setImmediate 异步触发分类 | ✅ | 1cd3313 |
+| D4 | memoryRetrievalService 加 category 过滤 + quality/cite 加权 + 批量自增 cite_count | ✅ | a775a3c |
+| D5 | backfill 脚本 + scheduler 每 10 分钟兜底 cron | ✅ | 7bf55ff |
+| D6 | 单测 21 断言（Suite 1-7：启发式/persist/skip/idempotent/LLM/backfill/integrity） | ✅ | 4636131 |
+| D7 | E2E 验证：启发式路径 + LLM 路径 + provider_call_log 写入 | ✅ | — |
+| D8 | 更新此文档 + commit | ✅ | 本次 |
+
+**涉及文件**
+
+- `src/db/migrations/013_memory_category.sql` — 新建（6 列 + 2 索引）
+- `src/services/memoryClassificationService.js` — 新建（180 行）
+- `src/services/memoryRetrievalService.js` — 改写（加权公式 + 过滤 + 自增）
+- `src/routes/api.js` — report-interaction setImmediate 钩子
+- `src/scheduler.js` — runMemoryClassifyBackfillTick + 注册 cron
+- `src/config.js`, `.env.example` — `MEMORY_CLASSIFY_CRON`
+- `scripts/backfill-memory-categories.js` — 新建（脚本 & cron 共用）
+- `tests/memoryClassification.test.js` — 21 断言
+
+**关键决策**
+
+- 9 大语义类别 + A-E 质量评级，**合并到单次 LLM JSON 调用**，prompt 仅多 30 tokens，本地 Qwen 成本可忽略
+- 启发式优先（覆盖明确情况，零成本），LLM 兜底；启发式失败时短消息(<5字)默认 chitchat D，其余交 LLM
+- 异步分类不阻塞 HTTP，配合 cron 兜底防丢
+- 仅对 `memory_type='user_turn'` 分类，life_event/work_event 等保持 NULL
+- 检索 ranking 公式调整：`semantic 0.42 + recency 0.18 + salience 0.10 + confidence 0.08 + quality 0.10 + cite 0.05 + edge 0.05`，原 0.48/0.20/0.15/0.10 让出权重给新维度
+- 检索时批量自增 cite_count 并记 last_cited_at，"被高频检索"成为隐式重要度信号
+
+**E2E 验证**
+
+```
+POST /api/report-interaction { content: "我每周三晚上学钢琴，已经坚持半年了" }
+→ HTTP 响应 < 5ms（不阻塞）
+→ DB: category=preferences, grade=C, method=heuristic, conf=0.7 ✓
+
+POST /api/report-interaction { content: "我家阳台上的薄荷又长出新叶子了" }
+→ DB: category=personal_experience, grade=C, method=llm, conf=0.95 ✓
+→ provider_call_log: 1 次 LLM 调用，123 in / 18 out tokens, 1.4s ✓
+```
+
+**未决/遗留**
+
+- `chat-with-memory` / `tool/memory-context` 等检索入口尚未暴露 `category` 参数；后续可加（属增量优化，不影响核心闭环）
+- 现有历史 memory_items 跑一次 backfill 即可全量回填（命令：`node scripts/backfill-memory-categories.js`），或等 cron 自动处理
+
+---
+
 ## 阶段 C: LLM Provider 抽象
 
 **状态**: ✅ 已完成  
@@ -207,6 +265,7 @@ POST /api/report-interaction { content: "项目终于成功了！太棒了，做
 | B | 角色状态机 MVP（migration + service + 触发 + prompt + 测试） | 2026-04-28 | 6 |
 | B.2 | 情绪词库扩展（GoEmotions 27+95=122 词，两段启发式，中英 prompt）| 2026-04-28 | 4 |
 | C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
+| D | 用户记忆分类（migration 013 + 启发式+LLM 两段 + 质量 A-E + cite_count + 检索加权） | 2026-04-28 | 5 |
 
 ---
 
