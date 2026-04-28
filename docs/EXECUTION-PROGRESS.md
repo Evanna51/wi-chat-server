@@ -94,7 +94,50 @@
 - `node scripts/init-character-states.js --dry-run` → 正常输出 ✓
 - `node src/services/catchupService.js` (require 加载) → ok ✓
 
-**未决/遗留**: Phase 2 可加 LLM 情绪分析作为补充（非必要，heuristic 已足够 MVP）
+**未决/遗留**: 无（Phase 2 词库扩展已完成，见下节）
+
+---
+
+## 阶段 B 扩展（Phase 2）：情绪词库扩展
+
+**状态**: ✅ 已完成  
+**开始时间**: 2026-04-28  
+**完成时间**: 2026-04-28
+
+**子任务**
+
+| # | 任务 | 状态 | Commit |
+|---|------|------|--------|
+| E1 | 新建 src/services/emotionTaxonomy.js：27 GoEmotions base + 95 secondary = 122 词 | ✅ | 60ff424 |
+| E2 | 重写 characterStateService.js：删 EMOTION_META，接入 resolveEmotion，两段启发式 | ✅ | abeb917 |
+| E3 | buildStatePromptFragment 中英对照格式"成就感 / accomplished" | ✅ | abeb917 |
+| E4 | 测试：Suite 1-7 全过 + Suite 8-11 新增扩展词库测试，38 passed 0 failed | ✅ | 6bca75c |
+| E5 | 端到端验证：PM2 重启 + curl 验证 accomplished/prompt 格式 | ✅ | — |
+| E6 | 更新此文档 + commit | ✅ | 本次 |
+| bugfix | NEGATIVE_SIGNALS 单字符误匹配修复（"特别"里的"别"） | ✅ | aeae23d |
+
+**涉及文件**
+
+- `src/services/emotionTaxonomy.js` — 新建（122 词，含 group/parent/valence/arousal/intensity_default）
+- `src/services/characterStateService.js` — 重构（两段启发式，resolveEmotion 替代 EMOTION_META）
+- `tests/characterState.test.js` — 扩展至 38 断言，11 个 Suite
+
+**关键决策**
+
+- 选 GoEmotions 27 作为 base（贴合对话语境，比 Ekman/Plutchik 更现代）
+- 两段启发式：第一段粗分（deep_share/positive/negative），第二段关键词细化
+- 无 LLM 调用：`成功/做到了→accomplished`、`感谢→thankful`、`哈哈！！→elated`、`孤独→lonely` 等依赖明确关键词，其余降级到同类默认词
+- Prompt 注入 "中文 / English" 双标签，增强 LLM 对情绪的理解
+
+**E2E 验证（Phase 2）**
+
+```
+POST /api/report-interaction { content: "项目终于成功了！太棒了，做到了！" }
+→ mood_emotion=accomplished, valence=0.7 ✓
+→ buildStatePromptFragment: "情绪：成就感 / accomplished（强度 40%，偏正面）" ✓
+```
+
+**未决/遗留**: 无
 
 ---
 
@@ -162,6 +205,7 @@
 |------|------|---------|-----------|
 | A | 自动备份（增量 + 全量 + 恢复 + scheduler 接入） | 2026-04-28 | 5 |
 | B | 角色状态机 MVP（migration + service + 触发 + prompt + 测试） | 2026-04-28 | 6 |
+| B.2 | 情绪词库扩展（GoEmotions 27+95=122 词，两段启发式，中英 prompt）| 2026-04-28 | 4 |
 | C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
 
 ---
