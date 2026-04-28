@@ -1,178 +1,214 @@
-# 用户记忆分类实施方案
+# 用户记忆分类 + 质量评级实施方案 v2
 
-> 状态: 待执行 | 2026-04-28
+> 状态: 待执行 | 2026-04-28 | 替代 v1
 
 ## 目标
 
-给 `memory_items` 中的用户侧记忆（`memory_type = 'user_turn'`）加语义分类标签，
-使 catchup / proactivePlan / RAG 检索能按分类过滤，实现"只取用户知识收藏"、
-"只看用户近期偏好"等能力。
+给 user_turn 类记忆同时打上 **3 类标签**，让 catchup / proactivePlan / RAG 能按维度筛选与加权：
+
+1. **memory_category**：9 大语义类别（chitchat / personal_experience / ...）
+2. **quality_grade**：A–E 内容质量评级
+3. **cite_count**：被检索/引用次数（行为日志驱动）
+
+可靠性 (`confidence`) 和时效 (`created_at`) 已在表里，无需新增。
 
 ---
 
-## 分类体系（9 大类）
+## v1 缺陷（已在本版修正）
 
-| id | 中文 | 典型示例 | 检索特点 |
-|----|------|---------|---------|
-| `chitchat` | 闲聊 | "今天天气不错" | recency 权重低；情感信号为主 |
-| `personal_experience` | 个人经历 | "上周去杭州出差了" | 时间地点锚点重要 |
-| `relationship_info` | 关系信息 | "我妈很担心我" | person entity 为核心 |
-| `knowledge` | 知识收藏 | "你知道 HNSWLIB 吗" | confidence > recency |
-| `goals_plans` | 目标与计划 | "今年想减肥 10 公斤" | 需要 status 追踪 |
-| `preferences` | 偏好与习惯 | "我不喝咖啡" | salience 高；长效记忆 |
-| `decisions_reflections` | 决策与反思 | "最终选了 A 方案" | 低 recency，高 salience |
-| `wellbeing` | 健康/情绪信号 | "最近睡眠很差" | 时序敏感 |
-| `ideas` | 创意与想法 | "要不然做个总结功能？" | 语义聚类价值高 |
+| # | v1 缺陷 | v2 修正 |
+|---|---------|---------|
+| 1 | 没区分 memory_type，可能误分类 life_event | 仅对 `memory_type='user_turn'` 分类，其余 NULL |
+| 2 | setImmediate 失败/进程重启会丢分类 | 配合**定期 backfill cron**（10 分钟扫一次 NULL 行）兜底 |
+| 3 | 质量评级未接入排名公式 | 检索排名加 `qualityScore * 0.10` |
+| 4 | 未利用 cite_count 做"热门记忆"加权 | 排名加 `citePopularity * 0.05`（log 归一化） |
+| 5 | category 和 quality 分两次 LLM 调用浪费成本 | **合并到同一次 JSON 调用**，prompt 仅多 30 tokens |
+| 6 | 多次 LLM 调用入口未明 | hook 点固定在 `api.js report-interaction` 事务 commit 后 |
+
+---
+
+## 分类体系（9 类）
+
+| id | 中文 | 启发式关键词 |
+|----|------|-------------|
+| `chitchat` | 闲聊 | 短消息(<20字) + 嗯/哈/好的/OK/对对 |
+| `personal_experience` | 个人经历 | 上周/昨天/那次/小时候/去年 |
+| `relationship_info` | 关系信息 | 我妈/我爸/男友/女友/老板/同事 |
+| `knowledge` | 知识收藏 | 你知道吗/其实/原来/学到/资料 |
+| `goals_plans` | 目标计划 | 想做/打算/计划/目标/准备 |
+| `preferences` | 偏好习惯 | 喜欢/不喜欢/讨厌/经常/总是 |
+| `decisions_reflections` | 决策反思 | 最终/选了/决定/复盘/反思 |
+| `wellbeing` | 健康情绪 | 压力/睡眠/失眠/头疼/心情差 |
+| `ideas` | 创意想法 | 要不/灵感/想到/试试 |
+
+## 质量评级（A–E）
+
+| 等级 | 定义 | 示例 |
+|------|------|------|
+| A | 高信息密度，长效价值 | "我每周三晚上学钢琴" |
+| B | 有事件/事实，中等价值 | "今天买了红烧肉" |
+| C | 一般闲聊带少量信号 | "今天有点累" |
+| D | 噪声但保留节奏 | "嗯嗯"、"好的" |
+| E | 无信息可丢弃 | "8"、"?" |
+
+启发式默认值：短消息(<10) → D，长消息(>50) → B，其余 C。LLM 精分覆盖。
 
 ---
 
 ## DB 改动（Migration 013）
 
 ```sql
--- Migration 013: 用户记忆分类
-ALTER TABLE memory_items ADD COLUMN memory_category TEXT;
-ALTER TABLE memory_items ADD COLUMN category_confidence REAL NOT NULL DEFAULT 0.0;
-ALTER TABLE memory_items ADD COLUMN category_method TEXT;  -- 'heuristic' | 'llm' | 'manual'
+-- Migration 013: 用户记忆分类 + 质量评级 + 引用计数
+ALTER TABLE memory_items ADD COLUMN memory_category    TEXT;
+ALTER TABLE memory_items ADD COLUMN category_confidence REAL    NOT NULL DEFAULT 0.0;
+ALTER TABLE memory_items ADD COLUMN category_method     TEXT;    -- heuristic | llm | manual
+ALTER TABLE memory_items ADD COLUMN quality_grade       TEXT;    -- 'A'..'E'
+ALTER TABLE memory_items ADD COLUMN cite_count          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_items ADD COLUMN last_cited_at       INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_memory_items_category
   ON memory_items(assistant_id, memory_category, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_items_unclassified
+  ON memory_items(memory_type, memory_category)
+  WHERE memory_category IS NULL;
 ```
-
-**不改 memory_type**：`user_turn` / `life_event` / `work_event` 保留，
-`memory_category` 是正交维度（只对 user_turn 填写，life_event 留 NULL）。
 
 ---
 
-## 分类逻辑：两段式
+## 服务层
 
-### 第一段：启发式（零成本，覆盖 ~60%）
+### `src/services/memoryClassificationService.js`（新建）
+
+接口：
 
 ```js
-function heuristicCategory(text) {
-  if (/上周|上个月|昨天|去年|那次|那时候|小时候/.test(text))
-    return ["personal_experience", 0.75];
-  if (/我妈|我爸|我男友|我女友|我老板|我同事|我朋友|他说|她说/.test(text))
-    return ["relationship_info", 0.75];
-  if (/不喜欢|喜欢|讨厌|偏好|习惯|每天|经常|总是|从来不/.test(text))
-    return ["preferences", 0.75];
-  if (/想做|打算|计划|目标|希望|准备|要去/.test(text))
-    return ["goals_plans", 0.70];
-  if (/压力|睡眠|失眠|头疼|身体|情绪|难受|心情很差/.test(text))
-    return ["wellbeing", 0.75];
-  if (/你知道吗|其实|原来|发现|学到|看了篇|资料/.test(text))
-    return ["knowledge", 0.65];
-  if (/哈哈|好的|嗯|OK|随便|是啊|对对对/.test(text) && text.length < 20)
-    return ["chitchat", 0.90];
-  return [null, 0];  // 交给 LLM
-}
+// 同步：仅启发式，零成本，永远不抛
+function classifyHeuristic(content) → { category, quality, confidence } | null
+
+// 异步：组合启发式+LLM，写回 DB；幂等可重复调用
+async function classifyAndPersist(memoryId, content) → void
 ```
 
-### 第二段：LLM 精分（覆盖剩余 ~40%）
+**LLM prompt（合并 category + quality）**：
 
-**调用时机**：启发式返回 null 时，异步写入后调用（不阻塞 HTTP 响应）
-
-**Prompt 模板**（约 120 tokens）：
 ```
-将以下用户消息分类为一个最匹配的类别，返回 JSON：
-{"category": "<id>", "confidence": 0.0~1.0}
+将以下用户消息打标，返回严格 JSON：
+{"category":"<id>","quality":"A|B|C|D|E","confidence":0.0~1.0}
 
-类别：chitchat / personal_experience / relationship_info /
-      knowledge / goals_plans / preferences /
-      decisions_reflections / wellbeing / ideas
+类别：chitchat/personal_experience/relationship_info/knowledge/
+     goals_plans/preferences/decisions_reflections/wellbeing/ideas
+
+质量：A=高信息密度长效  B=明确事件事实  C=一般闲聊  D=噪声  E=无信息
 
 消息：「{content}」
 ```
 
-**调用**：走 `getProvider().complete({ responseFormat: "json", maxTokens: 30, temperature: 0 })`
-**写回**：`UPDATE memory_items SET memory_category=?, category_confidence=?, category_method='llm' WHERE id=?`
+走 `getProvider().complete({ responseFormat: "json", maxTokens: 60, temperature: 0 })`。
+本地 Qwen 一次约 1–2 秒，成本可忽略。
 
 ---
 
 ## 集成点
 
-### M1：ingestInteraction（report-interaction 写入时）
+### A. 写入时（`src/routes/api.js` report-interaction）
+
+在 `withTransaction(...)` 提交后、`onUserMessageState` 之前/之后均可：
 
 ```js
-// src/services/ingestionService.js（或 ingestInteraction 函数）
-// 写入 memory_items 后，立即做启发式，低置信度的异步 LLM 分类
-const [cat, conf] = heuristicCategory(content);
-if (cat) {
-  updateMemoryCategory(memoryItemId, cat, conf, 'heuristic');
-} else {
-  setImmediate(() => classifyWithLLM(memoryItemId, content).catch(() => {}));
+if (role === "user" && result?.memoryId) {
+  setImmediate(() => {
+    classifyAndPersist(result.memoryId, content).catch(() => {});
+  });
 }
 ```
 
-### M2：retrieveMemory 加 category 过滤
+但 ingestInteraction 现在不返回 result。需要小改 ingestInteraction 让 api.js 拿到 memoryId（其实它已返回 `{ memoryId }`，只是 api.js 没接住）。
+
+### B. 检索时（`src/services/memoryRetrievalService.js`）
+
+**新增 category 过滤参数**：
 
 ```js
-// src/services/memoryRetrievalService.js
-async function retrieveMemory({ assistantId, query, topK, category = null }) {
-  // ...
-  const whereClause = category
-    ? `WHERE assistant_id = ? AND id IN (${placeholders}) AND memory_category = ?`
-    : `WHERE assistant_id = ? AND id IN (${placeholders})`;
-  // ...
+async function retrieveMemory({ assistantId, query, topK, category = null, ... }) {
+  // SQL where 加 (category ? "AND memory_category = ?" : "")
 }
 ```
 
-### M3：catchupService prompt 注入分类记忆
+**新增 quality / cite 加权（更新公式）**：
 
 ```js
-// 取近期偏好注入 prompt（可选增强）
-const prefMemories = await retrieveMemory({ assistantId, query: "用户偏好习惯", category: "preferences", topK: 3 });
+const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
+const qualityScore = QUALITY_WEIGHT[row.quality_grade] ?? 0.5;
+const citePopularity = Math.min(1, Math.log1p(row.cite_count || 0) / Math.log(50));
+
+const finalScore =
+  semantic        * 0.42  // ↓ from 0.48
+  + recency       * 0.18  // ↓ from 0.20
+  + salience      * 0.10  // ↓ from 0.15
+  + confidence    * 0.08  // ↓ from 0.10
+  + qualityScore  * 0.10  // NEW
+  + citePopularity* 0.05  // NEW
+  + edgeBoost     * 0.05  // 同
+  + sessionBoost  * 0.02; // 同
 ```
 
-### M4：/api/memory/recall 路由增加参数
+**末尾批量自增 cite_count**：
 
 ```js
-// GET /api/memory/recall?category=knowledge&q=...
+if (ranked.length > 0) {
+  const ids = ranked.map(r => r.id);
+  db.prepare(
+    `UPDATE memory_items
+        SET cite_count = cite_count + 1, last_cited_at = ?
+      WHERE id IN (${ids.map(() => "?").join(",")})`
+  ).run(now, ...ids);
+}
 ```
 
----
+### C. 兜底 backfill cron（`src/scheduler.js`）
 
-## 回填历史数据
-
-```js
-// scripts/backfill-memory-categories.js
-// 遍历所有 memory_category IS NULL AND memory_type='user_turn'
-// 启发式 + LLM 分类，批量写入
-// 幂等：已有分类的跳过
-```
+每 10 分钟扫一遍 `memory_category IS NULL AND memory_type = 'user_turn'`，
+分类后写回。环境变量 `MEMORY_CLASSIFY_CRON=*/10 * * * *`，关闭设 `off`。
 
 ---
 
-## 文件清单
+## 文件清单 + 顺序
 
-| 文件 | 改动 |
-|------|------|
-| `src/db/migrations/013_memory_category.sql` | 新建 |
-| `src/services/memoryClassificationService.js` | 新建（启发式 + LLM 分类逻辑） |
-| `src/services/ingestionService.js` 或 `ingestInteraction` 所在文件 | 写入后调分类 |
-| `src/services/memoryRetrievalService.js` | 加 category 过滤参数 |
-| `src/routes/api.js` | recall 路由加 category 参数 |
-| `scripts/backfill-memory-categories.js` | 新建 |
-| `.env.example` | 加 `MEMORY_CLASSIFY_ENABLED=1` 开关 |
-
----
-
-## 执行顺序
-
-1. Migration 013（新建 SQL）
-2. `memoryClassificationService.js`（启发式 + LLM）
-3. `ingestInteraction` 接入分类（写入时触发）
-4. `memoryRetrievalService` 加过滤
-5. `backfill-memory-categories.js`
-6. `api.js` 路由 + .env.example
-7. 单测：分类准确率 + 检索过滤
-8. E2E：发一条消息，看 DB 里 memory_category 被填上
-9. 更新 EXECUTION-PROGRESS.md
+| 步骤 | 文件 | 操作 |
+|------|------|------|
+| 1 | `src/db/migrations/013_memory_category.sql` | 新建 |
+| 2 | `src/services/memoryClassificationService.js` | 新建 |
+| 3 | `src/services/memoryIngestService.js` | 已返回 memoryId，无需改 |
+| 4 | `src/routes/api.js` | report-interaction 加 setImmediate 钩子 |
+| 5 | `src/services/memoryRetrievalService.js` | 加 category 过滤 + quality/cite 加权 + 自增 |
+| 6 | `scripts/backfill-memory-categories.js` | 新建（同时供 cron 复用） |
+| 7 | `src/scheduler.js` | 新增 backfill cron |
+| 8 | `src/config.js` + `.env.example` | 加 `MEMORY_CLASSIFY_CRON` |
+| 9 | `tests/memoryClassification.test.js` | 新建 6+ 断言 |
+| 10 | E2E：发消息看 DB 是否分类 | — |
+| 11 | `docs/EXECUTION-PROGRESS.md` | 加阶段 D + commit |
 
 ---
 
-## 风险与注意点
+## 验证标准
 
-- LLM 分类走 `setImmediate` 异步，不影响 report-interaction 响应延迟
-- `getProvider()` 调用会写 `provider_call_log`，可用来统计分类成本
-- 首次启动前要先跑 migration，再跑回填脚本
-- `chitchat` 类默认 salience 写低一点（0.3），避免它污染检索排名
+- 单测 ≥ 6 项全过：启发式正确分类、LLM fallback、retrieval 过滤、cite_count 累计
+- E2E：发"我每周三晚上学钢琴" → category=preferences, quality=A/B
+- 检索同一查询，cite_count 自增 1
+- backfill 脚本对历史 NULL 数据全部回填
+
+---
+
+## 风险
+
+- 本地 Qwen 偶发 JSON 不严谨 → 用 try-catch + 启发式兜底，不让分类失败影响主流程
+- 短期内 chitchat 类会占大头（预计 40%+），适当降低其 salience（启发式分类时 salience 写 0.3）
+- LLM 模型升级后 grade 标准可能漂移 → grade 由 prompt 文字定义，不依赖外部模型语义；可在测试集回归
+
+---
+
+## 不做的事
+
+- 不做多标签（top-1 类别即可，避免复杂度）
+- 不做向量级别的"知识聚类"（远期）
+- 不做用户手动校正分类的 UI（远期，可以走 `category_method='manual'` 字段预留）
