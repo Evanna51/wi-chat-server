@@ -55,24 +55,46 @@
 
 ## 阶段 B: 角色状态机 MVP
 
-**状态**: 待办  
-**开始时间**: —  
-**完成时间**: —
+**状态**: ✅ 已完成  
+**开始时间**: 2026-04-28  
+**完成时间**: 2026-04-28
 
 **子任务**
 
 | # | 任务 | 状态 | Commit |
 |---|------|------|--------|
-| B1 | Migration 011：新建 character_state_v2 字段集（mood/relationship/energy/focus） | 待办 | — |
-| B2 | 新建 src/services/characterStateService.js：读/写/衰减/关系升降 | 待办 | — |
-| B3 | 触发逻辑接入：lifeMemoryService / proactivePlanService / catchupService 跑完后更新状态 | 待办 | — |
-| B4 | Prompt 注入：角色生成入口插入 mood + relationship + focus 片段 | 待办 | — |
-| B5 | 单测：模拟"用户三天没回"事件验证衰减 | 待办 | — |
-| B6 | 现有 assistants 写默认初始状态 | 待办 | — |
-| B7 | 更新此文档阶段 B 完成 + commit | 待办 | — |
+| B1 | Migration 011：character_state 增列（mood/relationship/energy/focus 共 11 列） | ✅ | 7df9f27 |
+| B2 | 新建 src/services/characterStateService.js：读/写/衰减/关系升降/prompt 片段 | ✅ | f9609ca |
+| B3 | 触发逻辑接入：report-interaction 后调 onUserMessage 更新状态 | ✅ | a0cc231 |
+| B4 | Prompt 注入：catchupService + proactivePlanService 注入 stateFragment | ✅ | a45ca46 |
+| B5 | 单测 20 个断言（Suite 1-7，含 7d 沉默衰减、情绪衰减、prompt 片段） | ✅ | 74f3ede |
+| B6 | init-character-states.js 脚本（幂等，为已有 assistant 补全状态） | ✅ | 91bbf82 |
+| B7 | 更新此文档阶段 B 完成 + commit | ✅ | 本次 |
 
-**关键决策**: 见 docs/character-state-machine-plan.md Phase 1 字段集  
-**未决/遗留**: 待阶段 A 完成后确认
+**涉及文件**
+
+- `src/db/migrations/011_character_mood.sql` — 新增 11 列
+- `src/services/characterStateService.js` — 新建（327 行）
+- `src/routes/api.js` — report-interaction 接入
+- `src/services/catchupService.js` — stateFragment 注入
+- `src/services/proactivePlanService.js` — stateFragment 注入
+- `scripts/init-character-states.js` — 幂等初始化脚本
+- `tests/characterState.test.js` — 20 断言测试
+
+**关键决策**
+
+- Phase 1 采用 heuristic 信号（关键词 + 消息长度），无 LLM 情绪分析调用，避免成本 & 延迟
+- 情绪衰减在读取时惰性计算（`getEffectiveState`），无需后台扫描任务
+- 沉默检测：2d→lonely，7d+level≥3→疏远，30d→软重置
+- prompt 注入作为可选参数（`stateFragment`），不存在则静默跳过，零风险
+
+**验证**
+
+- `node tests/characterState.test.js` → 20 passed, 0 failed ✓
+- `node scripts/init-character-states.js --dry-run` → 正常输出 ✓
+- `node src/services/catchupService.js` (require 加载) → ok ✓
+
+**未决/遗留**: Phase 2 可加 LLM 情绪分析作为补充（非必要，heuristic 已足够 MVP）
 
 ---
 
@@ -106,6 +128,7 @@
 | 阶段 | 描述 | 完成时间 | Commit 数 |
 |------|------|---------|-----------|
 | A | 自动备份（增量 + 全量 + 恢复 + scheduler 接入） | 2026-04-28 | 5 |
+| B | 角色状态机 MVP（migration + service + 触发 + prompt + 测试） | 2026-04-28 | 6 |
 
 ---
 
