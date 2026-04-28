@@ -26,6 +26,7 @@ const {
   buildMemoryGuidance,
 } = require("../services/memoryDecisionService");
 const { runCatchup } = require("../services/catchupService");
+const { onUserMessage: onUserMessageState, ensureDefaultState } = require("../services/characterStateService");
 const {
   generatePlans,
   listPendingPlans,
@@ -245,6 +246,14 @@ router.post("/report-interaction", authMiddleware, (req, res) => {
     });
     updateAssistantLastSession(assistantId, sessionId);
   });
+  if (role === "user") {
+    try {
+      onUserMessageState(assistantId, { content, now });
+    } catch (e) {
+      // non-critical: don't fail the request if state update errors
+    }
+  }
+
   let cancelledPlans = 0;
   if (role === "user") {
     try {
