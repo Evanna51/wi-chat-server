@@ -372,6 +372,60 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * Agentic RAG 搜索端点：给 app 端 LLM 的 search_memory tool 直接调用。
+ *
+ * - 默认 source='user'，只搜用户说过的话；角色信息（life_event 等）多在上下文里已有
+ * - 显式提到"你"或角色名时，app 端 LLM 应改传 source='character'
+ * - 无 decision 逻辑（与 /tool/memory-context 区分）：LLM 已决定要查，server 直接执行
+ */
+router.post("/memory/search", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    query: z.string().min(1),
+    source: z.enum(["user", "character", "all"]).default("user"),
+    category: z.enum([
+      "chitchat", "personal_experience", "relationship_info", "knowledge",
+      "goals_plans", "preferences", "decisions_reflections", "wellbeing", "ideas",
+    ]).optional(),
+    minQuality: z.enum(["A", "B", "C", "D", "E"]).optional(),
+    topK: z.coerce.number().int().positive().max(20).default(5),
+    sessionId: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, query, source, category, minQuality, topK, sessionId } = parsed.data;
+
+  try {
+    const memories = await retrieveMemory({
+      assistantId,
+      sessionId: sessionId || "",
+      query,
+      topK,
+      source,
+      category: category || null,
+      minQuality: minQuality || null,
+    });
+    return res.json({
+      ok: true,
+      query,
+      source,
+      count: memories.length,
+      memories: memories.map((m) => ({
+        id: m.id,
+        content: m.content,
+        memoryType: m.memoryType,
+        category: m.category,
+        quality: m.quality,
+        createdAt: m.createdAt,
+        score: Number(m.score.toFixed(4)),
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 router.post("/search", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),

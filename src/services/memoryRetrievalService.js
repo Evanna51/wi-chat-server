@@ -6,6 +6,13 @@ const { vectorStore } = require("./vectorStore");
 
 const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
 
+// source 参数 → memory_type IN (...) 映射
+const SOURCE_TYPES = {
+  user:      ["user_turn"],
+  character: ["life_event", "work_event", "assistant_turn"],
+  all:       null, // 不过滤
+};
+
 function normalize(value, min, max) {
   if (max <= min) return 0;
   return (value - min) / (max - min);
@@ -45,25 +52,47 @@ async function retrieveMemory({
   topK = config.retrievalTopK,
   strategy = config.retrievalStrategy,
   category = null,
+  source = null,        // "user" | "character" | "all" | null（不过滤）
+  minQuality = null,    // "A"|"B"|"C"|"D"|"E"，A 最严
 }) {
   const now = Date.now();
   const queryVector = await embedText(query);
+  // 有过滤条件时多取一些候选，避免 SQL 过滤后剩下太少
+  const hasFilter = !!(category || source || minQuality);
   const vectorMatches = await vectorStore.search({
     assistantId,
     queryVector,
-    topK: Math.max(topK * 2, 20),
+    topK: Math.max(topK * (hasFilter ? 5 : 2), 20),
   });
   const memoryIds = vectorMatches.map((item) => item.memoryId);
   if (!memoryIds.length) return [];
 
   const placeholders = memoryIds.map(() => "?").join(",");
-  const sql = `SELECT id, assistant_id, session_id, content, salience, confidence,
+  const whereClauses = [`assistant_id = ?`, `id IN (${placeholders})`];
+  const params = [assistantId, ...memoryIds];
+
+  if (category) {
+    whereClauses.push("memory_category = ?");
+    params.push(category);
+  }
+
+  const sourceTypes = source ? SOURCE_TYPES[source] : null;
+  if (sourceTypes && sourceTypes.length > 0) {
+    const typePlaceholders = sourceTypes.map(() => "?").join(",");
+    whereClauses.push(`memory_type IN (${typePlaceholders})`);
+    params.push(...sourceTypes);
+  }
+
+  if (minQuality) {
+    // A < B < C < D < E 字典序，且 NULL（未分类）放行
+    whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
+    params.push(minQuality);
+  }
+
+  const sql = `SELECT id, assistant_id, session_id, memory_type, content, salience, confidence,
                       memory_category, quality_grade, cite_count, created_at
                  FROM memory_items
-                WHERE assistant_id = ? AND id IN (${placeholders})`
-            + (category ? " AND memory_category = ?" : "");
-  const params = [assistantId, ...memoryIds];
-  if (category) params.push(category);
+                WHERE ${whereClauses.join(" AND ")}`;
   const rows = db.prepare(sql).all(...params);
 
   const matchScoreMap = new Map(vectorMatches.map((item) => [item.memoryId, item.score]));
@@ -92,8 +121,10 @@ async function retrieveMemory({
         id: row.id,
         content: row.content,
         sessionId: row.session_id,
+        memoryType: row.memory_type,
         category: row.memory_category,
         quality: row.quality_grade,
+        createdAt: row.created_at,
         score: finalScore,
         breakdown: {
           semantic, recency, salience, confidence,
