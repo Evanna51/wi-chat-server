@@ -8,6 +8,7 @@ data/vector-index.bin
 data/vector-meta.json
 data/archive/
 data/backup/
+data/backups/
 exports/
 
 logs/

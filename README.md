@@ -691,3 +691,55 @@ curl -X POST "http://127.0.0.1:8787/api/tool/memory-context" \
   -H "content-type: application/json" \
   --data '{"assistantId":"assistant_demo","sessionId":"session_1","userInput":"你还记得我喜欢什么吗？","topK":3}'
 ```
+
+## 备份与恢复
+
+### 自动调度
+
+备份由 `src/scheduler.js` 自动运行，无需手动干预：
+
+| 任务 | Cron（Asia/Shanghai） | 产出 |
+|------|-----------------------|------|
+| 增量备份 | 每天 03:00 (`BACKUP_DAILY_CRON`) | `data/backups/incr-YYYY-MM-DD.jsonl.gz` |
+| 全量备份 | 每周日 02:30 (`BACKUP_WEEKLY_CRON`) | `data/backups/full-YYYY-Www.sqlite` |
+
+保留策略：增量保留 8 天，全量保留 4 周，写入新文件后自动清理过期文件。
+
+### 手动运行
+
+```bash
+# 立即生成今日增量备份
+node scripts/backup.js daily
+
+# 立即生成本周全量快照（已存在则跳过）
+node scripts/full-backup.js
+
+# 验证增量文件完整性
+node scripts/backup.js verify data/backups/incr-2026-04-28.jsonl.gz
+
+# 列出所有增量文件
+node scripts/restore.js --list-incr
+```
+
+### 恢复流程
+
+```bash
+# 1. 停服
+pm2 stop wi-chat-server
+
+# 2. 恢复（全量 + 增量）
+node scripts/restore.js \
+  --from data/backups/full-2026-W17.sqlite \
+  --db data/character-behavior.db \
+  --apply data/backups/incr-2026-04-26.jsonl.gz \
+           data/backups/incr-2026-04-27.jsonl.gz \
+           data/backups/incr-2026-04-28.jsonl.gz
+
+# 3. 验证行数
+node scripts/backup.js daily   # 跑一次增量，看表行数输出
+
+# 4. 重启
+pm2 start wi-chat-server
+```
+
+> `restore.js` 会在覆盖目标 DB 前自动备份一份 `.restore-bak.<timestamp>` 防止操作失误。
