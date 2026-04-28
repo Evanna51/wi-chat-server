@@ -53,7 +53,7 @@ function gracefulExit(signal) {
   } catch (error) {
     console.error("[server] ws shutdown error:", error.message);
   }
-  setTimeout(() => process.exit(0), 100);
+  setTimeout(() => process.exit(0), 8000);
 }
 
 process.on("SIGINT", () => gracefulExit("SIGINT"));
