@@ -102,6 +102,22 @@ function findConversationTurnById(id) {
     .get(id);
 }
 
+/**
+ * 按逻辑 key (assistant_id, session_id, role, created_at) 查 turn。
+ *
+ * 给 sync ingest 做"后面覆盖前面"去重用——客户端因 turnId 漂移产生的重复，
+ * 用这个查到旧行再级联删除即可。
+ */
+function findConversationTurnByLogicalKey({ assistantId, sessionId, role, createdAt }) {
+  if (!assistantId || !sessionId || !role || createdAt == null) return undefined;
+  return db
+    .prepare(
+      `SELECT id FROM conversation_turns
+        WHERE assistant_id = ? AND session_id = ? AND role = ? AND created_at = ?`
+    )
+    .get(assistantId, sessionId, role, createdAt);
+}
+
 function findMemoryItemBySourceTurnId(sourceTurnId) {
   if (!sourceTurnId) return undefined;
   return db
@@ -549,5 +565,6 @@ module.exports = {
   searchConversation,
   searchMemory,
   findConversationTurnById,
+  findConversationTurnByLogicalKey,
   findMemoryItemBySourceTurnId,
 };

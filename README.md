@@ -459,10 +459,21 @@ Response：
 }
 ```
 
-幂等语义：
-- 同 `id` 第二次起 → `skipped: already_exists`，不会重复写 `memory_items` / `memory_facts` / `outbox_events`。
-- 单事务整批，单条 `rejected` 不会 roll back 其它 accepted 行。
-- `assistantId` **不强约束** `assistant_profile` 必须存在（角色由 phone 创建）。
+幂等 + 去重语义（两层）：
+
+1. **同 turnId 命中（最快路径）** → `skipped: already_exists`，零写入。
+
+2. **逻辑去重 (assistantId, sessionId, role, createdAt)**：
+   - 客户端因重新安装、缓存丢失等原因给同一条消息生成不同 turnId 时兜底
+   - 命中且 **content + tool 字段完全相同** → `skipped: logical_duplicate_of:<oldId>`，
+     保留旧行不动（保护被 `/api/tool/memory-correct` 改过的 memory）
+   - 命中且 **content 或 tool 字段不同** → `replaced: replaced_old:<oldId>`，
+     级联删旧 turn + 衍生 memory_item / facts / edges / vectors / outbox，再用新 id 写入
+
+3. 单事务整批，单条 `rejected` 不会 roll back 其它 accepted 行。
+4. `assistantId` **不强约束** `assistant_profile` 必须存在（角色由 phone 创建）。
+5. `details[].status` 取值：`accepted` / `replaced` / `skipped` / `rejected`，
+   `reason` 字段含 `logical_duplicate_of:<id>` / `replaced_old:<id>` / `clock_corrected` / 等组合字符串。
 
 `character_state` 联动（仅对 `assistant_profile` 已存在的 assistant 生效）：
 - `total_turns` 累加本批次中 accepted 的 user-role turn 数；`familiarity = floor(total_turns / 3)`，封顶 100。

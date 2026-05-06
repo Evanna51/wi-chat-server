@@ -4,9 +4,11 @@ const {
   insertMemoryItem,
   insertOutboxEvent,
   findConversationTurnById,
+  findConversationTurnByLogicalKey,
   findMemoryItemBySourceTurnId,
 } = require("../db");
 const { ingestInteraction, SEMANTIC_ROLES } = require("./memoryIngestService");
+const { deleteConversationTurnCascade } = require("./memoryEditService");
 
 const MIN_VALID_TS = Date.parse("2020-01-01T00:00:00Z"); // 1577836800000
 const FUTURE_TOLERANCE_MS = 86_400_000; // now + 1 天
@@ -90,7 +92,7 @@ function ingestTurnsBatch({ deviceId, turns }) {
           reasons.push("clock_corrected");
         }
 
-        // 命中已存在 → skipped
+        // 1. 同 turnId 命中已存在 → skipped（最快路径）
         const existingTurn = findConversationTurnById(turn.id);
         if (existingTurn) {
           skipped += 1;
@@ -98,6 +100,47 @@ function ingestTurnsBatch({ deviceId, turns }) {
           if (reasons.length) detail.reason = `${detail.reason};${reasons.join(",")}`;
           details.push(detail);
           continue;
+        }
+
+        // 2. 逻辑去重：客户端可能给同一条消息生成不同 turnId（重新安装、缓存丢失等场景），
+        //    用 (assistantId, sessionId, role, createdAt) 做逻辑 key 兜底。
+        //
+        //    分两种情况：
+        //    (a) content 完全相同 → 真正的"无意义重复"，skip（保护 server 端通过 memory-correct
+        //        修正过的 memory，不让 phone 端旧内容把它再覆盖回去）
+        //    (b) content 不同 → 同一时刻同一 role 的不同内容，视为客户端编辑后的新版本，
+        //        级联删旧行再以新 id 写入（"后面覆盖前面"）
+        const logicalDup = findConversationTurnByLogicalKey({
+          assistantId: turn.assistantId,
+          sessionId: turn.sessionId,
+          role: turn.role,
+          createdAt,
+        });
+        let replacedOldId = null;
+        if (logicalDup && logicalDup.id !== turn.id) {
+          const existingFull = findConversationTurnById(logicalDup.id);
+          const sameContent =
+            existingFull &&
+            existingFull.content === turn.content &&
+            (existingFull.tool_calls_json || null) === (turn.toolCallsJson || null) &&
+            (existingFull.tool_call_id || null) === (turn.toolCallId || null) &&
+            (existingFull.tool_name || null) === (turn.toolName || null);
+
+          if (sameContent) {
+            skipped += 1;
+            const detail = {
+              id: turn.id,
+              status: "skipped",
+              reason: `logical_duplicate_of:${logicalDup.id}`,
+            };
+            if (reasons.length) detail.reason = `${detail.reason};${reasons.join(",")}`;
+            details.push(detail);
+            continue;
+          }
+
+          replacedOldId = logicalDup.id;
+          deleteConversationTurnCascade(logicalDup.id);
+          reasons.push(`replaced_old:${logicalDup.id}`);
         }
 
         const result = ingestInteraction({
@@ -125,7 +168,8 @@ function ingestTurnsBatch({ deviceId, turns }) {
           details.push(detail);
         } else {
           accepted += 1;
-          const detail = { id: turn.id, status: "accepted" };
+          const status = replacedOldId ? "replaced" : "accepted";
+          const detail = { id: turn.id, status };
           if (reasons.length) detail.reason = reasons.join(",");
           details.push(detail);
           // 累计 user-role 统计；只 accepted 的 user 行才计数
