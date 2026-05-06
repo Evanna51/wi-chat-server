@@ -1,6 +1,7 @@
 # 用户记忆分类 + 质量评级实施方案 v2
 
-> 状态: 待执行 | 2026-04-28 | 替代 v1
+> 状态：已实现并归档 | 2026-04-28 | 替代 v1
+> 落地参考：migration 013 + `memoryClassificationService.js` + scheduler backfill cron
 
 ## 目标
 

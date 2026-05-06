@@ -1,7 +1,9 @@
 # Agentic RAG: search_memory Tool 规格
 
+> 状态：已实现并归档
 > 给 app 端 LLM（Claude / Qwen / 任意 tool-calling LLM）的工具定义。
 > Server 端只暴露 `POST /api/tool/memory-recall`，不做 decision，不跑 agent loop。
+> 落地参考：commit 7a91669 / `routes/api.js` `/tool/memory-recall`
 
 ## 设计理念
 

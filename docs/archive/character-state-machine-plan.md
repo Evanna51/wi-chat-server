@@ -1,8 +1,9 @@
 # 角色状态机设计方案
 
-> 状态：草案（待确认）  
-> 作者：Evanna Wu  
+> 状态：已实现并归档
+> 作者：Evanna Wu
 > 日期：2026-04-28
+> 落地参考：migration 011 + `characterStateService.js` + `emotionTaxonomy.js` (27+95 GoEmotions)
 
 ---
 

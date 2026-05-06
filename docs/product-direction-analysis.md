@@ -1,6 +1,6 @@
 # wi-chat-server 产品方向分析
 
-> 2026-04-28 | 未 commit，等用户确认后决定下一步
+> 2026-04-28 | 已归档；方向已采纳（角色状态机 + 记忆分类 + agentic RAG 已实现），二期 episodic/semantic 分层 + KG 在规划中
 
 ---
 
