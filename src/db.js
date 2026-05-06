@@ -60,19 +60,45 @@ function upsertCharacterState(assistantId, patch = {}) {
   return next;
 }
 
-function insertConversationTurn({ id, assistantId, sessionId, role, content, createdAt = Date.now() }) {
+function insertConversationTurn({
+  id,
+  assistantId,
+  sessionId,
+  role,
+  content,
+  createdAt = Date.now(),
+  toolCallsJson = null,
+  toolCallId = null,
+  toolName = null,
+}) {
   const turnId = id || uuidv7();
   db.prepare(
-    `INSERT OR IGNORE INTO conversation_turns (id, assistant_id, session_id, role, content, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(turnId, assistantId, sessionId, role, content, createdAt);
+    `INSERT OR IGNORE INTO conversation_turns
+       (id, assistant_id, session_id, role, content, created_at,
+        tool_calls_json, tool_call_id, tool_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    turnId,
+    assistantId,
+    sessionId,
+    role,
+    content,
+    createdAt,
+    toolCallsJson,
+    toolCallId,
+    toolName
+  );
   return turnId;
 }
 
 function findConversationTurnById(id) {
   if (!id) return undefined;
   return db
-    .prepare("SELECT id, assistant_id, session_id, role, content, created_at FROM conversation_turns WHERE id = ?")
+    .prepare(
+      `SELECT id, assistant_id, session_id, role, content, created_at,
+              tool_calls_json, tool_call_id, tool_name
+         FROM conversation_turns WHERE id = ?`
+    )
     .get(id);
 }
 

@@ -16,6 +16,11 @@
  *   --mode e2e --assistant <id> --count N
  *       Phase 4 端到端：生成 → push → 间隔 2s 再 push → 校验 state 接口 → 等 indexer → 校验 memory_items
  *
+ *   --mode tool-roles --assistant <id>
+ *       推一组 user → assistant → tool_call → tool_result → system 5 行序列，
+ *       验证：(a) 5 行全部 accepted；(b) 重推全部 skipped；(c) memory_items 仅 2 行（user + assistant）；
+ *       (d) conversation_turns 里 tool_call/tool_result/system 的列正确填充
+ *
  * 通用参数：
  *   --api          默认 http://127.0.0.1:8787
  *   --api-key      默认 dev-local-key
@@ -314,6 +319,164 @@ async function modeE2E() {
   }
 }
 
+async function modeToolRoles() {
+  const assistantId = String(args.assistant || "");
+  if (!assistantId) die("--assistant required");
+  const sessionId = `${DEVICE_ID}-toolroles-${uuidv7().slice(0, 8)}`;
+  const baseTs = Date.now() - 5000;
+
+  // 构造 5 行：user → assistant → tool_call (空 content) → tool_result → system
+  const userTurnId = uuidv7();
+  const assistantTurnId = uuidv7();
+  const toolCallTurnId = uuidv7();
+  const toolResultTurnId = uuidv7();
+  const systemTurnId = uuidv7();
+
+  const sampleToolCallId = `call_${uuidv7().slice(0, 8)}`;
+  const toolCallsJson = JSON.stringify([
+    {
+      id: sampleToolCallId,
+      type: "function",
+      function: {
+        name: "search_memory",
+        arguments: JSON.stringify({ query: "用户喜欢什么", source: "user" }),
+      },
+    },
+  ]);
+
+  const turns = [
+    {
+      id: userTurnId,
+      assistantId,
+      sessionId,
+      role: "user",
+      content: "[tool-roles-test] 帮我查一下我之前说过我喜欢什么",
+      createdAt: baseTs,
+    },
+    {
+      id: assistantTurnId,
+      assistantId,
+      sessionId,
+      role: "assistant",
+      content: "好的，我帮你查一下。",
+      createdAt: baseTs + 1000,
+    },
+    {
+      id: toolCallTurnId,
+      assistantId,
+      sessionId,
+      role: "tool_call",
+      content: "", // 空，符合 Android Message.kt:21 注释
+      createdAt: baseTs + 2000,
+      toolCallsJson,
+    },
+    {
+      id: toolResultTurnId,
+      assistantId,
+      sessionId,
+      role: "tool_result",
+      content: JSON.stringify({ ok: true, hits: [{ id: "m1", content: "我喜欢拿铁", score: 0.85 }] }),
+      createdAt: baseTs + 3000,
+      toolCallId: sampleToolCallId,
+      toolName: "search_memory",
+    },
+    {
+      id: systemTurnId,
+      assistantId,
+      sessionId,
+      role: "system",
+      content: "[audit] tool round completed in 850ms",
+      createdAt: baseTs + 4000,
+    },
+  ];
+
+  let pass = true;
+  const failures = [];
+
+  console.log(`[tool-roles] step 1: push 5-row sequence (user/assistant/tool_call/tool_result/system)`);
+  const r1 = await pushTurns(turns);
+  if (r1.accepted !== 5 || r1.skipped !== 0 || r1.rejected !== 0) {
+    pass = false;
+    failures.push(
+      `first push expected accepted=5 skipped=0 rejected=0, got accepted=${r1.accepted} skipped=${r1.skipped} rejected=${r1.rejected}; details=${JSON.stringify(r1.details)}`
+    );
+  }
+
+  console.log(`[tool-roles] step 2: replay (expect skipped=5)`);
+  const r2 = await pushTurns(turns);
+  if (r2.skipped !== 5 || r2.accepted !== 0) {
+    pass = false;
+    failures.push(
+      `replay expected accepted=0 skipped=5, got accepted=${r2.accepted} skipped=${r2.skipped}`
+    );
+  }
+
+  console.log(`[tool-roles] step 3: validate DB rows`);
+  const Database = require("better-sqlite3");
+  const config = require("../src/config");
+  const dbConn = new Database(config.databasePath, { readonly: true });
+  try {
+    const ids = turns.map((t) => t.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const turnRows = dbConn
+      .prepare(
+        `SELECT id, role, content, tool_calls_json, tool_call_id, tool_name
+           FROM conversation_turns WHERE id IN (${placeholders})
+           ORDER BY created_at ASC`
+      )
+      .all(...ids);
+    if (turnRows.length !== 5) {
+      pass = false;
+      failures.push(`expected 5 conversation_turns rows, got ${turnRows.length}`);
+    }
+    const byRole = Object.fromEntries(turnRows.map((r) => [r.role, r]));
+
+    if (byRole.tool_call?.tool_calls_json !== toolCallsJson) {
+      pass = false;
+      failures.push(
+        `tool_call row's tool_calls_json mismatch; got=${JSON.stringify(byRole.tool_call?.tool_calls_json)}`
+      );
+    }
+    if (byRole.tool_call?.content !== "") {
+      pass = false;
+      failures.push(`tool_call content expected empty, got=${JSON.stringify(byRole.tool_call?.content)}`);
+    }
+    if (byRole.tool_result?.tool_call_id !== sampleToolCallId) {
+      pass = false;
+      failures.push(`tool_result tool_call_id mismatch`);
+    }
+    if (byRole.tool_result?.tool_name !== "search_memory") {
+      pass = false;
+      failures.push(`tool_result tool_name mismatch`);
+    }
+
+    // memory_items：只应有 user + assistant 两行（log-only role 不入 memory_items）
+    const memRow = dbConn
+      .prepare(
+        `SELECT COUNT(1) AS c FROM memory_items WHERE source_turn_id IN (${placeholders})`
+      )
+      .get(...ids);
+    if (memRow.c !== 2) {
+      pass = false;
+      failures.push(`memory_items expected 2 (user+assistant only), got ${memRow.c}`);
+    } else {
+      console.log(`[tool-roles] memory_items count=2 OK (log-only roles correctly skipped)`);
+    }
+  } finally {
+    dbConn.close();
+  }
+
+  console.log("");
+  if (pass) {
+    console.log(`[tool-roles] PASS — 5-row sequence ingested + idempotent + log-only roles bypassed memory pipeline`);
+    process.exit(0);
+  } else {
+    console.error(`[tool-roles] FAIL`);
+    for (const f of failures) console.error(`  - ${f}`);
+    process.exit(1);
+  }
+}
+
 (async () => {
   const mode = String(args.mode || "");
   try {
@@ -321,12 +484,14 @@ async function modeE2E() {
     else if (mode === "push") await modePush();
     else if (mode === "test") await modeTest();
     else if (mode === "e2e") await modeE2E();
+    else if (mode === "tool-roles") await modeToolRoles();
     else {
       console.error("usage:");
       console.error("  --mode generate --assistant <id> [--session <id>] --count N --out <file>");
       console.error("  --mode push --in <file>");
       console.error("  --mode test --assistant <id> --count N");
       console.error("  --mode e2e --assistant <id> --count N");
+      console.error("  --mode tool-roles --assistant <id>");
       process.exit(2);
     }
   } catch (error) {

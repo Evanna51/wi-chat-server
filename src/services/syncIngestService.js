@@ -6,11 +6,15 @@ const {
   findConversationTurnById,
   findMemoryItemBySourceTurnId,
 } = require("../db");
-const { ingestInteraction } = require("./memoryIngestService");
+const { ingestInteraction, SEMANTIC_ROLES } = require("./memoryIngestService");
 
 const MIN_VALID_TS = Date.parse("2020-01-01T00:00:00Z"); // 1577836800000
 const FUTURE_TOLERANCE_MS = 86_400_000; // now + 1 天
-const VALID_ROLES = new Set(["user", "assistant"]);
+
+// 接受 5 种 role：
+//   user / assistant       —— 进 memory pipeline
+//   tool_call / tool_result / system —— 仅写 conversation_turns，日志型
+const VALID_ROLES = new Set(["user", "assistant", "tool_call", "tool_result", "system"]);
 
 /**
  * 批量幂等写入 phone 离线缓存的 turns。
@@ -49,9 +53,26 @@ function ingestTurnsBatch({ deviceId, turns }) {
           details.push({ id: turn.id, status: "rejected", reason: `invalid_role:${turn.role}` });
           continue;
         }
-        if (typeof turn.content !== "string" || turn.content.length === 0) {
+        if (typeof turn.content !== "string") {
+          rejected += 1;
+          details.push({ id: turn.id, status: "rejected", reason: "content_not_string" });
+          continue;
+        }
+        // semantic role 必须有内容；log-only role (tool_call / tool_result / system) 允许空
+        if (SEMANTIC_ROLES.has(turn.role) && turn.content.length === 0) {
           rejected += 1;
           details.push({ id: turn.id, status: "rejected", reason: "empty_content" });
+          continue;
+        }
+        // tool_call 必须带 toolCallsJson；tool_result 必须带 toolCallId + toolName
+        if (turn.role === "tool_call" && !turn.toolCallsJson) {
+          rejected += 1;
+          details.push({ id: turn.id, status: "rejected", reason: "tool_call_missing_payload" });
+          continue;
+        }
+        if (turn.role === "tool_result" && (!turn.toolCallId || !turn.toolName)) {
+          rejected += 1;
+          details.push({ id: turn.id, status: "rejected", reason: "tool_result_missing_metadata" });
           continue;
         }
 
@@ -84,6 +105,9 @@ function ingestTurnsBatch({ deviceId, turns }) {
           content: turn.content,
           now: createdAt,
           turnId: turn.id,
+          toolCallsJson: turn.toolCallsJson || null,
+          toolCallId: turn.toolCallId || null,
+          toolName: turn.toolName || null,
           insertConversationTurn,
           insertMemoryItem,
           insertOutboxEvent,

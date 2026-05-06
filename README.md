@@ -395,7 +395,7 @@ Notes:
 
 #### 10.1 POST /api/sync/push
 
-Body：
+Body（基础 user / assistant 行）：
 ```json
 {
   "deviceId": "android-001",
@@ -412,10 +412,52 @@ Body：
 }
 ```
 
+支持的 5 种 `role`：
+
+| role | content | 额外字段 | server 行为 |
+|------|---------|---------|------------|
+| `user` | 必填非空 | — | 进 memory_items + 分类 + 向量 + outbox |
+| `assistant` | 必填非空 | — | 同上 |
+| `tool_call` | 允许空字符串 | `toolCallsJson` 必填（OpenAI 风格 tool_calls 数组） | 仅写 `conversation_turns`，不进 memory pipeline |
+| `tool_result` | 必填（结果 JSON） | `toolCallId` + `toolName` 必填 | 仅写 `conversation_turns`，不进 memory pipeline |
+| `system` | 必填 | — | 仅写 `conversation_turns`，不进 memory pipeline |
+
+`tool_call` / `tool_result` / `system` 这三种"日志型" role 不进 memory_items、不分类、不生成向量、不出 outbox，但 FTS5 trigger 自动索引，`/api/search?scope=conversation` 仍可命中。
+
+带 tool_call 的 payload 示例：
+```json
+{
+  "deviceId": "android-001",
+  "turns": [
+    {
+      "id": "019dca12-3b4c-7890-abcd-...01",
+      "assistantId": "assistant_demo",
+      "sessionId": "s1",
+      "role": "tool_call",
+      "content": "",
+      "createdAt": 1777200000000,
+      "toolCallsJson": "[{\"id\":\"call_xxx\",\"type\":\"function\",\"function\":{\"name\":\"search_memory\",\"arguments\":\"{...}\"}}]"
+    },
+    {
+      "id": "019dca12-3b4c-7890-abcd-...02",
+      "assistantId": "assistant_demo",
+      "sessionId": "s1",
+      "role": "tool_result",
+      "content": "{\"ok\":true,\"hits\":[...]}",
+      "createdAt": 1777200001000,
+      "toolCallId": "call_xxx",
+      "toolName": "search_memory"
+    }
+  ]
+}
+```
+
 约束：
 - `turns.length` 区间 `[1, 200]`，超过 200 返回 400（强制 phone 拆批）。
 - `id` 必须是 client-generated UUID v7（前缀含时间戳，天然有序）。
 - `createdAt` 是 phone 本地毫秒时间戳；server 端做 sanity check：若 `< 2020-01-01` 或 `> now + 1d`，会矫正为 `Date.now()`，details 里附 `reason: "clock_corrected"`，**仍然算 accepted**。
+- `tool_call` 行 `toolCallsJson` 缺失会被 reject（`reason: "tool_call_missing_payload"`）。
+- `tool_result` 行 `toolCallId` 或 `toolName` 缺失会被 reject（`reason: "tool_result_missing_metadata"`）。
 
 Response：
 ```json
@@ -490,6 +532,9 @@ npm run sync:replay -- --mode test --assistant smoke-sync --count 20
 
 # 4) Phase 4 e2e（push + state + memory_items 校验）
 npm run sync:replay -- --mode e2e --assistant smoke-sync --count 30
+
+# 5) tool-roles 验证（5 行 user/assistant/tool_call/tool_result/system 序列）
+npm run sync:replay -- --mode tool-roles --assistant smoke-toolroles
 ```
 
 通用参数：`--api http://...` `--api-key dev-local-key` `--batch-size 100` `--device-id ...`。

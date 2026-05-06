@@ -27,9 +27,21 @@ const pushSchema = z.object({
         id: z.string().min(1),
         assistantId: z.string().min(1),
         sessionId: z.string().min(1),
-        role: z.enum(["user", "assistant"]),
-        content: z.string().min(1),
+        // 5 种 role：
+        //   user / assistant       —— 语义对话，进 memory pipeline
+        //   tool_call / tool_result —— 工具调用日志（OpenAI 风格）
+        //   system                 —— 系统/审计事件
+        // 后三种仅写 conversation_turns，不进 memory_items / 不索引 / 不分类
+        role: z.enum(["user", "assistant", "tool_call", "tool_result", "system"]),
+        // semantic role 业务层强制非空；tool_call 行 content 通常为 ""，
+        // 故此处只做 string 类型校验，长度按 role 在 syncIngestService 里判断
+        content: z.string(),
         createdAt: z.number().int().min(0),
+        // tool_call 行的 OpenAI 风格 tool_calls 数组 JSON
+        toolCallsJson: z.string().optional(),
+        // tool_result 行：指向触发它的 assistant tool_call id + 被调用的 tool 名
+        toolCallId: z.string().optional(),
+        toolName: z.string().optional(),
       })
     )
     .min(1)

@@ -1,5 +1,11 @@
 const { v7: uuidv7 } = require("uuid");
 
+/**
+ * 进入 memory pipeline (memory_items + facts + edges + outbox + 向量索引 + 分类) 的 role 集合。
+ * 其它 role (tool_call / tool_result / system) 视为日志型，仅写 conversation_turns。
+ */
+const SEMANTIC_ROLES = new Set(["user", "assistant"]);
+
 function extractFacts(content = "") {
   const text = content.trim();
   if (!text) return [];
@@ -40,6 +46,9 @@ function ingestInteraction({
   content,
   now,
   turnId: providedTurnId,
+  toolCallsJson = null,
+  toolCallId = null,
+  toolName = null,
   insertConversationTurn,
   insertMemoryItem,
   insertOutboxEvent,
@@ -52,7 +61,16 @@ function ingestInteraction({
     role,
     content,
     createdAt: now,
+    toolCallsJson,
+    toolCallId,
+    toolName,
   });
+
+  // log-only roles (tool_call / tool_result / system)：只写 conversation_turns，
+  // 不进 memory pipeline、不分类、不索引、不出 outbox。
+  if (!SEMANTIC_ROLES.has(role)) {
+    return { turnId, memoryId: null, factCount: 0, skipped: false, logOnly: true };
+  }
 
   // 幂等检查：同一 source_turn_id 已有 memory_item 直接 short-circuit
   const findFn = findMemoryItemBySourceTurnId;
@@ -125,4 +143,4 @@ function ingestInteraction({
   return { turnId, memoryId, factCount: facts.length, skipped: false };
 }
 
-module.exports = { ingestInteraction };
+module.exports = { ingestInteraction, SEMANTIC_ROLES };
