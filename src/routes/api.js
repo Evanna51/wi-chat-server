@@ -2,22 +2,14 @@ const express = require("express");
 const { z } = require("zod");
 const {
   db,
-  upsertCharacterState,
-  insertConversationTurn,
-  insertMemoryItem,
-  insertOutboxEvent,
   upsertAssistantProfile,
   countAllowAutoLifeAssistants,
-  updateAssistantLastSession,
   upsertLocalSubscriber,
   pullPendingMessagesForUser,
   ackPulledMessage,
-  withTransaction,
   searchConversation,
   searchMemory,
-  findMemoryItemBySourceTurnId,
 } = require("../db");
-const { ingestInteraction } = require("../services/memoryIngestService");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
 const { generateWithMemory } = require("../services/langchainQwenService");
 const {
@@ -26,15 +18,13 @@ const {
   buildMemoryGuidance,
 } = require("../services/memoryDecisionService");
 const { runCatchup } = require("../services/catchupService");
-const { onUserMessage: onUserMessageState, ensureDefaultState } = require("../services/characterStateService");
-const { classifyAndPersist } = require("../services/memoryClassificationService");
+const { ensureDefaultState } = require("../services/characterStateService");
 const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
 const {
   generatePlans,
   listPendingPlans,
   listPlansByStatus,
   cancelPlanById,
-  cancelPendingPlansForAssistant,
   findPlanById,
 } = require("../services/proactivePlanService");
 const config = require("../config");
@@ -210,68 +200,8 @@ router.post("/ack-message", authMiddleware, (req, res) => {
   return res.json({ ok: true, messageId: parsed.data.messageId, ackStatus: parsed.data.ackStatus });
 });
 
-router.post("/report-interaction", authMiddleware, (req, res) => {
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Sunset", "Thu, 01 Apr 2027 00:00:00 GMT");
-  const schema = z.object({
-    assistantId: z.string().min(1),
-    sessionId: z.string().min(1),
-    role: z.enum(["user", "assistant"]),
-    content: z.string().min(1),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { assistantId, sessionId, role, content } = parsed.data;
-  const now = Date.now();
-  const current = db.prepare("SELECT * FROM character_state WHERE assistant_id = ?").get(assistantId) || {};
-  const totalTurns = (current.total_turns || 0) + (role === "user" ? 1 : 0);
-  const familiarity = Math.min(100, Math.floor(totalTurns / 3));
-
-  let ingestResult = null;
-  withTransaction(() => {
-    ingestResult = ingestInteraction({
-      db,
-      assistantId,
-      sessionId,
-      role,
-      content,
-      now,
-      insertConversationTurn,
-      insertMemoryItem,
-      insertOutboxEvent,
-      findMemoryItemBySourceTurnId,
-    });
-    upsertCharacterState(assistantId, {
-      active_session_id: sessionId,
-      total_turns: totalTurns,
-      familiarity,
-      last_user_message_at: role === "user" ? now : current.last_user_message_at || null,
-    });
-    updateAssistantLastSession(assistantId, sessionId);
-  });
-  if (role === "user") {
-    try {
-      onUserMessageState(assistantId, { content, now });
-    } catch (e) {
-      // non-critical: don't fail the request if state update errors
-    }
-    if (ingestResult?.memoryId && !ingestResult.skipped) {
-      setImmediate(() => {
-        classifyAndPersist(ingestResult.memoryId, content).catch(() => {});
-      });
-    }
-  }
-
-  let cancelledPlans = 0;
-  if (role === "user") {
-    try {
-      cancelledPlans = cancelPendingPlansForAssistant(assistantId, "user_active");
-    } catch (e) {
-      cancelledPlans = 0;
-    }
-  }
-  res.json({ ok: true, familiarity, totalTurns, cancelledPlans });
-});
+// 注：原 POST /api/report-interaction 已于 2026-05-06 移除。
+// 单一对话写入路径：/api/sync/push 与 /api/sync/snapshot。
 
 router.post("/chat-with-memory", authMiddleware, async (req, res) => {
   const schema = z.object({

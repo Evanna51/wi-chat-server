@@ -211,30 +211,6 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 { "ok": true }
 ```
 
-### 3) Report Interaction (full chat log persistence)
-
-> ⚠️ DEPRECATED — use `/api/sync/push` instead. Will be removed in a future release. The endpoint now returns header `Deprecation: true` and `Sunset: Thu, 01 Apr 2027 00:00:00 GMT`.
-
-- `POST /api/report-interaction`
-- Use this for **every user/assistant turn**, including small talk.
-- Body:
-```json
-{
-  "assistantId": "assistant_demo",
-  "sessionId": "session_1",
-  "role": "user",
-  "content": "我喜欢喝美式咖啡，最近在学羽毛球"
-}
-```
-- Response:
-```json
-{
-  "ok": true,
-  "familiarity": 0,
-  "totalTurns": 1
-}
-```
-
 ### 4) Register Local Inbox Subscriber (for pull mode)
 
 - `POST /api/register-local-inbox`
@@ -390,11 +366,11 @@ Notes:
 
 ### 10) Sync API (offline batch drain)
 
-离线对话同步入口，用于 chatbox-Android 在户外断网时缓存对话，回家进入家庭 WiFi 后批量推送补齐 server 状态。完整设计见 `docs/offline-sync-plan.md`，Android 落地清单见 `docs/android-sync-integration.md`。
+**唯一的对话写入路径**：所有 user / assistant / tool_call / tool_result / system turn 都通过 sync 接口入库，client-generated UUID v7 作为 turn id，**完美幂等**（同一条 turn 不论 push 多少次只落库一次）。完整设计见 `docs/offline-sync-plan.md`，Android 落地清单见 `docs/android-sync-integration.md`。
 
-- 现有 `POST /api/report-interaction` 仍然是**单条实时上报**路径（在线时使用，低延迟体验）。
-- 新增 `POST /api/sync/push` 用于**离线 batch drain**，client-generated UUID v7 作为 turn id，**完美幂等**（同一条 turn 不论 push 多少次只落库一次）。
-- 新增 `GET /api/sync/state` 用于 phone 自检本地缓存与 server 状态是否一致。
+- `POST /api/sync/push`        — 实时单条 / 小批量推送（在线时低延迟体验）
+- `POST /api/sync/snapshot`    — 一次性同步 assistants + turns（daily sync / 角色信息变更时用）
+- `GET  /api/sync/state`       — phone 自检本地缓存与 server 状态是否一致
 
 #### 10.1 POST /api/sync/push
 
@@ -830,28 +806,29 @@ Response：
 
 For each turn:
 
-1. Persist user turn:
-   - call `POST /api/report-interaction` with `role=user`
-2. Get memory tool context:
+1. Stamp a UUID v7 turn id (`SyncQueueDrainer.stampForSync`) and persist locally.
+2. Get memory tool context for the user input:
    - call `POST /api/tool/memory-context`
 3. Build your chat model prompt:
    - if `shouldRetrieve=true`, append `memoryLines` + `memoryGuidance`
-   - if `shouldRetrieve=false`, use normal prompt
-4. Generate final answer in your chat AI
-5. Persist assistant turn:
-   - call `POST /api/report-interaction` with `role=assistant`
+   - 不论 `shouldRetrieve`，response 里的 `relationshipState` 都是当前角色快照，喂回 prompt
+4. Generate final answer in your chat AI; persist locally with same flow.
+5. Push to server:
+   - 在线 / 小批量：`POST /api/sync/push`（含 user / assistant / tool_call / tool_result / system 任意混合）
+   - 离线积压 + 角色信息变更：`POST /api/sync/snapshot`（一次推 assistants + turns）
 
-This keeps all chat logs persisted while memory retrieval stays selective.
+幂等保证：phone 端 turn id 不变、无限重推，server 永远只落一次库。
 
 ## cURL Examples
 
-### A) report-interaction
+### A) sync-push（实时单条 / 小批量）
 
 ```bash
-curl -X POST "http://127.0.0.1:8787/api/report-interaction" \
+TURN_ID=$(node -e "console.log(require('uuid').v7())")
+curl -sS -X POST "http://127.0.0.1:8787/api/sync/push" \
   -H "x-api-key: dev-local-key" \
   -H "content-type: application/json" \
-  --data '{"assistantId":"assistant_demo","sessionId":"session_1","role":"user","content":"我喜欢喝美式咖啡"}'
+  --data "{\"deviceId\":\"demo\",\"turns\":[{\"id\":\"$TURN_ID\",\"assistantId\":\"assistant_demo\",\"sessionId\":\"s1\",\"role\":\"user\",\"content\":\"我喜欢喝美式咖啡\",\"createdAt\":$(date +%s000)}]}"
 ```
 
 ### B) memory-context
