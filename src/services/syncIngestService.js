@@ -34,6 +34,9 @@ function ingestTurnsBatch({ deviceId, turns }) {
   let accepted = 0;
   let skipped = 0;
   let rejected = 0;
+  // 给路由层用：本批次每个 assistantId 接受的 user-role turn 数 / 最新一条 user 内容 + 时间。
+  // 路由层据此决定是否触发 character_state 更新（仅对有 profile 的 assistant）。
+  const perAssistant = new Map();
 
   // 按 createdAt ASC 排序，让 memory_edges 时序正确
   const sorted = [...turns].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -125,6 +128,20 @@ function ingestTurnsBatch({ deviceId, turns }) {
           const detail = { id: turn.id, status: "accepted" };
           if (reasons.length) detail.reason = reasons.join(",");
           details.push(detail);
+          // 累计 user-role 统计；只 accepted 的 user 行才计数
+          if (turn.role === "user") {
+            const stats = perAssistant.get(turn.assistantId) || {
+              userTurnCount: 0,
+              lastUserContent: null,
+              lastUserAt: 0,
+            };
+            stats.userTurnCount += 1;
+            if (createdAt >= stats.lastUserAt) {
+              stats.lastUserContent = turn.content;
+              stats.lastUserAt = createdAt;
+            }
+            perAssistant.set(turn.assistantId, stats);
+          }
         }
       } catch (error) {
         rejected += 1;
@@ -139,7 +156,14 @@ function ingestTurnsBatch({ deviceId, turns }) {
 
   tx(sorted);
 
-  return { accepted, skipped, rejected, details, deviceId: deviceId || null };
+  return {
+    accepted,
+    skipped,
+    rejected,
+    details,
+    deviceId: deviceId || null,
+    perAssistantStats: perAssistant,
+  };
 }
 
 module.exports = { ingestTurnsBatch };

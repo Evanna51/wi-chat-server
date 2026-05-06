@@ -482,6 +482,12 @@ Response：
 - 单事务整批，单条 `rejected` 不会 roll back 其它 accepted 行。
 - `assistantId` **不强约束** `assistant_profile` 必须存在（角色由 phone 创建）。
 
+`character_state` 联动（仅对 `assistant_profile` 已存在的 assistant 生效）：
+- `total_turns` 累加本批次中 accepted 的 user-role turn 数；`familiarity = floor(total_turns / 3)`，封顶 100。
+- `last_user_message_at` 推进到本批次最大 user createdAt。
+- 用本批次最后一条 user content 调 `onUserMessage`（mood / intimacy / energy 启发式更新），单次调用避免历史消息间 silenceEffect 错乱触发。
+- 没有 profile 的 assistant 仅入 `conversation_turns` / `memory_items`，**不污染** state 表。
+
 cURL 示例（push 一条 + 重推演示 skipped）：
 ```bash
 TURN_ID=$(node -e "console.log(require('uuid').v7())")
@@ -499,6 +505,66 @@ curl -sS -X POST "http://127.0.0.1:8787/api/sync/push" \
   -H "content-type: application/json" \
   --data "$PAYLOAD"
 ```
+
+#### 10.1.1 POST /api/sync/snapshot — 一次性同步 assistants + turns
+
+为了避免 phone 端逐个调 `assistant-profile/upsert` 再 push turns，新增 snapshot 端点一次性推。语义：
+
+- `assistants[]` 走 **phone-wins INSERT-OR-REPLACE**：`characterName` / `characterBackground` / `allowAutoLife` / `allowProactiveMessage` 一律以 phone 端值为准，已有行直接覆盖。
+- `turns[]` 复用 `/api/sync/push` 全套校验和入库逻辑（5 种 role / tool 字段 / 幂等 / clock_corrected）。
+- `assistants` 和 `turns` 都可选；至少有一个。两个都为空返回 400 `empty_snapshot`。
+- assistants 先 upsert，再走 turns，再触发 character_state（仅对已 upsert / 已存在 profile 的 assistant）。
+
+Body：
+```json
+{
+  "deviceId": "android-001",
+  "assistants": [
+    {
+      "assistantId": "869e5840-...",
+      "characterName": "锡金",
+      "characterBackground": "一个内敛安静的角色",
+      "allowAutoLife": false,
+      "allowProactiveMessage": false
+    }
+  ],
+  "turns": [
+    {
+      "id": "019dca12-3b4c-...",
+      "assistantId": "869e5840-...",
+      "sessionId": "android-001-s1",
+      "role": "user",
+      "content": "...",
+      "createdAt": 1777200000000
+    }
+  ]
+}
+```
+
+Response：
+```json
+{
+  "ok": true,
+  "deviceId": "android-001",
+  "assistants": {
+    "received": 1,
+    "upserted": 1,
+    "failed": 0,
+    "details": [{ "assistantId": "...", "status": "upserted", "characterName": "锡金" }]
+  },
+  "turns": {
+    "received": 3,
+    "accepted": 3,
+    "skipped": 0,
+    "rejected": 0,
+    "details": [...]
+  },
+  "cancelledPlans": 0,
+  "stateUpdated": 1
+}
+```
+
+`assistants.length` 上限 500，`turns.length` 上限 200（与 sync-push 一致）。
 
 #### 10.2 GET /api/sync/state
 

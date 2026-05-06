@@ -1,10 +1,19 @@
 const express = require("express");
 const { z } = require("zod");
-const { db } = require("../db");
+const {
+  db,
+  upsertAssistantProfile,
+  upsertCharacterState,
+  getAssistantProfile,
+} = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
 const {
   cancelPendingPlansForAssistant,
 } = require("../services/proactivePlanService");
+const {
+  ensureDefaultState,
+  onUserMessage: onUserMessageState,
+} = require("../services/characterStateService");
 const config = require("../config");
 
 const router = express.Router();
@@ -48,6 +57,46 @@ const pushSchema = z.object({
     .max(200),
 });
 
+/**
+ * 对 ingestTurnsBatch 返回的 perAssistantStats 做后置处理：
+ * - 仅对**已存在 assistant_profile** 的 assistant 触发 character_state 更新
+ *   （没有 profile 的 assistant 视为 phone 端尚未 push profile，不污染 state 表）
+ * - 累计 totalTurns / 重算 familiarity / 推进 last_user_message_at
+ * - 对该 assistant 在本批次的最后一条 user content 调用一次 mood 状态机
+ *   （而非每条都跑，避免 silenceEffect 在历史消息间错乱触发）
+ */
+function applyStateUpdatesForProfileAssistants(perAssistantStats) {
+  let updated = 0;
+  for (const [assistantId, stats] of perAssistantStats) {
+    if (!assistantId || stats.userTurnCount <= 0) continue;
+    const profile = getAssistantProfile(assistantId);
+    if (!profile) continue; // 没 profile 的 assistant 跳过
+    try {
+      ensureDefaultState(assistantId);
+      const current = db
+        .prepare("SELECT total_turns FROM character_state WHERE assistant_id = ?")
+        .get(assistantId);
+      const newTotal = (current?.total_turns || 0) + stats.userTurnCount;
+      upsertCharacterState(assistantId, {
+        total_turns: newTotal,
+        familiarity: Math.min(100, Math.floor(newTotal / 3)),
+        last_user_message_at: stats.lastUserAt,
+      });
+      if (stats.lastUserContent) {
+        // 用历史时间戳触发 mood，让 silenceEffect 比对的是过去的"最后一次活跃时刻"
+        onUserMessageState(assistantId, {
+          content: stats.lastUserContent,
+          now: stats.lastUserAt,
+        });
+      }
+      updated += 1;
+    } catch (e) {
+      // 单 assistant state 更新失败不阻塞主流程
+    }
+  }
+  return updated;
+}
+
 router.post("/push", authMiddleware, (req, res) => {
   const parsed = pushSchema.safeParse(req.body || {});
   if (!parsed.success) {
@@ -71,6 +120,10 @@ router.post("/push", authMiddleware, (req, res) => {
         // ignore single-assistant cancel errors
       }
     }
+
+    // 仅对有 profile 的 assistant 触发 character_state（mood / totalTurns / familiarity）更新
+    const stateUpdated = applyStateUpdatesForProfileAssistants(result.perAssistantStats);
+
     return res.json({
       ok: true,
       deviceId,
@@ -79,6 +132,141 @@ router.post("/push", authMiddleware, (req, res) => {
       rejected: result.rejected,
       details: result.details,
       cancelledPlans,
+      stateUpdated,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+/**
+ * 一次性同步 assistants + turns 的"快照式" endpoint。
+ *
+ * 设计语义：
+ * - assistants[] 走 phone-wins INSERT-OR-REPLACE 语义（characterName / background /
+ *   allowAutoLife / allowProactiveMessage 一律以 phone 端值为准）
+ * - turns[] 复用 sync-push 全部校验和入库逻辑（含 5 种 role + tool 字段 + 幂等）
+ * - 单事务内：assistants 先 upsert，再 turns 入库；任何一步失败整体 500
+ * - 对 assistants 中**包含的**且本次有 user-role turn 的 assistantId 触发 character_state
+ *   更新（依然只对有 profile 的 assistant 生效，但本接口刚好把 profile upsert 了）
+ *
+ * 用途：phone 端 daily sync 时一次推完所有角色 + 对话，让 server 端 UI 看到角色卡片
+ */
+const snapshotSchema = z.object({
+  deviceId: z.string().min(1),
+  assistants: z
+    .array(
+      z.object({
+        assistantId: z.string().min(1),
+        characterName: z.string().min(1),
+        characterBackground: z.string().optional(),
+        allowAutoLife: z.boolean().optional(),
+        allowProactiveMessage: z.boolean().optional(),
+      })
+    )
+    .max(500)
+    .optional(),
+  turns: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        assistantId: z.string().min(1),
+        sessionId: z.string().min(1),
+        role: z.enum(["user", "assistant", "tool_call", "tool_result", "system"]),
+        content: z.string(),
+        createdAt: z.number().int().min(0),
+        toolCallsJson: z.string().optional(),
+        toolCallId: z.string().optional(),
+        toolName: z.string().optional(),
+      })
+    )
+    .max(200)
+    .optional(),
+});
+
+router.post("/snapshot", authMiddleware, (req, res) => {
+  const parsed = snapshotSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { deviceId, assistants = [], turns = [] } = parsed.data;
+  if (assistants.length === 0 && turns.length === 0) {
+    return res.status(400).json({ ok: false, error: "empty_snapshot" });
+  }
+
+  try {
+    // 1. assistants upsert（phone-wins）
+    const profileResults = [];
+    for (const a of assistants) {
+      try {
+        const saved = upsertAssistantProfile({
+          assistantId: a.assistantId,
+          characterName: a.characterName,
+          characterBackground: a.characterBackground || "",
+          allowAutoLife: a.allowAutoLife === true,
+          allowProactiveMessage: a.allowProactiveMessage === true,
+        });
+        profileResults.push({
+          assistantId: a.assistantId,
+          status: "upserted",
+          characterName: saved?.character_name || null,
+        });
+      } catch (e) {
+        profileResults.push({
+          assistantId: a.assistantId,
+          status: "failed",
+          reason: String(e?.message || e),
+        });
+      }
+    }
+
+    // 2. turns 入库（复用 sync-push 全套校验 + 幂等）
+    let turnResult = {
+      accepted: 0,
+      skipped: 0,
+      rejected: 0,
+      details: [],
+      perAssistantStats: new Map(),
+    };
+    if (turns.length > 0) {
+      turnResult = ingestTurnsBatch({ deviceId, turns });
+    }
+
+    // 3. cancel pending plans for any assistant with new user-role turns
+    const userAssistantIds = new Set();
+    for (const t of turns) {
+      if (t && t.role === "user" && t.assistantId) userAssistantIds.add(t.assistantId);
+    }
+    let cancelledPlans = 0;
+    for (const aid of userAssistantIds) {
+      try {
+        cancelledPlans += cancelPendingPlansForAssistant(aid, "user_active");
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    // 4. character_state 更新（仅对有 profile 的 assistant）
+    const stateUpdated = applyStateUpdatesForProfileAssistants(turnResult.perAssistantStats);
+
+    return res.json({
+      ok: true,
+      deviceId,
+      assistants: {
+        received: assistants.length,
+        upserted: profileResults.filter((r) => r.status === "upserted").length,
+        failed: profileResults.filter((r) => r.status === "failed").length,
+        details: profileResults,
+      },
+      turns: {
+        received: turns.length,
+        accepted: turnResult.accepted,
+        skipped: turnResult.skipped,
+        rejected: turnResult.rejected,
+        details: turnResult.details,
+      },
+      cancelledPlans,
+      stateUpdated,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });

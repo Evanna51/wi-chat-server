@@ -6,19 +6,18 @@ const { v7: uuidv7 } = require("uuid");
  */
 const SEMANTIC_ROLES = new Set(["user", "assistant"]);
 
-function extractFacts(content = "") {
-  const text = content.trim();
-  if (!text) return [];
-  const facts = [];
-  const likesMatch = text.match(/喜欢([^，。！？\n]+)/);
-  if (likesMatch) {
-    facts.push({ key: "preference_like", value: likesMatch[1].trim(), confidence: 0.75 });
-  }
-  const dislikesMatch = text.match(/不喜欢([^，。！？\n]+)/);
-  if (dislikesMatch) {
-    facts.push({ key: "preference_dislike", value: dislikesMatch[1].trim(), confidence: 0.75 });
-  }
-  return facts;
+/**
+ * @deprecated 2026-05-06 弃用：原 regex `/喜欢([^，。！？\n]+)/` 太粗暴，
+ * 不锚定句首、不分主语、不排除否定、句中位置匹配，产生大量 garbage 事实
+ * （如 "的方式靠近我..."、"的事情"）。
+ *
+ * 新方向：事实抽取由 LLM 路径承接（参考 `memoryClassificationService` 9 类分类基础设施，
+ * 后续 KG Phase B 会一并用 LLM 抽实体/关系/事实，进 kg_relations 表）。
+ *
+ * 此函数现在永远返回 []，不再写入 memory_facts。等 LLM 抽取上线后整体迁移。
+ */
+function extractFacts(/* content */) {
+  return [];
 }
 
 function estimateSalience(role, content) {
