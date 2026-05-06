@@ -320,7 +320,8 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
   "memoryGuidance": "记忆: ...\n结合建议: ...",
   "memories": [
     { "id": "xxx", "content": "我喜欢喝美式咖啡，最近在学羽毛球", "score": 0.69 }
-  ]
+  ],
+  "relationshipState": { "...": "见 14.x 节" }
 }
 ```
 
@@ -332,13 +333,15 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
   "intent": "small_talk",
   "reason": "user_acknowledgment_no_history_needed",
   "decisionSource": "ai",
-  "memoryLines": []
+  "memoryLines": [],
+  "relationshipState": { "...": "见 14.x 节" }
 }
 ```
 
 Notes:
 - `memoryGuidance` is returned only when `shouldRetrieve=true`.
 - `intent` values include: `fact_query`, `continuation`, `care_response`, `small_talk`, `task_only`.
+- `relationshipState` 字段始终存在；当角色尚未交互过、`character_state` 行不存在时为 `null`。完整 schema 见 `GET /api/relationship/state` 段。
 
 ### 8) Chat With Memory (server-side generation)
 
@@ -699,6 +702,63 @@ body: { "reason": "..." }       // 可选
 ```
 
 只对 `status=pending` 的 plan 生效。
+
+### 17) Relationship State (角色情绪 / 关系 / 精力快照)
+
+- `GET /api/relationship/state?assistantId=<id>`
+- 给客户端 `RelationshipStateStore.upsertFromServerJson` 用，每次连接 / 进入 chat 时拉一次刷新本地状态。
+- `character_state` 行不存在时自动以默认值（`mood=calm` / `relationship=陌生人` / `energy=0.7`）初始化，**永远不会返回 404**。
+- 同样的 payload 也作为 `relationshipState` 字段夹带在 `POST /api/tool/memory-context` 的所有 response 路径中（`shouldRetrieve` 为 true / false / 系统关闭），客户端可二选一消费。
+
+Response：
+
+```json
+{
+  "ok": true,
+  "assistantId": "assistant_demo",
+  "relationshipState": {
+    "assistantId": "assistant_demo",
+    "mood": {
+      "emotion": "calm",
+      "emotionZh": "平静",
+      "emotionEn": "calm",
+      "intensity": 0.3,
+      "valence": 0.1,
+      "arousal": 0.2,
+      "updatedAt": null
+    },
+    "relationship": {
+      "level": 0,
+      "levelName": "陌生人",
+      "intimacyScore": 0,
+      "familiarity": 0,
+      "totalTurns": 0
+    },
+    "energy": { "value": 0.7, "updatedAt": null },
+    "focus": null,
+    "lastUserMessageAt": null,
+    "lastProactiveAt": null,
+    "updatedAt": 1778100000000
+  },
+  "ts": 1778100000000
+}
+```
+
+字段语义：
+
+| 路径 | 含义 |
+|------|------|
+| `mood.emotion` | 27+95 GoEmotions 词库的 id（base 27 个 / secondary 95 个） |
+| `mood.intensity` | 0.1–1.0，情绪强度 |
+| `mood.valence` | -1.0–1.0，效价（负面 → 正面） |
+| `mood.arousal` | 0–1.0，激活度（平静 → 兴奋） |
+| `relationship.level` | -2(冷战) / -1(疏远) / 0(陌生人) ... / 9(灵魂伴侣)，共 12 档 |
+| `relationship.intimacyScore` | 累积亲密分，driver of level 升降 |
+| `relationship.familiarity` | 旧字段，由 `total_turns` 计算（`floor(total_turns/3)`，封顶 100） |
+| `energy.value` | 0.1–1.0，精力值，沉默期会衰减 |
+| `focus.topic` / `focus.depth` | 当前话题焦点 + 已深入轮次 |
+
+衰减语义：每次 `getEffectiveState` 都会按时间应用 mood / energy 衰减，所以你拿到的 valence/arousal/intensity/energy 是**当前时刻**的值，不是上次写入的存档值。
 
 ## Recommended Calling Flow (chatbox-Android)
 

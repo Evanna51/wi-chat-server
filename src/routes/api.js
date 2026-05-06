@@ -28,6 +28,7 @@ const {
 const { runCatchup } = require("../services/catchupService");
 const { onUserMessage: onUserMessageState, ensureDefaultState } = require("../services/characterStateService");
 const { classifyAndPersist } = require("../services/memoryClassificationService");
+const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
 const {
   generatePlans,
   listPendingPlans,
@@ -321,6 +322,10 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
 
   const { assistantId, sessionId, userInput, topK } = parsed.data;
   const decision = await shouldRetrieveMemory({ userInput });
+  // 在所有 return 路径都附带 relationshipState，让客户端不论是否检索记忆，
+  // 都能拿到最新的角色情绪/关系/精力快照（state 不存在时为 null）。
+  const relationshipState = safeBuildRelationshipState(assistantId);
+
   if (!config.memoryRetrievalEnabled) {
     return res.json({
       ok: true,
@@ -329,6 +334,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
       reason: "memory_retrieval_disabled",
       decisionSource: "system",
       memoryLines: [],
+      relationshipState,
     });
   }
 
@@ -340,6 +346,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
       reason: decision.reason,
       decisionSource: decision.source,
       memoryLines: [],
+      relationshipState,
     });
   }
 
@@ -366,9 +373,46 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
         content: item.content,
         score: item.score,
       })),
+      relationshipState,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// 防御性 wrapper：state builder 抛错不应该让 memory-context 整个 500
+function safeBuildRelationshipState(assistantId) {
+  try {
+    return buildRelationshipStatePayload(assistantId);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * GET /api/relationship/state?assistantId=xxx
+ *
+ * 客户端主动拉取角色当前情绪/关系/精力快照。
+ * 如果 character_state 行不存在（角色尚未交互过），自动用 ensureDefaultState 初始化默认值，
+ * 保证客户端永远拿到结构完整的 payload，无需处理 404。
+ */
+router.get("/relationship/state", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { assistantId } = parsed.data;
+  try {
+    ensureDefaultState(assistantId);
+    const relationshipState = buildRelationshipStatePayload(assistantId);
+    if (!relationshipState) {
+      // ensureDefaultState 后理论上一定有 row；这里兜底
+      return res.status(500).json({ ok: false, error: "state_init_failed" });
+    }
+    return res.json({ ok: true, assistantId, relationshipState, ts: Date.now() });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
   }
 });
 
