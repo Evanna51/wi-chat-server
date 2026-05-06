@@ -10,6 +10,9 @@ const {
 } = require("../db");
 const { runLifeMemoryTick, runProactiveTick } = require("../scheduler");
 const {
+  deleteConversationTurnCascade,
+} = require("../services/memoryEditService");
+const {
   getActiveUserIds,
   getActiveSocketCount,
 } = require("../ws/connections");
@@ -178,6 +181,27 @@ router.get("/conversations", (req, res) => {
   const nextBefore =
     items.length === limit ? items[items.length - 1].createdAt : null;
   res.json({ ok: true, items, nextBefore });
+});
+
+/**
+ * 级联删除一条 conversation_turn：
+ *   conversation_turn → 衍生的 memory_item → memory_facts/edges/vectors → outbox_events
+ *   FTS5 trigger 自动清理
+ *
+ * 单 turn 误同步入库时使用；删除是不可逆的。
+ */
+router.delete("/conversation-turns/:id", (req, res) => {
+  const turnId = String(req.params.id || "").trim();
+  if (!turnId) return res.status(400).json({ ok: false, error: "missing_id" });
+  try {
+    const result = deleteConversationTurnCascade(turnId);
+    if (!result.found) {
+      return res.status(404).json({ ok: false, error: "turn_not_found", turnId });
+    }
+    return res.json({ ok: true, turnId, deleted: result.deleted });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
 });
 
 router.get("/memories", (req, res) => {

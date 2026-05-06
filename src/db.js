@@ -374,21 +374,8 @@ function listProactiveAssistantProfiles() {
     .all();
 }
 
-function upsertLocalSubscriber({ userId, deviceId = "" }) {
-  const now = Date.now();
-  db.prepare(
-    `INSERT INTO local_subscribers (user_id, device_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET
-       device_id=excluded.device_id,
-       updated_at=excluded.updated_at`
-  ).run(userId, deviceId, now, now);
-  return db.prepare("SELECT * FROM local_subscribers WHERE user_id = ?").get(userId);
-}
-
-function listLocalSubscriberIds() {
-  return db.prepare("SELECT user_id FROM local_subscribers ORDER BY updated_at DESC").all();
-}
+// upsertLocalSubscriber / listLocalSubscriberIds 已于 2026-05-06 随 HTTP 轮询通道一并移除
+// （local_subscribers 表见 migration 015 drop）
 
 function enqueueLocalOutboxMessage({
   userId,
@@ -556,8 +543,6 @@ module.exports = {
   countAllowAutoLifeAssistants,
   listAutoLifeAssistantProfiles,
   listProactiveAssistantProfiles,
-  upsertLocalSubscriber,
-  listLocalSubscriberIds,
   enqueueLocalOutboxMessage,
   pullPendingMessagesForUser,
   ackPulledMessage,

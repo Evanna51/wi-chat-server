@@ -46,6 +46,7 @@ const api = {
   get: (path, params) => request("GET", path, { params }),
   post: (path, body) => request("POST", path, { body }),
   patch: (path, body) => request("PATCH", path, { body }),
+  del: (path) => request("DELETE", path, {}),
 };
 
 function escapeHtml(s) {
@@ -627,14 +628,38 @@ async function renderConversationTab(body, a) {
     const resp = await api.get("/api/browse/conversations", params);
     const items = resp.items.slice().reverse();
     for (const t of items) {
-      const bubble = el("div", { class: `bubble bubble--${t.role}` }, [
+      const bubble = el("div", { class: `bubble bubble--${t.role}` });
+      const deleteBtn = el(
+        "button",
+        {
+          class: "bubble-delete",
+          title: "删除这条对话（含衍生记忆）",
+          onclick: async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (!confirm(`删除这条 ${t.role} 消息？\n会同时清除衍生的 memory_item / facts / vectors，操作不可逆。`)) return;
+            try {
+              const r = await api.del(`/api/browse/conversation-turns/${encodeURIComponent(t.id)}`);
+              bubble.remove();
+              console.log("[delete]", t.id, r.deleted);
+            } catch (e) {
+              alert(`删除失败：${e.message || e}`);
+            }
+          },
+        },
+        "× 删除"
+      );
+      bubble.appendChild(
         el("div", { class: "bubble-meta" }, [
           el("strong", {}, t.role),
           " ",
           el("small", { class: "muted" }, formatTime(t.createdAt)),
-        ]),
-        el("div", { class: "bubble-content" }, t.content),
-      ]);
+          " ",
+          el("small", { class: "muted mono", title: t.id }, t.id.slice(0, 8)),
+          deleteBtn,
+        ])
+      );
+      bubble.appendChild(el("div", { class: "bubble-content" }, t.content));
       if (append) right.insertBefore(bubble, right.firstChild);
       else right.appendChild(bubble);
     }

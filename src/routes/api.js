@@ -4,9 +4,6 @@ const {
   db,
   upsertAssistantProfile,
   countAllowAutoLifeAssistants,
-  upsertLocalSubscriber,
-  pullPendingMessagesForUser,
-  ackPulledMessage,
   searchConversation,
   searchMemory,
 } = require("../db");
@@ -20,6 +17,10 @@ const {
 const { runCatchup } = require("../services/catchupService");
 const { ensureDefaultState } = require("../services/characterStateService");
 const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
+const {
+  deleteMemoryItemCascade,
+  updateMemoryItemContent,
+} = require("../services/memoryEditService");
 const {
   generatePlans,
   listPendingPlans,
@@ -111,97 +112,9 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
   });
 });
 
-router.post("/register-local-inbox", authMiddleware, (req, res) => {
-  const schema = z.object({
-    userId: z.string().min(1),
-    deviceId: z.string().optional(),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const row = upsertLocalSubscriber({
-    userId: parsed.data.userId,
-    deviceId: parsed.data.deviceId || "",
-  });
-  res.json({
-    ok: true,
-    subscriber: {
-      userId: row.user_id,
-      deviceId: row.device_id || "",
-      updatedAt: row.updated_at,
-    },
-  });
-});
-
-router.get("/pull-messages", authMiddleware, (req, res) => {
-  const schema = z.object({
-    userId: z.string().trim().min(1).optional(),
-    since: z.coerce.number().int().min(0).default(0),
-    limit: z.coerce.number().int().positive().max(100).default(20),
-  });
-  const parsed = schema.safeParse(req.query || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { since, limit } = parsed.data;
-  let userId = parsed.data.userId || String(req.header("x-user-id") || "").trim();
-  if (!userId) {
-    const subscribers = db
-      .prepare("SELECT user_id FROM local_subscribers ORDER BY updated_at DESC LIMIT 2")
-      .all();
-    if (subscribers.length === 1) {
-      userId = subscribers[0].user_id;
-    } else {
-      return res.status(400).json({
-        ok: false,
-        error: "missing_user_id: provide query userId or header x-user-id",
-      });
-    }
-  }
-  const now = Date.now();
-  const rows = pullPendingMessagesForUser({
-    userId,
-    since,
-    limit,
-    now,
-    repullGapMs: config.localPullRepullGapMs,
-  });
-  res.json({
-    ok: true,
-    userId,
-    since,
-    count: rows.length,
-    messages: rows.map((item) => ({
-      id: item.id,
-      assistantId: item.assistant_id,
-      sessionId: item.session_id,
-      messageType: item.message_type,
-      title: item.title,
-      body: item.body,
-      payload: JSON.parse(item.payload_json || "{}"),
-      createdAt: item.created_at,
-      availableAt: item.available_at,
-      expiresAt: item.expires_at,
-      pullCount: item.pull_count + 1,
-    })),
-    now,
-  });
-});
-
-router.post("/ack-message", authMiddleware, (req, res) => {
-  const schema = z.object({
-    userId: z.string().min(1),
-    messageId: z.string().min(1),
-    ackStatus: z.string().default("received"),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const ok = ackPulledMessage(parsed.data);
-  if (!ok) {
-    return res.status(404).json({ ok: false, error: "message_not_found_or_user_mismatch" });
-  }
-  return res.json({ ok: true, messageId: parsed.data.messageId, ackStatus: parsed.data.ackStatus });
-});
-
-// 注：原 POST /api/report-interaction 已于 2026-05-06 移除。
-// 单一对话写入路径：/api/sync/push 与 /api/sync/snapshot。
+// 注：原 HTTP 轮询通道（/register-local-inbox, /pull-messages, /ack-message）
+// 与 /report-interaction 均已于 2026-05-06 移除。
+// 实时推送统一走 WebSocket /api/ws；对话写入统一走 /api/sync/push 与 /api/sync/snapshot。
 
 router.post("/chat-with-memory", authMiddleware, async (req, res) => {
   const schema = z.object({
@@ -397,6 +310,74 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+/**
+ * Memory 修正/删除工具端点。
+ *
+ * 用例：客户端 LLM 通过 memory-recall 拿到一批 memory，发现有错时调本接口纠错。
+ *
+ *   action: 'delete'   级联删 memory_item + 衍生 facts/edges/vectors/outbox + 源 conversation_turn
+ *   action: 'update'   就地改 content + 触发重 embed；保留 conversation_turn 历史不可篡改
+ *
+ * assistantId 必填且强校验：memoryId 必须属于该 assistant，防止跨角色误删。
+ */
+router.post("/tool/memory-correct", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    memoryId: z.string().min(1),
+    action: z.enum(["delete", "update"]),
+    newContent: z.string().min(1).optional(),
+    reason: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, memoryId, action, newContent, reason } = parsed.data;
+
+  try {
+    if (action === "delete") {
+      const result = deleteMemoryItemCascade(memoryId, assistantId);
+      if (!result.found) {
+        return res.status(404).json({
+          ok: false,
+          error: result.reason || "memory_not_found",
+          memoryId,
+        });
+      }
+      return res.json({
+        ok: true,
+        action: "delete",
+        memoryId,
+        deleted: result.deleted,
+        reason: reason || null,
+      });
+    }
+
+    // action === 'update'
+    if (!newContent) {
+      return res.status(400).json({
+        ok: false,
+        error: "update_requires_newContent",
+      });
+    }
+    const result = updateMemoryItemContent(memoryId, newContent, { assistantId, reason });
+    if (!result.found) {
+      return res.status(404).json({
+        ok: false,
+        error: result.reason || "memory_not_found",
+        memoryId,
+      });
+    }
+    return res.json({
+      ok: true,
+      action: "update",
+      memoryId,
+      updated: result.updated,
+      reason: reason || null,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
   }
 });
 

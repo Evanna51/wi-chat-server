@@ -176,6 +176,8 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 - 管理页（角色 → 管理 Tab）可：
   - 切换 `allowAutoLife` / `allowProactiveMessage` 开关（PATCH `/api/browse/assistants/:id/flags`）；
   - 手动触发 life / proactive-message 任务（POST `/api/browse/assistants/:id/run`）。**dryRun 默认勾选**：勾选时不会写入 `memory_items`、不会推送 FCM、不会写 `local_outbox_messages`，只会写一条 `status=dry_run` 的 `character_behavior_journal`；取消勾选则等价于 cron 真实运行，会真实持久化记忆并按 push 配置推送。
+- 对话页（角色 → 对话 Tab）可：
+  - hover 任意气泡显示"× 删除"按钮，确认后**级联硬删**该 turn + 衍生 memory_item / facts / edges / vectors / outbox（DELETE `/api/browse/conversation-turns/:id`）。操作不可逆。
 
 数据全部来自本地 SQLite，没有额外缓存层，刷新即所见。
 
@@ -209,62 +211,6 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 - Response:
 ```json
 { "ok": true }
-```
-
-### 4) Register Local Inbox Subscriber (for pull mode)
-
-- `POST /api/register-local-inbox`
-- Body:
-```json
-{
-  "userId": "default-user",
-  "deviceId": "android-001"
-}
-```
-
-### 5) Pull Pending Local Messages
-
-- `GET /api/pull-messages?limit=20&since=0&userId=default-user`
-- `userId` supports 3 ways:
-  - query `userId`
-  - header `x-user-id`
-  - omit both only when exactly one local subscriber exists (auto fallback)
-- Response:
-```json
-{
-  "ok": true,
-  "userId": "default-user",
-  "since": 0,
-  "count": 1,
-  "messages": [
-    {
-      "id": "019595f0-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "assistantId": "assistant_demo",
-      "sessionId": "session_1",
-      "messageType": "character_proactive",
-      "title": "assistant_demo 发来新消息",
-      "body": "你好，想和你聊聊。",
-      "payload": { "type": "character_proactive" },
-      "createdAt": 1773409142807,
-      "availableAt": 1773409142807,
-      "expiresAt": 1774013942807,
-      "pullCount": 1
-    }
-  ],
-  "now": 1773409142900
-}
-```
-
-### 6) Ack Pulled Message
-
-- `POST /api/ack-message`
-- Body:
-```json
-{
-  "userId": "default-user",
-  "messageId": "019595f0-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "ackStatus": "received"
-}
 ```
 
 ### 7) Tool Endpoint: Memory Context (recommended for app integration)
@@ -318,6 +264,66 @@ Notes:
 - `memoryGuidance` is returned only when `shouldRetrieve=true`.
 - `intent` values include: `fact_query`, `continuation`, `care_response`, `small_talk`, `task_only`.
 - `relationshipState` 字段始终存在；当角色尚未交互过、`character_state` 行不存在时为 `null`。完整 schema 见 `GET /api/relationship/state` 段。
+
+### 7.1) Tool: Memory Recall (agentic search)
+
+- `POST /api/tool/memory-recall`
+- 给客户端 LLM 的 search_memory tool 直接调用。**不做 decision**（与 memory-context 区别）；LLM 已决定要查，server 哑执行。
+- Body:
+```json
+{
+  "assistantId": "assistant_demo",
+  "query": "用户最近聊到的咖啡",
+  "source": "user",
+  "category": "preferences",
+  "minQuality": "B",
+  "topK": 5
+}
+```
+- `source` ∈ {`user`, `character`, `all`}，默认 `user`
+- `category` 可选：`chitchat / personal_experience / relationship_info / knowledge / goals_plans / preferences / decisions_reflections / wellbeing / ideas`
+- `minQuality` 可选：`A`/`B`/`C`/`D`/`E`
+- 响应返回每条 memory 的 `id` / `content` / `category` / `quality` / `score`，AI 可拿 id 喂给 memory-correct 做修正
+
+### 7.2) Tool: Memory Correct (delete / update)
+
+给客户端 AI 修正过去错误记忆的工具。
+
+- `POST /api/tool/memory-correct`
+- Body:
+```json
+{
+  "assistantId": "assistant_demo",
+  "memoryId": "019dca12-3b4c-...",
+  "action": "delete",
+  "reason": "用户后来澄清这是反话"
+}
+```
+或：
+```json
+{
+  "assistantId": "assistant_demo",
+  "memoryId": "019dca12-3b4c-...",
+  "action": "update",
+  "newContent": "其实我喜欢的是美式不是拿铁",
+  "reason": "用户后来澄清"
+}
+```
+
+行为：
+
+| action | 影响 |
+|--------|------|
+| `delete` | 级联删 memory_item + memory_facts/edges/vectors + outbox events + 源 conversation_turn |
+| `update` | 就地改 content + `vector_status='pending'` 触发重 embed；**保留** conversation_turn 不可篡改原始对话 |
+
+防护：
+- `assistantId` 强校验，memory 必须属于该 assistant，否则 404 `assistant_mismatch`
+- `memoryId` 不存在 → 404 `memory_not_found`
+- `action=update` 但缺 `newContent` → 400 `update_requires_newContent`
+- `action=update` 时 `newContent` 不能为空白 → 400 `empty_content`
+
+典型流程：客户端 AI 用 memory-recall 拿到一批候选 → 判断哪条错误 → 用其 `id` 调 memory-correct。
 
 ### 8) Chat With Memory (server-side generation)
 
