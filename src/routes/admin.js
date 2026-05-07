@@ -3,7 +3,6 @@ const { z } = require("zod");
 const { db } = require("../db");
 const config = require("../config");
 const { runIndexerOnce } = require("../workers/memoryIndexer");
-const { runLifeMemoryTick, runProactiveTick } = require("../scheduler");
 const { sendFcmMessage } = require("../services/fcm");
 
 const router = express.Router();
@@ -45,26 +44,8 @@ router.get("/autonomous-runs", (req, res) => {
   res.json({ ok: true, limit, rows });
 });
 
-router.post("/debug/trigger-autonomous", async (req, res) => {
-  const schema = z.object({
-    job: z.enum(["life", "message", "all"]).default("all"),
-    assistantId: z.string().min(1).optional(),
-    ignoreLock: z.boolean().default(true),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-
-  const { job, assistantId, ignoreLock } = parsed.data;
-  const assistantIds = assistantId ? [assistantId] : null;
-  const result = {};
-  if (job === "life" || job === "all") {
-    result.life = await runLifeMemoryTick({ assistantIds, ignoreLock });
-  }
-  if (job === "message" || job === "all") {
-    result.message = await runProactiveTick({ assistantIds, ignoreLock });
-  }
-  res.json({ ok: true, job, assistantId: assistantId || null, result, ts: Date.now() });
-});
+// 注：原 POST /admin/debug/trigger-autonomous 于 2026-05-07 移除。
+// 新方向：lazy catchup（POST /api/character/catchup）+ proactive plans（POST /api/proactive/regenerate-plans）。
 
 router.post("/debug/mock-push", async (req, res) => {
   const schema = z.object({

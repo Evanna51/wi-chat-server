@@ -8,7 +8,6 @@ const {
   upsertAssistantProfile,
   getAssistantProfile,
 } = require("../db");
-const { runLifeMemoryTick, runProactiveTick } = require("../scheduler");
 const {
   deleteConversationTurnCascade,
 } = require("../services/memoryEditService");
@@ -394,9 +393,12 @@ router.get("/stats", (_req, res) => {
     tables,
     recent,
     schedule: {
-      lifeCron: config.lifeMemoryCron,
-      proactiveCron: config.proactiveMessageCron,
+      planGenerationCron: config.planGenerationCron,
+      planExecutorIntervalMs: config.planExecutorIntervalMs,
       retentionCron: config.retentionSweepCron,
+      memoryClassifyCron: config.memoryClassifyCron,
+      backupDailyCron: config.backupDailyCron,
+      backupWeeklyCron: config.backupWeeklyCron,
       dryRun: config.autonomousDryRun,
       pushEnabled: config.autonomousPushEnabled,
       quietHours: config.autonomousQuietHours,
@@ -413,9 +415,10 @@ router.get("/config", (_req, res) => {
       autonomousPushEnabled: config.autonomousPushEnabled,
       autonomousQuietHours: config.autonomousQuietHours,
       autonomousMinMessageIntervalMs: config.autonomousMinMessageIntervalMs,
-      lifeMemoryCron: config.lifeMemoryCron,
-      proactiveMessageCron: config.proactiveMessageCron,
+      planGenerationCron: config.planGenerationCron,
+      planExecutorIntervalMs: config.planExecutorIntervalMs,
       retentionSweepCron: config.retentionSweepCron,
+      memoryClassifyCron: config.memoryClassifyCron,
       timezone: config.timezone,
     },
   });
@@ -475,37 +478,7 @@ router.patch("/assistants/:id/profile", (req, res) => {
   res.json({ ok: true, profile: profileToDto(next) });
 });
 
-router.post("/assistants/:id/run", async (req, res) => {
-  const schema = z.object({
-    job: z.enum(["life", "message"]),
-    dryRun: z.boolean().default(true),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const profile = getAssistantProfile(req.params.id);
-  if (!profile) {
-    return res.status(404).json({ ok: false, error: "assistant_not_found" });
-  }
-  const { job, dryRun } = parsed.data;
-  const assistantIds = [req.params.id];
-  try {
-    let result;
-    if (job === "life") {
-      result = await runLifeMemoryTick({ ignoreLock: true, assistantIds, dryRun });
-    } else {
-      result = await runProactiveTick({ ignoreLock: true, assistantIds, dryRun });
-    }
-    res.json({
-      ok: true,
-      job,
-      dryRun,
-      assistantId: req.params.id,
-      result,
-      ts: Date.now(),
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
+// 注：原 POST /api/browse/assistants/:id/run 于 2026-05-07 移除。
+// 新方向：管理面板调 POST /api/character/catchup 和 POST /api/proactive/regenerate-plans 替代手动触发。
 
 module.exports = router;

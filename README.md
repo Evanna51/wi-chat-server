@@ -107,22 +107,8 @@ npm stop           # 停止
 - `npm run indexer:once` - run one indexer batch manually
 - `npm run eval:memory` - run retrieval eval seed dataset
 - `npm run db:query -- ...` - query SQLite quickly with filters
-- `npm run autonomous:run -- ...` - run autonomous cron tasks on demand
-
-### Run autonomous task quickly (without manual DB insert)
-
-Use this util to execute scheduler tasks directly (life/message/all), instead of manually inserting mock outbox rows.
-
-```bash
-# run both life + message tasks
-npm run autonomous:run -- --job all
-
-# run only proactive message for one role
-npm run autonomous:run -- --job message --assistant d244644b-e851-416a-ad98-b557fb991b99
-
-# run only life for multiple roles
-npm run autonomous:run -- --job life --assistants d244...,869e...
-```
+- `npm run catchup:run -- --assistant <id>` - 手动触发 lazy catchup（生活记忆补叙）
+- `npm run plan:generate` - 手动触发 daily plan 生成
 
 ### Quick DB query tool
 
@@ -144,18 +130,16 @@ npm run db:query -- --table memory_items --assistant d244644b-e851-416a-ad98-b55
 npm run db:query -- --table outbox_events --assistant d244644b-e851-416a-ad98-b557fb991b99 --json
 ```
 
-### Query examples: autonomous life/push + role
-
-Use these commands when you want to quickly inspect recent autonomous runs and role-level data (all via Quick DB query tool).
+### Query examples: catchup / plan / role-level data
 
 ```bash
-# 1) recent autonomous life runs (latest 20)
-npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type life_tick --limit 20
+# 1) recent catchup runs (latest 20)
+npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type catchup_tick --limit 20
 
-# 2) recent autonomous proactive message runs (latest 20)
-npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type proactive_message_tick --limit 20
+# 2) recent plan-generation runs
+npm run db:query -- --table character_behavior_journal --assistant d244644b-e851-416a-ad98-b557fb991b99 --run-type plan_generation_tick --limit 20
 
-# 3) recent local pull outbox records by user
+# 3) WS outbox 离线队列（按 user）
 npm run db:query -- --table local_outbox_messages --user default-user --limit 20
 
 # 4) query one role profile by assistant_id
@@ -175,7 +159,9 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 - 浏览器侧通过 `localStorage.apiKey` 读取 API key：开发态默认值是 `dev-local-key`，要改用真实 key 时在浏览器控制台执行 `localStorage.setItem('apiKey', '<your-key>')` 后刷新。当 `REQUIRE_API_KEY=0` 时（dev 模式默认）服务端跳过校验。
 - 管理页（角色 → 管理 Tab）可：
   - 切换 `allowAutoLife` / `allowProactiveMessage` 开关（PATCH `/api/browse/assistants/:id/flags`）；
-  - 手动触发 life / proactive-message 任务（POST `/api/browse/assistants/:id/run`）。**dryRun 默认勾选**：勾选时不会写入 `memory_items`、不会推送 FCM、不会写 `local_outbox_messages`，只会写一条 `status=dry_run` 的 `character_behavior_journal`；取消勾选则等价于 cron 真实运行，会真实持久化记忆并按 push 配置推送。
+  - 编辑 `characterName` / `characterBackground`（PATCH `/api/browse/assistants/:id/profile`）；
+  - 立即触发 lazy catchup 补叙生活记忆（POST `/api/character/catchup`）；
+  - 立即重新生成本角色今日 proactive plans（POST `/api/proactive/regenerate-plans`）。
 - 对话页（角色 → 对话 Tab）可：
   - hover 任意气泡显示"× 删除"按钮，确认后**级联硬删**该 turn + 衍生 memory_item / facts / edges / vectors / outbox（DELETE `/api/browse/conversation-turns/:id`）。操作不可逆。
 

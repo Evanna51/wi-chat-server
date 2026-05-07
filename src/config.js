@@ -43,14 +43,6 @@ const config = {
   infoLogEnabled: (process.env.INFO_LOG_ENABLED || "0") === "1",
   schedulerLeaderId: process.env.SCHEDULER_LEADER_ID || "local-1",
   schedulerLockTtlMs: Number(process.env.SCHEDULER_LOCK_TTL_MS || 60000),
-  legacyFcmProactiveLockName:
-    process.env.LEGACY_FCM_PROACTIVE_LOCK_NAME || "legacy_fcm_proactive_tick",
-  legacyFcmProactiveCron: process.env.LEGACY_FCM_PROACTIVE_CRON || "off",
-  lifeMemoryCron: process.env.LIFE_MEMORY_CRON || "off",
-  proactiveMessageCron: process.env.PROACTIVE_MESSAGE_CRON || "off",
-  lifeMemoryLockName: process.env.LIFE_MEMORY_LOCK_NAME || "life_memory_tick",
-  proactiveMessageLockName:
-    process.env.PROACTIVE_MESSAGE_LOCK_NAME || "proactive_message_tick",
   planGenerationCron: process.env.PLAN_GENERATION_CRON || "0 6 * * *",
   planGenerationLockName:
     process.env.PLAN_GENERATION_LOCK_NAME || "plan_generation_tick",

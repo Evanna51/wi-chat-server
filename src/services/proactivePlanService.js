@@ -11,7 +11,6 @@ const {
   getConfidentFactsForAssistant,
   getLastAssistantInteractionAt,
   insertBehaviorJournalEntry,
-  listLocalSubscriberIds,
 } = require("../db");
 const { retrieveMemory } = require("./memoryRetrievalService");
 const {
@@ -27,10 +26,14 @@ function clipText(input = "", maxLen = 240) {
   return `${text.slice(0, maxLen)}...`;
 }
 
+/**
+ * single-user 模型下的默认接收者。
+ * 之前依赖 local_subscribers 表；那张表已随 HTTP 轮询通道一起删除（migration 015）。
+ * WS 推送时 server 用此 userId 路由到 ws/connections.js 中已注册的 socket 集合；
+ * 多用户场景请改 env DEFAULT_USER_ID。
+ */
 function pickFallbackUserId() {
-  const subs = listLocalSubscriberIds();
-  if (subs.length) return subs[0].user_id;
-  return "default-user";
+  return process.env.DEFAULT_USER_ID || "default-user";
 }
 
 function parseStrictJsonObject(text = "") {

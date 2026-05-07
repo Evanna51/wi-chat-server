@@ -1111,67 +1111,6 @@ async function renderManageTab(body, a) {
     el("pre", { id: "ops-output" }, "—"),
   ]);
   body.appendChild(newOps);
-
-  const runArea = el("article", {}, [
-    el("header", {}, [el("strong", {}, "手动触发（旧实现，已被 catchup 和 plan 替代，仅用于排查）")]),
-    el(
-      "p",
-      { class: "muted" },
-      "手动调用 scheduler 当前角色的 life / proactive_message tick。dryRun=false 会真正写入记忆并可能触发推送。"
-    ),
-    buildRunRow("life", "立即跑一次 life 决策", a),
-    buildRunRow("message", "立即生成一条 proactive 消息", a),
-    el("h5", {}, "结果"),
-    el("pre", { id: "run-output" }, "—"),
-  ]);
-  body.appendChild(runArea);
-}
-
-function buildRunRow(job, label, a) {
-  const dryId = `dry-${job}`;
-  const btn = el(
-    "button",
-    {
-      class: "outline run-btn",
-      onclick: async (ev) => {
-        ev.preventDefault();
-        const dryRun = document.getElementById(dryId).checked;
-        if (!dryRun) {
-          if (
-            !confirm(
-              "确定要 dryRun=false 跑一次？将真实写入记忆/可能触发推送。"
-            )
-          ) {
-            return;
-          }
-        }
-        const out = document.getElementById("run-output");
-        out.textContent = "running…";
-        btn.setAttribute("aria-busy", "true");
-        try {
-          const resp = await api.post(
-            `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/run`,
-            { job, dryRun }
-          );
-          out.textContent = JSON.stringify(resp, null, 2);
-          showToast(`${job} ${dryRun ? "(dryRun)" : ""} 完成`, "ok");
-        } catch (err) {
-          out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
-          showToast(`${job} 失败`, "err");
-        } finally {
-          btn.removeAttribute("aria-busy");
-        }
-      },
-    },
-    label
-  );
-  return el("div", { class: "run-row" }, [
-    btn,
-    el("label", { class: "run-dry" }, [
-      el("input", { type: "checkbox", id: dryId, checked: "checked" }),
-      " dryRun（默认勾选）",
-    ]),
-  ]);
 }
 
 async function viewPlans() {

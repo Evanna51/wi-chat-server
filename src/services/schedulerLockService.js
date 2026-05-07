@@ -6,7 +6,10 @@ function isRetryableBusyError(error) {
   return code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT";
 }
 
-function tryAcquireSchedulerLock(lockName = config.legacyFcmProactiveLockName) {
+function tryAcquireSchedulerLock(lockName) {
+  if (!lockName) {
+    throw new Error("tryAcquireSchedulerLock: lockName required");
+  }
   const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const now = Date.now();
