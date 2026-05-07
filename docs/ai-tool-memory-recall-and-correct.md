@@ -37,12 +37,18 @@
 | `memoryType` | enum | — | 单 memory_type 精细过滤，**优先于 `source`**：`user_turn / assistant_turn / life_event / work_event / tool_call / tool_result / system_event` |
 | `minQuality` | A/B/C/D/E | — | 过 minQuality 的不返回（NULL 未分类放行）；A 最严 |
 | `minScore` | 0-1 | — | finalScore 阈值，过滤弱相关。**建议默认 0.5+** |
+| `dateString` | "YYYY-MM-DD" | — | **当用户提到具体日期时务必传**。本地时区当天 0:00-23:59，覆盖 fromMs/toMs |
 | `withinDays` | int >0 | — | 便捷参数：仅返回 N 天内的记忆 |
 | `fromMs` | int | — | 精确时间窗起点（unix ms），优先级高于 `withinDays` |
 | `toMs` | int | — | 精确时间窗终点 |
 | `excludeIds` | string[] ≤100 | — | 翻页用：排除已经看过的 memory id |
+| `excludeRecentEcho` | bool | `true` | 默认排除最近 60 秒同 session 的 user_turn，防 query echo |
 | `sessionId` | string | — | 同 session 内 +0.02 score boost（不强制过滤） |
 | `includeFacts` | bool | `false` | 一并返回每条 memory 的 `memory_facts` 行 |
+
+> ⚠️ **重要：embedding 不懂日期**。LLM 不要靠纯 query 找日期（"3 月 13 日初见"这种），embedding 把日期当普通 token，召回率会归零。**用户提日期 → 必须传 `dateString` 或 `fromMs/toMs`**。窗 ≤ 31 天时 server 自动走 SQL-first 路径（先 SQL 时间过滤再算语义分），召回率 100%。
+>
+> ⚠️ **反幻觉硬规则**：如果 `search_memory` 返回 `count=0` 或所有结果与用户问题语义不匹配，**直接告诉用户"我那天/那段时间没有记录"**，**禁止编造内容**。AI 编造记忆会污染用户对你的信任。
 
 **`category` 9 类**：
 
@@ -104,6 +110,7 @@
         "memoryType": {"type": "string", "enum": ["user_turn","assistant_turn","life_event","work_event","tool_call","tool_result","system_event"]},
         "minQuality": {"type": "string", "enum": ["A","B","C","D","E"]},
         "minScore": {"type": "number", "minimum": 0, "maximum": 1, "description": "建议 0.5；过滤弱相关"},
+        "dateString": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "用户提到具体日期时必传，YYYY-MM-DD"},
         "withinDays": {"type": "integer", "minimum": 1, "description": "近 N 天内"},
         "excludeIds": {"type": "array", "items": {"type": "string"}, "description": "翻页排除"},
         "includeFacts": {"type": "boolean", "default": false}
@@ -119,8 +126,11 @@
 
 - 用户问"我之前喜欢什么咖啡？"→ `{"query":"咖啡偏好","category":"preferences","minScore":0.5}`
 - 用户说"上周我们聊到的工作焦虑还好吗？"→ `{"query":"工作焦虑","category":"wellbeing","withinDays":14}`
+- 用户提"3 月 13 日初见的场景" → `{"query":"那天 见面 早上","dateString":"2026-03-13","topK":10,"source":"all"}` ← **必传 dateString**
+- 用户说"上个月生日那天聊了什么"→ `{"query":"生日","fromMs":1771862400000,"toMs":1772121599999,"source":"all"}`
 - 想看完整历史不要 dedup → 不传 category，加大 topK，必要时 `withinDays=30`
 - 翻第二页 → 把上次返回的 `id` 集合塞 `excludeIds`
+- **找不到时不要编造**：返回 count=0 或语义完全不匹配 → 直接告诉用户"那天/那段时间没有记录"
 
 ---
 
