@@ -348,14 +348,19 @@ async function runCatchup({
     }
 
     if (accepted.length === 0) {
-      // Final attempt yielded nothing usable.
+      // Final attempt yielded nothing usable. 区分两种场景：
+      //   (a) LLM 返回了 events 但全部被 dedup → 真正的 "all_duplicates"
+      //   (b) LLM 返回空数组 / 解析后 events.length=0 → "no_events_generated"
+      //       常见原因：近期对话密集，LLM 觉得没新鲜事可补叙
+      const llmReturnedEmpty = events.length === 0;
+      const reason = llmReturnedEmpty ? "no_events_generated" : "all_duplicates";
       insertBehaviorJournalEntry({
         runType: "catchup_tick",
         assistantId,
         sessionId: profile.last_session_id || null,
         shouldPersist: false,
-        status: "dedup_rejected",
-        reason: "all_duplicates",
+        status: llmReturnedEmpty ? "llm_empty" : "dedup_rejected",
+        reason,
         input: {
           now,
           lastInteractionAt: lastTs,
@@ -365,6 +370,7 @@ async function runCatchup({
         },
         result: {
           nGenerated: 0,
+          nLlmEvents: events.length,
           nDroppedByDedup: dropped.length,
           dropped: dropped.slice(0, 8),
         },
@@ -373,9 +379,10 @@ async function runCatchup({
       return {
         ok: true,
         generated: 0,
-        reason: "all_duplicates",
+        reason,
         windowMs,
         nDropped: dropped.length,
+        nLlmEvents: events.length,
       };
     }
 
