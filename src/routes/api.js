@@ -69,6 +69,7 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
     characterBackground: z.string().default(""),
     allowAutoLife: z.boolean(),
     allowProactiveMessage: z.boolean(),
+    type: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
@@ -78,6 +79,7 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
     characterBackground,
     allowAutoLife,
     allowProactiveMessage,
+    type,
   } = parsed.data;
 
   const row = upsertAssistantProfile({
@@ -86,6 +88,7 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
     characterBackground,
     allowAutoLife,
     allowProactiveMessage,
+    assistantType: type,
   });
 
   const autoLifeCount = countAllowAutoLifeAssistants();
@@ -104,6 +107,7 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
       characterBackground: row.character_background,
       allowAutoLife: row.allow_auto_life === 1,
       allowProactiveMessage: row.allow_proactive_message === 1,
+      assistantType: row.assistant_type || "",
       lastSessionId: row.last_session_id || null,
       lastProactiveCheckAt: row.last_proactive_check_at || null,
       updatedAt: row.updated_at,

@@ -162,6 +162,10 @@ const snapshotSchema = z.object({
         characterBackground: z.string().optional(),
         allowAutoLife: z.boolean().optional(),
         allowProactiveMessage: z.boolean().optional(),
+        // 角色类型（与 chatbox-Android `MyAssistant.type` 对齐）：
+        //   "character" 人物型陪伴 / "writer" 写作助手 / "default" 通用 / 其它自定义
+        // 不传 → server 保留旧值；UI 用此字段决定是否显示自驱 / 主动消息开关
+        type: z.string().optional(),
       })
     )
     .max(500)
@@ -205,6 +209,7 @@ router.post("/snapshot", authMiddleware, (req, res) => {
           characterBackground: a.characterBackground || "",
           allowAutoLife: a.allowAutoLife === true,
           allowProactiveMessage: a.allowProactiveMessage === true,
+          assistantType: a.type, // undefined → 保留旧值
         });
         profileResults.push({
           assistantId: a.assistantId,

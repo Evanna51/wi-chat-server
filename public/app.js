@@ -49,6 +49,36 @@ const api = {
   del: (path) => request("DELETE", path, {}),
 };
 
+/**
+ * assistant_type 语义（与 chatbox-Android `MyAssistant.type` 对齐）：
+ *   "character" 人物型陪伴角色 — 显示自驱生活 / 主动消息开关
+ *   "writer"    写作助手        — 隐藏自驱开关
+ *   "default"   通用助手        — 隐藏自驱开关
+ *   ""          老数据未携带 type — 沿用 character 行为（向后兼容）
+ *   其它        视作非陪伴型      — 隐藏自驱开关
+ */
+function isCharacterTypeLike(type) {
+  if (!type) return true; // 向后兼容：空 type 当 character
+  return type === "character";
+}
+
+function assistantTypeLabel(type) {
+  switch (type) {
+    case "character":
+      return "人物";
+    case "writer":
+      return "作家";
+    case "default":
+      return "通用";
+    case "":
+    case undefined:
+    case null:
+      return "未指定";
+    default:
+      return type;
+  }
+}
+
 function escapeHtml(s) {
   if (s === null || s === undefined) return "";
   return String(s)
@@ -225,12 +255,16 @@ async function viewHome() {
     grid.appendChild(el("article", {}, "暂无角色，调用 /api/assistant-profile/upsert 创建一个再回来。"));
   }
   for (const a of list) {
-    const card = el("article", { class: "char-card" }, [
-      el("header", {}, [
-        el("strong", { class: "char-card__name" }, a.characterName || a.assistantId),
-        el("small", { class: "char-card__id" }, a.assistantId),
-      ]),
-      el("div", { class: "badge-row" }, [
+    const cardIsChar = isCharacterTypeLike(a.assistantType);
+    const cardBadges = [
+      el(
+        "span",
+        { class: "badge badge--neutral", title: "assistant_type" },
+        `类型: ${assistantTypeLabel(a.assistantType)}`
+      ),
+    ];
+    if (cardIsChar) {
+      cardBadges.push(
         el(
           "span",
           {
@@ -238,7 +272,9 @@ async function viewHome() {
             title: "allow_auto_life",
           },
           `自驱生活: ${a.allowAutoLife ? "on" : "off"}`
-        ),
+        )
+      );
+      cardBadges.push(
         el(
           "span",
           {
@@ -246,13 +282,23 @@ async function viewHome() {
             title: "allow_proactive_message",
           },
           `主动消息: ${a.allowProactiveMessage ? "on" : "off"}`
-        ),
-        el(
-          "span",
-          { class: "badge badge--neutral", title: "familiarity" },
-          `熟悉度: ${a.state?.familiarity ?? 0}/100`
-        ),
+        )
+      );
+    }
+    cardBadges.push(
+      el(
+        "span",
+        { class: "badge badge--neutral", title: "familiarity" },
+        `熟悉度: ${a.state?.familiarity ?? 0}/100`
+      )
+    );
+
+    const card = el("article", { class: "char-card" }, [
+      el("header", {}, [
+        el("strong", { class: "char-card__name" }, a.characterName || a.assistantId),
+        el("small", { class: "char-card__id" }, a.assistantId),
       ]),
+      el("div", { class: "badge-row" }, cardBadges),
       el("div", { class: "char-card__counts" }, [
         el("span", {}, `对话 ${a.counts.conversationTurns}`),
         el("span", {}, `记忆 ${a.counts.memoryItems}`),
@@ -422,23 +468,32 @@ async function viewCharacter(assistantId, tabId = "overview") {
   const a = resp.assistant;
   container.innerHTML = "";
 
-  const head = el("section", { class: "char-head" }, [
-    el("h2", {}, a.characterName || a.assistantId),
-    el("small", { class: "muted mono" }, a.assistantId),
-    el("div", { class: "badge-row" }, [
+  const isCharacterLike = isCharacterTypeLike(a.assistantType);
+  const badges = [];
+  badges.push(el("span", { class: "badge badge--neutral" }, `类型: ${assistantTypeLabel(a.assistantType)}`));
+  if (isCharacterLike) {
+    badges.push(
       el(
         "span",
         { class: `badge ${a.allowAutoLife ? "badge--on" : "badge--off"}` },
         `自驱生活: ${a.allowAutoLife ? "on" : "off"}`
-      ),
+      )
+    );
+    badges.push(
       el(
         "span",
         { class: `badge ${a.allowProactiveMessage ? "badge--on" : "badge--off"}` },
         `主动消息: ${a.allowProactiveMessage ? "on" : "off"}`
-      ),
-      el("span", { class: "badge badge--neutral" }, `熟悉度: ${a.state?.familiarity ?? 0}/100`),
-      el("span", { class: "badge badge--neutral" }, `轮次: ${a.state?.totalTurns ?? 0}`),
-    ]),
+      )
+    );
+  }
+  badges.push(el("span", { class: "badge badge--neutral" }, `熟悉度: ${a.state?.familiarity ?? 0}/100`));
+  badges.push(el("span", { class: "badge badge--neutral" }, `轮次: ${a.state?.totalTurns ?? 0}`));
+
+  const head = el("section", { class: "char-head" }, [
+    el("h2", {}, a.characterName || a.assistantId),
+    el("small", { class: "muted mono" }, a.assistantId),
+    el("div", { class: "badge-row" }, badges),
   ]);
   container.appendChild(head);
 
@@ -944,58 +999,89 @@ async function renderFactsTab(body, a) {
 async function renderManageTab(body, a) {
   body.innerHTML = "";
 
-  const togglesArticle = el("article", {}, [
-    el("header", {}, [el("strong", {}, "自驱开关")]),
-    el("p", { class: "muted" }, "切换后立即生效。下次 cron tick 或手动触发会读取最新值。"),
-    el("div", { class: "switch-row" }, [
-      el("label", {}, [
-        el("input", {
-          type: "checkbox",
-          role: "switch",
-          id: "tg-autolife",
-          checked: a.allowAutoLife ? "checked" : false,
-        }),
-        " 自驱生活记忆 (allow_auto_life)",
-      ]),
-    ]),
-    el("div", { class: "switch-row" }, [
-      el("label", {}, [
-        el("input", {
-          type: "checkbox",
-          role: "switch",
-          id: "tg-proactive",
-          checked: a.allowProactiveMessage ? "checked" : false,
-        }),
-        " 主动消息 (allow_proactive_message)",
-      ]),
-    ]),
-  ]);
-  body.appendChild(togglesArticle);
+  const isCharacterLike = isCharacterTypeLike(a.assistantType);
 
-  const tgLife = document.getElementById("tg-autolife");
-  const tgPro = document.getElementById("tg-proactive");
+  if (isCharacterLike) {
+    const togglesArticle = el("article", {}, [
+      el("header", {}, [el("strong", {}, "自驱开关")]),
+      el("p", { class: "muted" }, "切换后立即生效。控制本角色是否参与 lazy catchup 和 proactive plan 生成。"),
+      el("div", { class: "switch-row" }, [
+        el("label", {}, [
+          el("input", {
+            type: "checkbox",
+            role: "switch",
+            id: "tg-autolife",
+            checked: a.allowAutoLife ? "checked" : false,
+          }),
+          " 自驱生活记忆 (allow_auto_life)",
+        ]),
+      ]),
+      el("div", { class: "switch-row" }, [
+        el("label", {}, [
+          el("input", {
+            type: "checkbox",
+            role: "switch",
+            id: "tg-proactive",
+            checked: a.allowProactiveMessage ? "checked" : false,
+          }),
+          " 主动消息 (allow_proactive_message)",
+        ]),
+      ]),
+    ]);
+    body.appendChild(togglesArticle);
 
-  async function patchFlags(flags) {
-    try {
-      const resp = await api.patch(
-        `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/flags`,
-        flags
-      );
-      a.allowAutoLife = resp.profile.allowAutoLife;
-      a.allowProactiveMessage = resp.profile.allowProactiveMessage;
-      const target = Object.keys(flags)[0];
-      const newVal = flags[target];
-      showToast(`${target} = ${newVal}`, "ok");
-    } catch (err) {
-      showToast(`保存失败: ${err.message}`, "err");
-      if ("allowAutoLife" in flags) tgLife.checked = a.allowAutoLife;
-      if ("allowProactiveMessage" in flags) tgPro.checked = a.allowProactiveMessage;
+    const tgLife = document.getElementById("tg-autolife");
+    const tgPro = document.getElementById("tg-proactive");
+
+    async function patchFlags(flags) {
+      try {
+        const resp = await api.patch(
+          `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/flags`,
+          flags
+        );
+        a.allowAutoLife = resp.profile.allowAutoLife;
+        a.allowProactiveMessage = resp.profile.allowProactiveMessage;
+        const target = Object.keys(flags)[0];
+        const newVal = flags[target];
+        showToast(`${target} = ${newVal}`, "ok");
+      } catch (err) {
+        showToast(`保存失败: ${err.message}`, "err");
+        if ("allowAutoLife" in flags) tgLife.checked = a.allowAutoLife;
+        if ("allowProactiveMessage" in flags) tgPro.checked = a.allowProactiveMessage;
+      }
     }
+
+    tgLife.addEventListener("change", () => patchFlags({ allowAutoLife: tgLife.checked }));
+    tgPro.addEventListener("change", () =>
+      patchFlags({ allowProactiveMessage: tgPro.checked })
+    );
+  } else {
+    body.appendChild(
+      el("article", { class: "muted" }, [
+        el("header", {}, [el("strong", {}, "自驱开关已隐藏")]),
+        el(
+          "p",
+          {},
+          `当前角色类型为 "${a.assistantType || "default"}"（${assistantTypeLabel(a.assistantType)}），不适用自驱生活 / 主动消息。改为 "character" 类型即可显示开关。`
+        ),
+      ])
+    );
   }
 
-  tgLife.addEventListener("change", () => patchFlags({ allowAutoLife: tgLife.checked }));
-  tgPro.addEventListener("change", () =>
-    patchFlags({ allowProactiveMessage: tgPro.checked })
+  const typeOptions = ["", "character", "writer", "default"];
+  const typeSelect = el(
+    "select",
+    { id: "edit-type" },
+    typeOptions.map((opt) =>
+      el(
+        "option",
+        {
+          value: opt,
+          ...(opt === (a.assistantType || "") ? { selected: "selected" } : {}),
+        },
+        opt === "" ? "（未指定）" : `${opt} — ${assistantTypeLabel(opt)}`
+      )
+    )
   );
 
   const profileForm = el("article", {}, [
@@ -1008,6 +1094,15 @@ async function renderManageTab(body, a) {
       "characterBackground",
       el("textarea", { id: "edit-bg", rows: "6" }, a.characterBackground || ""),
     ]),
+    el("label", {}, [
+      "assistantType",
+      typeSelect,
+      el(
+        "small",
+        { class: "muted" },
+        " 与 chatbox-Android `MyAssistant.type` 对齐；character 类型才显示自驱开关。"
+      ),
+    ]),
     el(
       "button",
       {
@@ -1015,14 +1110,20 @@ async function renderManageTab(body, a) {
           ev.preventDefault();
           const name = document.getElementById("edit-name").value.trim();
           const bg = document.getElementById("edit-bg").value;
+          const newType = document.getElementById("edit-type").value;
           try {
             const resp = await api.patch(
               `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/profile`,
-              { characterName: name || undefined, characterBackground: bg }
+              {
+                characterName: name || undefined,
+                characterBackground: bg,
+                assistantType: newType,
+              }
             );
             a.characterName = resp.profile.characterName;
             a.characterBackground = resp.profile.characterBackground;
-            showToast("已保存", "ok");
+            a.assistantType = resp.profile.assistantType;
+            showToast("已保存（type 改动需要刷新页面才能切换显示）", "ok");
           } catch (err) {
             showToast(`保存失败: ${err.message}`, "err");
           }

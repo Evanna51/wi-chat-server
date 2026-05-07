@@ -313,17 +313,24 @@ function upsertAssistantProfile({
   characterBackground = "",
   allowAutoLife = false,
   allowProactiveMessage = false,
+  assistantType,
 }) {
   const now = Date.now();
   const current = db
     .prepare("SELECT * FROM assistant_profile WHERE assistant_id = ?")
     .get(assistantId);
+  // assistantType 显式传 → 覆盖；不传 → 保留旧值（避免 phone 端旧版漏传时把已有 type 抹成空）
+  const nextType =
+    assistantType !== undefined && assistantType !== null
+      ? String(assistantType)
+      : current?.assistant_type || "";
   const next = {
     assistant_id: assistantId,
     character_name: characterName,
     character_background: characterBackground,
     allow_auto_life: allowAutoLife ? 1 : 0,
     allow_proactive_message: allowProactiveMessage ? 1 : 0,
+    assistant_type: nextType,
     last_session_id: current?.last_session_id || null,
     last_proactive_check_at: current?.last_proactive_check_at || null,
     created_at: current?.created_at || now,
@@ -331,14 +338,15 @@ function upsertAssistantProfile({
   };
   db.prepare(
     `INSERT INTO assistant_profile
-      (assistant_id, character_name, character_background, allow_auto_life, allow_proactive_message, last_session_id, last_proactive_check_at, created_at, updated_at)
+      (assistant_id, character_name, character_background, allow_auto_life, allow_proactive_message, assistant_type, last_session_id, last_proactive_check_at, created_at, updated_at)
      VALUES
-      (@assistant_id, @character_name, @character_background, @allow_auto_life, @allow_proactive_message, @last_session_id, @last_proactive_check_at, @created_at, @updated_at)
+      (@assistant_id, @character_name, @character_background, @allow_auto_life, @allow_proactive_message, @assistant_type, @last_session_id, @last_proactive_check_at, @created_at, @updated_at)
      ON CONFLICT(assistant_id) DO UPDATE SET
       character_name=excluded.character_name,
       character_background=excluded.character_background,
       allow_auto_life=excluded.allow_auto_life,
       allow_proactive_message=excluded.allow_proactive_message,
+      assistant_type=excluded.assistant_type,
       updated_at=excluded.updated_at`
   ).run(next);
   return getAssistantProfile(assistantId);

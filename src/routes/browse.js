@@ -42,6 +42,7 @@ function profileToDto(row, extras = {}) {
     characterBackground: row.character_background || "",
     allowAutoLife: row.allow_auto_life === 1,
     allowProactiveMessage: row.allow_proactive_message === 1,
+    assistantType: row.assistant_type || "",
     lastSessionId: row.last_session_id || null,
     lastProactiveCheckAt: row.last_proactive_check_at || null,
     createdAt: row.created_at,
@@ -455,6 +456,7 @@ router.patch("/assistants/:id/profile", (req, res) => {
   const schema = z.object({
     characterName: z.string().min(1).optional(),
     characterBackground: z.string().optional(),
+    assistantType: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
@@ -474,6 +476,10 @@ router.patch("/assistants/:id/profile", (req, res) => {
         : current.character_background || "",
     allowAutoLife: current.allow_auto_life === 1,
     allowProactiveMessage: current.allow_proactive_message === 1,
+    assistantType:
+      parsed.data.assistantType !== undefined
+        ? parsed.data.assistantType
+        : current.assistant_type,
   });
   res.json({ ok: true, profile: profileToDto(next) });
 });
