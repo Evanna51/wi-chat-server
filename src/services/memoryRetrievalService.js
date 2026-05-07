@@ -3,6 +3,26 @@ const config = require("../config");
 const { db } = require("../db");
 const { embedText } = require("./embeddingService");
 const { vectorStore } = require("./vectorStore");
+const { cosineSimilarity } = require("./vectorProviders/sqliteVectorStore");
+
+/**
+ * 给一组 memoryId 拉取它们的 vector 并计算与 queryVector 的余弦相似度。
+ * 只用于 SQL-first 路径（时间窗给定时绕过向量近邻取候选）。
+ */
+function computeSemanticScoresForIds(memoryIds, queryVector) {
+  if (!memoryIds.length) return new Map();
+  const ph = memoryIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(`SELECT memory_item_id, vector_blob FROM memory_vectors WHERE memory_item_id IN (${ph})`)
+    .all(...memoryIds);
+  const out = new Map();
+  for (const r of rows) {
+    if (!r.vector_blob || !r.vector_blob.byteLength) continue;
+    const f32 = new Float32Array(r.vector_blob.buffer, r.vector_blob.byteOffset, r.vector_blob.byteLength / 4);
+    out.set(r.memory_item_id, cosineSimilarity(queryVector, Array.from(f32)));
+  }
+  return out;
+}
 
 const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
 
@@ -45,6 +65,14 @@ function graphBoost(assistantId, memoryId) {
   return Math.min(1, normalize(row.total_weight || 0, 0, 5));
 }
 
+// 当窄时间窗 (≤31 天) 给定时，走 SQL-first 检索：先按时间窗过滤拉所有行，
+// 再算 query embedding 计算语义分。这样不会被向量近邻 top-25 池子局限漏掉。
+const SQL_FIRST_WINDOW_MAX_DAYS = 31;
+
+// 防 query echo：默认排除最近 N 秒同 (assistant, session) 的 user_turn，
+// 避免 sync-push 异步分类后立刻被自己的 query 命中。
+const ECHO_EXCLUDE_RECENT_SECONDS = 60;
+
 async function retrieveMemory({
   assistantId,
   sessionId = "",
@@ -54,71 +82,142 @@ async function retrieveMemory({
   category = null,
   source = null,        // "user" | "character" | "all" | null（不过滤）
   minQuality = null,    // "A"|"B"|"C"|"D"|"E"，A 最严
-  // ── PR-11 新增过滤维度 ───────────────────────────────────────────
+  // ── PR-11 过滤维度 ───────────────────────────────────────────
   fromMs = null,        // created_at >= fromMs
   toMs = null,          // created_at <= toMs
-  withinDays = null,    // 便捷：from = now - withinDays * 86400000（与 fromMs 二选一）
+  withinDays = null,    // 便捷：from = now - withinDays * 86400000
   minScore = null,      // 0-1，最终 finalScore 阈值，过滤弱相关
   memoryType = null,    // 单独 memory_type 过滤（如 'life_event'）；优先于 source
   excludeIds = null,    // string[]，从结果排除（用于翻页 / "再来 N 条不重复"）
   includeFacts = false, // 一并返回每条 memory 的 memory_facts 行
+  // ── PR-12 新增 ───────────────────────────────────────────
+  dateString = null,    // "YYYY-MM-DD" 便捷参数 → 自动转当天 fromMs/toMs (本地时区)
+  excludeRecentEcho = true, // 默认 true：屏蔽最近 60s 同 session 的 user_turn 防 echo
 }) {
   const now = Date.now();
+
+  // dateString 便捷参数：覆盖 fromMs/toMs（用本地时区当天 0:00-23:59）
+  if (dateString && /^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+    const d = new Date(`${dateString}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      fromMs = d.getTime();
+      toMs = fromMs + 86400000 - 1;
+    }
+  }
+
+  // 计算最终时间窗
+  let effectiveFrom = fromMs;
+  if (effectiveFrom == null && withinDays && withinDays > 0) {
+    effectiveFrom = now - withinDays * 86400000;
+  }
+  let effectiveTo = toMs;
+  const windowMs =
+    effectiveFrom != null && effectiveTo != null ? effectiveTo - effectiveFrom : null;
+  const useSqlFirst =
+    windowMs != null && windowMs > 0 && windowMs <= SQL_FIRST_WINDOW_MAX_DAYS * 86400000;
+
   const queryVector = await embedText(query);
-  // 有过滤条件时多取一些候选，避免 SQL 过滤后剩下太少
-  const hasFilter = !!(category || source || minQuality || fromMs || toMs || withinDays || memoryType || (excludeIds && excludeIds.length));
-  const vectorMatches = await vectorStore.search({
-    assistantId,
-    queryVector,
-    topK: Math.max(topK * (hasFilter ? 5 : 2), 20),
-  });
-  let memoryIds = vectorMatches.map((item) => item.memoryId);
+  let memoryIds;
+  let vectorMatches = null; // 仅向量路径下有值；SQL-first 路径走 computeSemanticScoresForIds 补
+  if (useSqlFirst) {
+    // SQL-first：先按时间窗 + 其它过滤条件直接 SQL 拉所有匹配行的 id（不走向量近邻）
+    const whereClauses = [`assistant_id = ?`, `created_at >= ?`, `created_at <= ?`];
+    const params = [assistantId, effectiveFrom, effectiveTo];
+    if (category) {
+      whereClauses.push("memory_category = ?");
+      params.push(category);
+    }
+    if (memoryType) {
+      whereClauses.push("memory_type = ?");
+      params.push(memoryType);
+    } else {
+      const sourceTypes = source ? SOURCE_TYPES[source] : null;
+      if (sourceTypes && sourceTypes.length > 0) {
+        const tp = sourceTypes.map(() => "?").join(",");
+        whereClauses.push(`memory_type IN (${tp})`);
+        params.push(...sourceTypes);
+      }
+    }
+    if (minQuality) {
+      whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
+      params.push(minQuality);
+    }
+    const allInWindow = db
+      .prepare(
+        `SELECT id FROM memory_items WHERE ${whereClauses.join(" AND ")} ORDER BY created_at ASC`
+      )
+      .all(...params);
+    memoryIds = allInWindow.map((r) => r.id);
+  } else {
+    // 默认：向量近邻 top-K * N
+    const hasFilter = !!(
+      category || source || minQuality || effectiveFrom != null || effectiveTo != null ||
+      memoryType || (excludeIds && excludeIds.length)
+    );
+    vectorMatches = await vectorStore.search({
+      assistantId,
+      queryVector,
+      topK: Math.max(topK * (hasFilter ? 5 : 2), 20),
+    });
+    memoryIds = vectorMatches.map((item) => item.memoryId);
+  }
+
+  // exclude 清单
   if (excludeIds && excludeIds.length) {
     const ex = new Set(excludeIds);
     memoryIds = memoryIds.filter((id) => !ex.has(id));
   }
+  // echo 防护：排除最近 60s 同 session 的 user_turn id
+  if (excludeRecentEcho && sessionId) {
+    const echoIds = db
+      .prepare(
+        `SELECT id FROM memory_items
+          WHERE assistant_id = ? AND session_id = ?
+            AND memory_type = 'user_turn'
+            AND created_at >= ?`
+      )
+      .all(assistantId, sessionId, now - ECHO_EXCLUDE_RECENT_SECONDS * 1000);
+    if (echoIds.length > 0) {
+      const ex = new Set(echoIds.map((r) => r.id));
+      memoryIds = memoryIds.filter((id) => !ex.has(id));
+    }
+  }
+
   if (!memoryIds.length) return [];
 
   const placeholders = memoryIds.map(() => "?").join(",");
   const whereClauses = [`assistant_id = ?`, `id IN (${placeholders})`];
   const params = [assistantId, ...memoryIds];
 
-  if (category) {
-    whereClauses.push("memory_category = ?");
-    params.push(category);
-  }
-
-  // memoryType 优先于 source（更精细的单类型过滤）
-  if (memoryType) {
-    whereClauses.push("memory_type = ?");
-    params.push(memoryType);
-  } else {
-    const sourceTypes = source ? SOURCE_TYPES[source] : null;
-    if (sourceTypes && sourceTypes.length > 0) {
-      const typePlaceholders = sourceTypes.map(() => "?").join(",");
-      whereClauses.push(`memory_type IN (${typePlaceholders})`);
-      params.push(...sourceTypes);
+  // SQL-first 路径已经过滤过了；走向量路径时这里再加 SQL 过滤
+  if (!useSqlFirst) {
+    if (category) {
+      whereClauses.push("memory_category = ?");
+      params.push(category);
     }
-  }
-
-  if (minQuality) {
-    // A < B < C < D < E 字典序，且 NULL（未分类）放行
-    whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
-    params.push(minQuality);
-  }
-
-  // 时间窗：fromMs / toMs 优先；withinDays 作为简便参数计算 fromMs
-  let effectiveFrom = fromMs;
-  if (effectiveFrom == null && withinDays && withinDays > 0) {
-    effectiveFrom = now - withinDays * 86400000;
-  }
-  if (effectiveFrom != null) {
-    whereClauses.push("created_at >= ?");
-    params.push(effectiveFrom);
-  }
-  if (toMs != null) {
-    whereClauses.push("created_at <= ?");
-    params.push(toMs);
+    if (memoryType) {
+      whereClauses.push("memory_type = ?");
+      params.push(memoryType);
+    } else {
+      const sourceTypes = source ? SOURCE_TYPES[source] : null;
+      if (sourceTypes && sourceTypes.length > 0) {
+        const typePlaceholders = sourceTypes.map(() => "?").join(",");
+        whereClauses.push(`memory_type IN (${typePlaceholders})`);
+        params.push(...sourceTypes);
+      }
+    }
+    if (minQuality) {
+      whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
+      params.push(minQuality);
+    }
+    if (effectiveFrom != null) {
+      whereClauses.push("created_at >= ?");
+      params.push(effectiveFrom);
+    }
+    if (effectiveTo != null) {
+      whereClauses.push("created_at <= ?");
+      params.push(effectiveTo);
+    }
   }
 
   const sql = `SELECT id, assistant_id, session_id, memory_type, content, salience, confidence,
@@ -127,10 +226,16 @@ async function retrieveMemory({
                 WHERE ${whereClauses.join(" AND ")}`;
   const rows = db.prepare(sql).all(...params);
 
-  const matchScoreMap = new Map(vectorMatches.map((item) => [item.memoryId, item.score]));
+  // 语义分来源分两种：
+  //   - 向量近邻路径：vectorStore.search 已经返回了每个候选的 cosine score
+  //   - SQL-first 路径：候选是按时间过滤来的，没有 score，临时算一下
+  const matchScoreMap = useSqlFirst
+    ? computeSemanticScoresForIds(memoryIds, queryVector)
+    : new Map(vectorMatches.map((item) => [item.memoryId, item.score]));
   const ranked = rows
     .map((row) => {
-      const semantic       = (matchScoreMap.get(row.id) + 1) / 2;
+      const rawSemantic    = matchScoreMap.get(row.id);
+      const semantic       = rawSemantic == null ? 0.5 : (rawSemantic + 1) / 2;
       const recency        = scoreRecency(row.created_at, now);
       const salience       = row.salience || 0.5;
       const confidence     = row.confidence || 0.5;

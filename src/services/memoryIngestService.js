@@ -93,6 +93,7 @@ function ingestInteraction({
     memoryType: role === "user" ? "user_turn" : "assistant_turn",
     salience: estimateSalience(role, content),
     confidence: role === "user" ? 0.8 : 0.6,
+    createdAt: now, // 用 turn 真实发生时间，不要用 server ingest 时间
   });
 
   const facts = extractFacts(content);

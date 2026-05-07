@@ -135,8 +135,10 @@ function insertMemoryItem({
   memoryType = "turn",
   salience = 0.5,
   confidence = 0.7,
+  createdAt = null,  // 真实事件时间（即对应 turn 的 createdAt）；不传则用 now
 }) {
-  const now = Date.now();
+  const ingestNow = Date.now();
+  const eventTime = createdAt != null ? createdAt : ingestNow;
   const id = uuidv7();
   db.prepare(
     `INSERT INTO memory_items
@@ -151,8 +153,8 @@ function insertMemoryItem({
     content,
     salience,
     confidence,
-    now,
-    now
+    eventTime,
+    ingestNow
   );
   return id;
 }

@@ -297,12 +297,16 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     minScore: z.coerce.number().min(0).max(1).optional(),
     excludeIds: z.array(z.string()).max(100).optional(),
     includeFacts: z.coerce.boolean().optional(),
+    // PR-12 新增
+    dateString: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "format YYYY-MM-DD").optional(),
+    excludeRecentEcho: z.coerce.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
   const {
     assistantId, query, source, category, minQuality, topK, sessionId,
     memoryType, fromMs, toMs, withinDays, minScore, excludeIds, includeFacts,
+    dateString, excludeRecentEcho,
   } = parsed.data;
 
   try {
@@ -321,6 +325,8 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
       minScore: minScore ?? null,
       excludeIds: excludeIds || null,
       includeFacts: includeFacts === true,
+      dateString: dateString || null,
+      excludeRecentEcho: excludeRecentEcho !== false, // 默认 true
     });
     return res.json({
       ok: true,
