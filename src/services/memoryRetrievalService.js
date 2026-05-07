@@ -54,17 +54,29 @@ async function retrieveMemory({
   category = null,
   source = null,        // "user" | "character" | "all" | null（不过滤）
   minQuality = null,    // "A"|"B"|"C"|"D"|"E"，A 最严
+  // ── PR-11 新增过滤维度 ───────────────────────────────────────────
+  fromMs = null,        // created_at >= fromMs
+  toMs = null,          // created_at <= toMs
+  withinDays = null,    // 便捷：from = now - withinDays * 86400000（与 fromMs 二选一）
+  minScore = null,      // 0-1，最终 finalScore 阈值，过滤弱相关
+  memoryType = null,    // 单独 memory_type 过滤（如 'life_event'）；优先于 source
+  excludeIds = null,    // string[]，从结果排除（用于翻页 / "再来 N 条不重复"）
+  includeFacts = false, // 一并返回每条 memory 的 memory_facts 行
 }) {
   const now = Date.now();
   const queryVector = await embedText(query);
   // 有过滤条件时多取一些候选，避免 SQL 过滤后剩下太少
-  const hasFilter = !!(category || source || minQuality);
+  const hasFilter = !!(category || source || minQuality || fromMs || toMs || withinDays || memoryType || (excludeIds && excludeIds.length));
   const vectorMatches = await vectorStore.search({
     assistantId,
     queryVector,
     topK: Math.max(topK * (hasFilter ? 5 : 2), 20),
   });
-  const memoryIds = vectorMatches.map((item) => item.memoryId);
+  let memoryIds = vectorMatches.map((item) => item.memoryId);
+  if (excludeIds && excludeIds.length) {
+    const ex = new Set(excludeIds);
+    memoryIds = memoryIds.filter((id) => !ex.has(id));
+  }
   if (!memoryIds.length) return [];
 
   const placeholders = memoryIds.map(() => "?").join(",");
@@ -76,17 +88,37 @@ async function retrieveMemory({
     params.push(category);
   }
 
-  const sourceTypes = source ? SOURCE_TYPES[source] : null;
-  if (sourceTypes && sourceTypes.length > 0) {
-    const typePlaceholders = sourceTypes.map(() => "?").join(",");
-    whereClauses.push(`memory_type IN (${typePlaceholders})`);
-    params.push(...sourceTypes);
+  // memoryType 优先于 source（更精细的单类型过滤）
+  if (memoryType) {
+    whereClauses.push("memory_type = ?");
+    params.push(memoryType);
+  } else {
+    const sourceTypes = source ? SOURCE_TYPES[source] : null;
+    if (sourceTypes && sourceTypes.length > 0) {
+      const typePlaceholders = sourceTypes.map(() => "?").join(",");
+      whereClauses.push(`memory_type IN (${typePlaceholders})`);
+      params.push(...sourceTypes);
+    }
   }
 
   if (minQuality) {
     // A < B < C < D < E 字典序，且 NULL（未分类）放行
     whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
     params.push(minQuality);
+  }
+
+  // 时间窗：fromMs / toMs 优先；withinDays 作为简便参数计算 fromMs
+  let effectiveFrom = fromMs;
+  if (effectiveFrom == null && withinDays && withinDays > 0) {
+    effectiveFrom = now - withinDays * 86400000;
+  }
+  if (effectiveFrom != null) {
+    whereClauses.push("created_at >= ?");
+    params.push(effectiveFrom);
+  }
+  if (toMs != null) {
+    whereClauses.push("created_at <= ?");
+    params.push(toMs);
   }
 
   const sql = `SELECT id, assistant_id, session_id, memory_type, content, salience, confidence,
@@ -132,12 +164,43 @@ async function retrieveMemory({
         },
       };
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+    .sort((a, b) => b.score - a.score);
+
+  // 应用 minScore 阈值过滤（在 topK 截断前）
+  const afterScoreFilter = minScore != null
+    ? ranked.filter((r) => r.score >= minScore)
+    : ranked;
+  const sliced = afterScoreFilter.slice(0, topK);
+
+  // 可选：把 memory_facts 一起拉回来
+  if (includeFacts && sliced.length > 0) {
+    const ids = sliced.map((r) => r.id);
+    const ph = ids.map(() => "?").join(",");
+    const factRows = db
+      .prepare(
+        `SELECT memory_item_id, fact_key, fact_value, confidence
+           FROM memory_facts
+          WHERE memory_item_id IN (${ph})
+          ORDER BY confidence DESC`
+      )
+      .all(...ids);
+    const factsByMem = new Map();
+    for (const fr of factRows) {
+      const arr = factsByMem.get(fr.memory_item_id) || [];
+      arr.push({ key: fr.fact_key, value: fr.fact_value, confidence: fr.confidence });
+      factsByMem.set(fr.memory_item_id, arr);
+    }
+    for (const item of sliced) {
+      item.facts = factsByMem.get(item.id) || [];
+    }
+  }
+
+  // re-bind to existing variable name for downstream code
+  const rankedFinal = sliced;
 
   // 批量自增 cite_count，记录被检索行为
-  if (ranked.length > 0) {
-    const ids = ranked.map((r) => r.id);
+  if (rankedFinal.length > 0) {
+    const ids = rankedFinal.map((r) => r.id);
     const idPlaceholders = ids.map(() => "?").join(",");
     db.prepare(
       `UPDATE memory_items
@@ -155,13 +218,13 @@ async function retrieveMemory({
     assistantId,
     sessionId,
     query,
-    JSON.stringify(ranked.map((item) => item.id)),
-    JSON.stringify(ranked.map((item) => ({ id: item.id, ...item.breakdown, score: item.score }))),
+    JSON.stringify(rankedFinal.map((item) => item.id)),
+    JSON.stringify(rankedFinal.map((item) => ({ id: item.id, ...item.breakdown, score: item.score }))),
     strategy,
     now
   );
 
-  return ranked;
+  return rankedFinal;
 }
 
 module.exports = { retrieveMemory };

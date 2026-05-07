@@ -255,61 +255,86 @@ Notes:
 
 - `POST /api/tool/memory-recall`
 - 给客户端 LLM 的 search_memory tool 直接调用。**不做 decision**（与 memory-context 区别）；LLM 已决定要查，server 哑执行。
-- Body:
+
+完整参数表：
+
+| 字段 | 类型 | 默认 | 用途 |
+|------|------|------|------|
+| `assistantId` | string | 必填 | 角色 id |
+| `query` | string | 必填 | 已改写的搜索词 |
+| `topK` | int 1-20 | 5 | 返回条数 |
+| `source` | enum | `user` | `user` / `character` / `all`（按 memory_type 大类分） |
+| `category` | enum | — | 9 类细分：`chitchat / personal_experience / relationship_info / knowledge / goals_plans / preferences / decisions_reflections / wellbeing / ideas` |
+| `memoryType` | enum | — | 单 memory_type 精细过滤（优先于 source）：`user_turn / assistant_turn / life_event / work_event / tool_call / tool_result / system_event` |
+| `minQuality` | A-E | — | A 最严；过 minQuality 的不返回（NULL 未分类放行） |
+| `minScore` | 0-1 | — | finalScore 阈值，过滤弱相关。建议 0.5+ |
+| `withinDays` | int | — | 便捷：仅返回 N 天内的记忆。等价于 `fromMs = now - N*86400000` |
+| `fromMs` / `toMs` | int ms | — | 精确时间窗。优先级高于 `withinDays` |
+| `excludeIds` | string[] | — | 翻页用：排除已经看过的 memory id（≤ 100 个） |
+| `sessionId` | string | — | 同 session 内 +0.02 score boost（不强制过滤） |
+| `includeFacts` | bool | false | 一并返回每条 memory 的 memory_facts 行 |
+
+例：搜近 7 天用户偏好类、score ≥ 0.5、带 facts：
 ```json
 {
   "assistantId": "assistant_demo",
   "query": "用户最近聊到的咖啡",
-  "source": "user",
   "category": "preferences",
-  "minQuality": "B",
-  "topK": 5
+  "withinDays": 7,
+  "minScore": 0.5,
+  "topK": 5,
+  "includeFacts": true
 }
 ```
-- `source` ∈ {`user`, `character`, `all`}，默认 `user`
-- `category` 可选：`chitchat / personal_experience / relationship_info / knowledge / goals_plans / preferences / decisions_reflections / wellbeing / ideas`
-- `minQuality` 可选：`A`/`B`/`C`/`D`/`E`
-- 响应返回每条 memory 的 `id` / `content` / `category` / `quality` / `score`，AI 可拿 id 喂给 memory-correct 做修正
 
-### 7.2) Tool: Memory Correct (delete / update)
+响应每条 memory 含 `id` / `content` / `memoryType` / `category` / `quality` / `score` / `createdAt`；`includeFacts=true` 时附 `facts: [{key, value, confidence}, ...]`。
 
-给客户端 AI 修正过去错误记忆的工具。
+### 7.2) Tool: Memory Correct (6 种 action)
+
+给客户端 AI 修正/删除/重打质量/编辑 facts 的工具。所有动作都写 `memory_audit_log`。
 
 - `POST /api/tool/memory-correct`
-- Body:
+
+| action | 必填字段 | 行为 |
+|--------|----------|------|
+| `delete` | `memoryId` | 级联删单条 memory_item + 衍生 facts/edges/vectors + outbox + 源 conversation_turn |
+| `delete_batch` | `memoryIds[]` (≤50) | 批量级联删；返回每个 id 的 found/reason |
+| `update` | `memoryId`, `newContent` | 就地改 content + `vector_status='pending'` 触发重 embed；**保留** conversation_turn |
+| `set_quality` | `memoryId`, `quality` (A-E) | 重新打质量等级；标 D/E 让它不再被检索但保留行（审计可追溯） |
+| `add_fact` | `memoryId`, `factKey`, `factValue`, `factConfidence?` (0-1, 默认 0.8) | 给该 memory 加 fact；`(memoryId, factKey)` 已存在时按 confidence 高低决定是否覆盖 |
+| `remove_fact` | `memoryId`, `factKey?` | 删 fact；`factKey` 给定则只删该 key，省略则删该 memory 全部 facts |
+
+通用字段：
+- `assistantId` 必填；强校验所有 memory 必须属于该 assistant，跨角色返 `assistant_mismatch`
+- `reason` 可选，写进审计日志
+- `actor` 可选，默认 `"ai"`，可传 `"user"` / `"system"` / 自定义
+
+例（add_fact）：
 ```json
 {
-  "assistantId": "assistant_demo",
-  "memoryId": "019dca12-3b4c-...",
-  "action": "delete",
-  "reason": "用户后来澄清这是反话"
+  "assistantId": "...",
+  "action": "add_fact",
+  "memoryId": "019dca12-...",
+  "factKey": "preference_like",
+  "factValue": "拿铁",
+  "factConfidence": 0.9,
+  "reason": "AI 从用户原话推断的稳定偏好"
 }
 ```
-或：
+
+例（delete_batch）：
 ```json
 {
-  "assistantId": "assistant_demo",
-  "memoryId": "019dca12-3b4c-...",
-  "action": "update",
-  "newContent": "其实我喜欢的是美式不是拿铁",
-  "reason": "用户后来澄清"
+  "assistantId": "...",
+  "action": "delete_batch",
+  "memoryIds": ["019dca12-...", "019dca13-...", "019dca14-..."],
+  "reason": "用户表示这几条是测试数据"
 }
 ```
 
-行为：
+典型流程：客户端 AI 用 `memory-recall` 拿到候选 → 判断哪条错/低质 → 调 `memory-correct` 修正。
 
-| action | 影响 |
-|--------|------|
-| `delete` | 级联删 memory_item + memory_facts/edges/vectors + outbox events + 源 conversation_turn |
-| `update` | 就地改 content + `vector_status='pending'` 触发重 embed；**保留** conversation_turn 不可篡改原始对话 |
-
-防护：
-- `assistantId` 强校验，memory 必须属于该 assistant，否则 404 `assistant_mismatch`
-- `memoryId` 不存在 → 404 `memory_not_found`
-- `action=update` 但缺 `newContent` → 400 `update_requires_newContent`
-- `action=update` 时 `newContent` 不能为空白 → 400 `empty_content`
-
-典型流程：客户端 AI 用 memory-recall 拿到一批候选 → 判断哪条错误 → 用其 `id` 调 memory-correct。
+审计追溯：`SELECT * FROM memory_audit_log WHERE assistant_id = ? ORDER BY created_at DESC` 看所有 AI/user 编辑历史。
 
 ### 8) Chat With Memory (server-side generation)
 

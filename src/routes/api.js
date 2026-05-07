@@ -19,7 +19,11 @@ const { ensureDefaultState } = require("../services/characterStateService");
 const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
 const {
   deleteMemoryItemCascade,
+  deleteMemoryItemsBatch,
   updateMemoryItemContent,
+  setMemoryQuality,
+  addFact,
+  removeFact,
 } = require("../services/memoryEditService");
 const {
   generatePlans,
@@ -282,10 +286,24 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     minQuality: z.enum(["A", "B", "C", "D", "E"]).optional(),
     topK: z.coerce.number().int().positive().max(20).default(5),
     sessionId: z.string().optional(),
+    // PR-11 新增过滤维度
+    memoryType: z.enum([
+      "user_turn", "assistant_turn", "life_event", "work_event",
+      "tool_call", "tool_result", "system_event",
+    ]).optional(),
+    fromMs: z.coerce.number().int().min(0).optional(),
+    toMs: z.coerce.number().int().min(0).optional(),
+    withinDays: z.coerce.number().positive().max(3650).optional(),
+    minScore: z.coerce.number().min(0).max(1).optional(),
+    excludeIds: z.array(z.string()).max(100).optional(),
+    includeFacts: z.coerce.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { assistantId, query, source, category, minQuality, topK, sessionId } = parsed.data;
+  const {
+    assistantId, query, source, category, minQuality, topK, sessionId,
+    memoryType, fromMs, toMs, withinDays, minScore, excludeIds, includeFacts,
+  } = parsed.data;
 
   try {
     const memories = await retrieveMemory({
@@ -296,6 +314,13 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
       source,
       category: category || null,
       minQuality: minQuality || null,
+      memoryType: memoryType || null,
+      fromMs: fromMs ?? null,
+      toMs: toMs ?? null,
+      withinDays: withinDays ?? null,
+      minScore: minScore ?? null,
+      excludeIds: excludeIds || null,
+      includeFacts: includeFacts === true,
     });
     return res.json({
       ok: true,
@@ -310,6 +335,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
         quality: m.quality,
         createdAt: m.createdAt,
         score: Number(m.score.toFixed(4)),
+        ...(includeFacts ? { facts: m.facts || [] } : {}),
       })),
     });
   } catch (error) {
@@ -318,68 +344,138 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
 });
 
 /**
- * Memory 修正/删除工具端点。
+ * Memory 修正/删除工具端点（v2，支持 6 个 action）。
  *
- * 用例：客户端 LLM 通过 memory-recall 拿到一批 memory，发现有错时调本接口纠错。
+ * 用例：客户端 LLM 用 memory-recall 拿一批 memory，对错误/低质数据精细化修正。
  *
- *   action: 'delete'   级联删 memory_item + 衍生 facts/edges/vectors/outbox + 源 conversation_turn
- *   action: 'update'   就地改 content + 触发重 embed；保留 conversation_turn 历史不可篡改
+ *   action: 'delete'         级联删单条（memory_item + 衍生 + 源 conversation_turn）
+ *   action: 'delete_batch'   传 memoryIds[] 批量级联删
+ *   action: 'update'         就地改 content + 触发重 embed；conversation_turn 不动
+ *   action: 'set_quality'    重新打 A-E 质量等级（标低让它不再被检索但保留行）
+ *   action: 'add_fact'       给某条 memory 加 fact（key/value/confidence）
+ *   action: 'remove_fact'    删 fact（指定 factKey；省略则删该 memory 全部 facts）
  *
- * assistantId 必填且强校验：memoryId 必须属于该 assistant，防止跨角色误删。
+ * 所有动作都会写 memory_audit_log。assistantId 强校验防跨角色误删。
  */
 router.post("/tool/memory-correct", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
-    memoryId: z.string().min(1),
-    action: z.enum(["delete", "update"]),
+    action: z.enum(["delete", "delete_batch", "update", "set_quality", "add_fact", "remove_fact"]),
+    // 单条动作用 memoryId
+    memoryId: z.string().min(1).optional(),
+    // 批量动作用 memoryIds
+    memoryIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    // update
     newContent: z.string().min(1).optional(),
-    reason: z.string().optional(),
+    // set_quality
+    quality: z.enum(["A", "B", "C", "D", "E"]).optional(),
+    // add_fact / remove_fact
+    factKey: z.string().min(1).max(60).optional(),
+    factValue: z.string().min(1).max(200).optional(),
+    factConfidence: z.coerce.number().min(0).max(1).optional(),
+    // 共用
+    reason: z.string().max(500).optional(),
+    actor: z.string().max(40).optional(), // 默认 'ai'，可传 'user'/'system'
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { assistantId, memoryId, action, newContent, reason } = parsed.data;
+  const p = parsed.data;
+  const sharedOpts = { assistantId: p.assistantId, reason: p.reason || null, actor: p.actor || "ai" };
 
   try {
-    if (action === "delete") {
-      const result = deleteMemoryItemCascade(memoryId, assistantId);
-      if (!result.found) {
-        return res.status(404).json({
-          ok: false,
-          error: result.reason || "memory_not_found",
-          memoryId,
+    switch (p.action) {
+      case "delete": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: "delete_requires_memoryId" });
+        const result = deleteMemoryItemCascade(p.memoryId, p.assistantId, sharedOpts);
+        if (!result.found) {
+          return res.status(404).json({ ok: false, error: result.reason || "memory_not_found", memoryId: p.memoryId });
+        }
+        return res.json({ ok: true, action: "delete", memoryId: p.memoryId, deleted: result.deleted });
+      }
+      case "delete_batch": {
+        if (!p.memoryIds || p.memoryIds.length === 0) {
+          return res.status(400).json({ ok: false, error: "delete_batch_requires_memoryIds" });
+        }
+        const result = deleteMemoryItemsBatch(p.memoryIds, p.assistantId, sharedOpts);
+        return res.json({
+          ok: true,
+          action: "delete_batch",
+          totalDeleted: result.totalDeleted,
+          totalRequested: p.memoryIds.length,
+          details: result.details,
         });
       }
-      return res.json({
-        ok: true,
-        action: "delete",
-        memoryId,
-        deleted: result.deleted,
-        reason: reason || null,
-      });
+      case "update": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: "update_requires_memoryId" });
+        if (!p.newContent) return res.status(400).json({ ok: false, error: "update_requires_newContent" });
+        const result = updateMemoryItemContent(p.memoryId, p.newContent, sharedOpts);
+        if (!result.found) {
+          return res.status(404).json({ ok: false, error: result.reason || "memory_not_found", memoryId: p.memoryId });
+        }
+        return res.json({ ok: true, action: "update", memoryId: p.memoryId, updated: result.updated });
+      }
+      case "set_quality": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: "set_quality_requires_memoryId" });
+        if (!p.quality) return res.status(400).json({ ok: false, error: "set_quality_requires_quality" });
+        const result = setMemoryQuality(p.memoryId, p.quality, sharedOpts);
+        if (!result.found) {
+          return res.status(404).json({ ok: false, error: result.reason || "memory_not_found", memoryId: p.memoryId });
+        }
+        return res.json({
+          ok: true,
+          action: "set_quality",
+          memoryId: p.memoryId,
+          oldGrade: result.oldGrade,
+          newGrade: result.newGrade,
+        });
+      }
+      case "add_fact": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: "add_fact_requires_memoryId" });
+        if (!p.factKey || !p.factValue) {
+          return res.status(400).json({ ok: false, error: "add_fact_requires_factKey_and_factValue" });
+        }
+        const result = addFact({
+          memoryId: p.memoryId,
+          factKey: p.factKey,
+          factValue: p.factValue,
+          confidence: p.factConfidence ?? 0.8,
+          opts: sharedOpts,
+        });
+        if (!result.added) {
+          return res.status(result.reason === "memory_not_found" ? 404 : 400).json({
+            ok: false,
+            error: result.reason || "add_fact_failed",
+          });
+        }
+        return res.json({
+          ok: true,
+          action: "add_fact",
+          memoryId: p.memoryId,
+          factKey: p.factKey,
+          replacedExisting: result.replacedExisting,
+        });
+      }
+      case "remove_fact": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: "remove_fact_requires_memoryId" });
+        const result = removeFact({
+          memoryId: p.memoryId,
+          factKey: p.factKey || null,
+          opts: sharedOpts,
+        });
+        if (result.reason === "memory_not_found") {
+          return res.status(404).json({ ok: false, error: "memory_not_found" });
+        }
+        return res.json({
+          ok: true,
+          action: "remove_fact",
+          memoryId: p.memoryId,
+          factKey: p.factKey || "*",
+          removed: result.removed,
+        });
+      }
+      default:
+        return res.status(400).json({ ok: false, error: "unknown_action" });
     }
-
-    // action === 'update'
-    if (!newContent) {
-      return res.status(400).json({
-        ok: false,
-        error: "update_requires_newContent",
-      });
-    }
-    const result = updateMemoryItemContent(memoryId, newContent, { assistantId, reason });
-    if (!result.found) {
-      return res.status(404).json({
-        ok: false,
-        error: result.reason || "memory_not_found",
-        memoryId,
-      });
-    }
-    return res.json({
-      ok: true,
-      action: "update",
-      memoryId,
-      updated: result.updated,
-      reason: reason || null,
-    });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
   }

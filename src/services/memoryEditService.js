@@ -1,23 +1,58 @@
 /**
- * memoryEditService — 记忆删除/修正
+ * memoryEditService — 记忆删除/修正/事实级编辑
  *
- * 给两个调用方共用：
+ * 给三个调用方共用：
  *   1. 浏览器管理面板：DELETE /api/browse/conversation-turns/:id
  *   2. AI 工具调用：    POST   /api/tool/memory-correct
+ *   3. 后续 admin/eval 脚本调用 service 函数
  *
- * 删除是**级联硬删**：
- *   conversation_turn → memory_item (源) → memory_facts → memory_edges → memory_vectors
- *                                       → outbox_events (memory_item.created)
- *   所有相关 FTS5 trigger 自动清理。
- *
- * 修正是**就地改 content**：
- *   memory_item.content 写入新值 + updated_at 推进 + vector_status 标 'pending' 触发重新 embed
- *   conversation_turn 不动（保留原始对话历史）
- *   facts/edges 不动（如果新内容语义变化，应当先 delete 老 fact / edge 再让分类器重跑）
+ * 提供：
+ *   - 单条 / 批量级联删除 (memory_item / conversation_turn)
+ *   - content 修正 + 触发重 embed
+ *   - quality 重新打分（标低让它不再被检索）
+ *   - fact 级 add / remove
+ *   - 所有变更写入 memory_audit_log（PR-11）
  */
 
 const { v7: uuidv7 } = require("uuid");
 const { db } = require("../db");
+
+// 审计日志：动作类型常量。新动作往这里加即可，无需改 schema。
+const AUDIT_ACTIONS = {
+  DELETE_TURN: "delete_turn",
+  DELETE_MEMORY: "delete_memory",
+  UPDATE_CONTENT: "update_content",
+  SET_QUALITY: "set_quality",
+  ADD_FACT: "add_fact",
+  REMOVE_FACT: "remove_fact",
+};
+
+const VALID_QUALITY_GRADES = new Set(["A", "B", "C", "D", "E"]);
+
+/**
+ * 写一条审计日志。表 memory_audit_log 在 migration 017 创建。
+ */
+function recordAudit({ assistantId, memoryId = null, turnId = null, action, actor = "ai", reason = null, payload = null }) {
+  try {
+    db.prepare(
+      `INSERT INTO memory_audit_log
+         (id, assistant_id, memory_item_id, turn_id, action, actor, reason, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      uuidv7(),
+      assistantId || "",
+      memoryId,
+      turnId,
+      action,
+      actor,
+      reason,
+      payload ? JSON.stringify(payload) : null,
+      Date.now()
+    );
+  } catch {
+    // 审计失败不阻塞主流程
+  }
+}
 
 /**
  * 级联删除 conversation_turn 及其下游所有衍生数据。
@@ -25,7 +60,7 @@ const { db } = require("../db");
  * @param {string} turnId
  * @returns {{ found: boolean, deleted: { turn: number, memoryItems: number, facts: number, edges: number, vectors: number, outboxEvents: number } }}
  */
-function deleteConversationTurnCascade(turnId) {
+function deleteConversationTurnCascade(turnId, opts = {}) {
   if (!turnId) return { found: false, deleted: zeroDeleted() };
 
   const turnRow = db
@@ -39,7 +74,19 @@ function deleteConversationTurnCascade(turnId) {
     .all(turnId);
   const memoryIds = memoryRows.map((r) => r.id);
 
-  return runDeleteTransaction({ turnIds: [turnId], memoryIds });
+  const result = runDeleteTransaction({ turnIds: [turnId], memoryIds });
+  if (result.found) {
+    recordAudit({
+      assistantId: turnRow.assistant_id,
+      turnId,
+      memoryId: memoryIds[0] || null,
+      action: AUDIT_ACTIONS.DELETE_TURN,
+      actor: opts.actor || "user",
+      reason: opts.reason || null,
+      payload: { deleted: result.deleted, cascadedMemoryIds: memoryIds },
+    });
+  }
+  return result;
 }
 
 /**
@@ -50,7 +97,7 @@ function deleteConversationTurnCascade(turnId) {
  * @param {string} [assistantId] 可选，如果给了就强校验 memory_item 必须属于这个 assistant
  * @returns {{ found: boolean, deleted: ..., reason?: string }}
  */
-function deleteMemoryItemCascade(memoryId, assistantId = null) {
+function deleteMemoryItemCascade(memoryId, assistantId = null, opts = {}) {
   if (!memoryId) return { found: false, deleted: zeroDeleted(), reason: "missing_memoryId" };
 
   const memRow = db
@@ -64,7 +111,37 @@ function deleteMemoryItemCascade(memoryId, assistantId = null) {
   // 同时删 conversation_turn 让历史也消失（如果还在）。
   // 如果你只想删 memory 但保留原始对话，应该用 update 而非 delete。
   const turnIds = memRow.source_turn_id ? [memRow.source_turn_id] : [];
-  return runDeleteTransaction({ turnIds, memoryIds: [memoryId] });
+  const result = runDeleteTransaction({ turnIds, memoryIds: [memoryId] });
+  if (result.found) {
+    recordAudit({
+      assistantId: memRow.assistant_id,
+      memoryId,
+      turnId: memRow.source_turn_id,
+      action: AUDIT_ACTIONS.DELETE_MEMORY,
+      actor: opts.actor || "ai",
+      reason: opts.reason || null,
+      payload: { deleted: result.deleted },
+    });
+  }
+  return result;
+}
+
+/**
+ * 批量删除一组 memory_items（含级联）。
+ * 返回每个 id 的结果摘要 + 总计。AI 一次扫到一批垃圾时调用。
+ */
+function deleteMemoryItemsBatch(memoryIds, assistantId, opts = {}) {
+  if (!Array.isArray(memoryIds) || memoryIds.length === 0) {
+    return { totalDeleted: 0, details: [] };
+  }
+  const details = [];
+  let totalDeleted = 0;
+  for (const id of memoryIds) {
+    const r = deleteMemoryItemCascade(id, assistantId, opts);
+    if (r.found) totalDeleted += 1;
+    details.push({ memoryId: id, found: r.found, reason: r.reason || null });
+  }
+  return { totalDeleted, details };
 }
 
 /**
@@ -86,7 +163,7 @@ function updateMemoryItemContent(memoryId, newContent, opts = {}) {
     return { found: false, updated: false, reason: "empty_content" };
   }
 
-  const memRow = db.prepare("SELECT id, assistant_id FROM memory_items WHERE id = ?").get(memoryId);
+  const memRow = db.prepare("SELECT id, assistant_id, content FROM memory_items WHERE id = ?").get(memoryId);
   if (!memRow) return { found: false, updated: false, reason: "memory_not_found" };
   if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
     return { found: false, updated: false, reason: "assistant_mismatch" };
@@ -124,7 +201,136 @@ function updateMemoryItemContent(memoryId, newContent, opts = {}) {
     );
   })();
 
+  recordAudit({
+    assistantId: memRow.assistant_id,
+    memoryId,
+    action: AUDIT_ACTIONS.UPDATE_CONTENT,
+    actor: opts.actor || "ai",
+    reason: opts.reason || null,
+    payload: { oldContent: memRow.content, newContent },
+  });
+
   return { found: true, updated: true };
+}
+
+/**
+ * 重新打 quality 等级。AI 评估某条记忆为低价值时调用，标低后会被 minQuality 过滤掉
+ * 但保留 row（用于审计）。
+ */
+function setMemoryQuality(memoryId, grade, opts = {}) {
+  if (!memoryId) return { found: false, updated: false, reason: "missing_memoryId" };
+  if (!VALID_QUALITY_GRADES.has(grade)) {
+    return { found: false, updated: false, reason: "invalid_grade" };
+  }
+
+  const memRow = db.prepare("SELECT id, assistant_id, quality_grade FROM memory_items WHERE id = ?").get(memoryId);
+  if (!memRow) return { found: false, updated: false, reason: "memory_not_found" };
+  if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
+    return { found: false, updated: false, reason: "assistant_mismatch" };
+  }
+
+  db.prepare(
+    `UPDATE memory_items SET quality_grade = ?, category_method = 'manual', updated_at = ? WHERE id = ?`
+  ).run(grade, Date.now(), memoryId);
+
+  recordAudit({
+    assistantId: memRow.assistant_id,
+    memoryId,
+    action: AUDIT_ACTIONS.SET_QUALITY,
+    actor: opts.actor || "ai",
+    reason: opts.reason || null,
+    payload: { oldGrade: memRow.quality_grade, newGrade: grade },
+  });
+
+  return { found: true, updated: true, oldGrade: memRow.quality_grade, newGrade: grade };
+}
+
+/**
+ * 给一条 memory 加 fact。如果 (memory_id, fact_key) 已存在，按 confidence 决定覆盖/丢弃。
+ */
+function addFact({ memoryId, factKey, factValue, confidence = 0.8, opts = {} }) {
+  if (!memoryId || !factKey || !factValue) {
+    return { added: false, reason: "missing_required_field" };
+  }
+  const memRow = db.prepare("SELECT id, assistant_id, session_id FROM memory_items WHERE id = ?").get(memoryId);
+  if (!memRow) return { added: false, reason: "memory_not_found" };
+  if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
+    return { added: false, reason: "assistant_mismatch" };
+  }
+
+  const existing = db
+    .prepare("SELECT id, confidence FROM memory_facts WHERE memory_item_id = ? AND fact_key = ?")
+    .get(memoryId, factKey);
+  if (existing && existing.confidence >= confidence) {
+    return { added: false, reason: "existing_higher_confidence" };
+  }
+
+  db.transaction(() => {
+    if (existing) {
+      db.prepare("DELETE FROM memory_facts WHERE id = ?").run(existing.id);
+    }
+    db.prepare(
+      `INSERT INTO memory_facts
+         (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      uuidv7(),
+      memRow.assistant_id,
+      memRow.session_id || "",
+      memoryId,
+      factKey,
+      factValue,
+      confidence,
+      Date.now()
+    );
+  })();
+
+  recordAudit({
+    assistantId: memRow.assistant_id,
+    memoryId,
+    action: AUDIT_ACTIONS.ADD_FACT,
+    actor: opts.actor || "ai",
+    reason: opts.reason || null,
+    payload: { factKey, factValue, confidence, replacedExisting: !!existing },
+  });
+
+  return { added: true, replacedExisting: !!existing };
+}
+
+/**
+ * 删 memory 下的某个 fact_key（或全删）。
+ *   - factKey 给定 → 只删该 key
+ *   - factKey 省略 → 删该 memory 下所有 facts
+ */
+function removeFact({ memoryId, factKey = null, opts = {} }) {
+  if (!memoryId) return { removed: 0, reason: "missing_memoryId" };
+  const memRow = db.prepare("SELECT assistant_id FROM memory_items WHERE id = ?").get(memoryId);
+  if (!memRow) return { removed: 0, reason: "memory_not_found" };
+  if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
+    return { removed: 0, reason: "assistant_mismatch" };
+  }
+
+  let res;
+  if (factKey) {
+    res = db
+      .prepare("DELETE FROM memory_facts WHERE memory_item_id = ? AND fact_key = ?")
+      .run(memoryId, factKey);
+  } else {
+    res = db.prepare("DELETE FROM memory_facts WHERE memory_item_id = ?").run(memoryId);
+  }
+
+  if (res.changes > 0) {
+    recordAudit({
+      assistantId: memRow.assistant_id,
+      memoryId,
+      action: AUDIT_ACTIONS.REMOVE_FACT,
+      actor: opts.actor || "ai",
+      reason: opts.reason || null,
+      payload: { factKey: factKey || "*", removed: res.changes },
+    });
+  }
+
+  return { removed: res.changes };
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
@@ -178,5 +384,10 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
 module.exports = {
   deleteConversationTurnCascade,
   deleteMemoryItemCascade,
+  deleteMemoryItemsBatch,
   updateMemoryItemContent,
+  setMemoryQuality,
+  addFact,
+  removeFact,
+  AUDIT_ACTIONS,
 };
