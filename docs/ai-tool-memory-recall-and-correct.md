@@ -1,8 +1,11 @@
-# AI Tool 手册：memory-recall + memory-correct
+# AI Tool 手册：memory-recall + memory-correct + knowledge
 
-> 给客户端 LLM tool-calling 用的两个端点：
-> **search** 用户/角色历史 + **edit** 错误/低质记忆。
-> 服务端基础信息见 `README.md` 7.x 节，本文是给 LLM 调用方的精简集成指南。
+> 给客户端 LLM tool-calling 用的端点集：
+> - **search** 用户/角色历史（episodic）+ knowledge（稳定知识）
+> - **edit** 错误/低质记忆 + pin 关键记忆 + 加事实
+> - **knowledge** 主动写入知识库
+>
+> 服务端基础信息见 `README.md`，本文是给 LLM 调用方的精简集成指南。
 
 ---
 
@@ -32,9 +35,10 @@
 | `assistantId` | string | **必填** | 角色 id |
 | `query` | string | **必填** | 已改写的搜索词（建议 LLM 把用户原话精炼成主题词） |
 | `topK` | int 1-20 | `5` | 返回条数 |
-| `source` | enum | `"user"` | `"user"`(用户说过的) / `"character"`(角色 life_event 等) / `"all"` |
+| `source` | enum | `"user"` | `"user"`(用户说过的) / `"character"`(角色 life_event 等) / `"knowledge"`(知识库) / `"all"` |
+| `kbName` | string | — | 在指定知识库内搜（如 `"user_profile"` / `"character_lore"`）；传时自动隐含 `source="knowledge"` |
 | `category` | enum | — | 9 类细分：见下表 |
-| `memoryType` | enum | — | 单 memory_type 精细过滤，**优先于 `source`**：`user_turn / assistant_turn / life_event / work_event / tool_call / tool_result / system_event` |
+| `memoryType` | enum | — | 单 memory_type 精细过滤，**优先于 `source`**：`user_turn / assistant_turn / life_event / work_event / tool_call / tool_result / system_event / knowledge` |
 | `minQuality` | A/B/C/D/E | — | 过 minQuality 的不返回（NULL 未分类放行）；A 最严 |
 | `minScore` | 0-1 | — | finalScore 阈值，过滤弱相关。**建议默认 0.5+** |
 | `dateString` | "YYYY-MM-DD" | — | **当用户提到具体日期时务必传**。本地时区当天 0:00-23:59，覆盖 fromMs/toMs |
@@ -485,5 +489,114 @@ curl -sS -X POST "$API/api/tool/memory-correct" \
 
 ---
 
-最后更新：2026-05-07（PR-11）
+## 7. 知识库（PR-14 新增）
+
+不依赖对话流的稳定知识，**永不衰减**，跟 episodic memory 共用 memory_items 表但
+`memory_type='knowledge'`。常见用法：
+
+| kbName 例子 | 内容 |
+|---|---|
+| `character_lore` | 角色人设、世界观、背景设定 |
+| `user_profile` | 用户长期档案（性格、家庭、长期目标） |
+| `world_setup` | 写作助手的世界观 / 角色关系图 |
+| `style_template` | 客服型角色的标准回复模板 |
+
+### 7.1 `POST /api/tool/knowledge-add` — AI 主动写入
+
+```json
+{
+  "assistantId": "...",
+  "kbName": "user_profile",
+  "content": "用户阿叠：INTP/INFP 倾向，独立性强，反抗权威感",
+  "tags": ["性格", "用户档案"],
+  "reason": "AI 综合多次对话归纳"
+}
+```
+
+返回 `{ ok, id, created }`。已有同 id 时传 id 走 `/api/knowledge/upsert` 更新。
+
+### 7.2 在知识库内搜
+
+```json
+{
+  "assistantId": "...",
+  "query": "用户的性格",
+  "kbName": "user_profile",
+  "topK": 3
+}
+```
+
+- 传 `kbName` 自动隐含 `source="knowledge"`
+- knowledge 类记忆 recency=1.0（永不衰减），排序仅看 semantic + cite + salience
+- 不传 `kbName` 但传 `source="knowledge"` → 跨所有 kbName 搜该 assistant 的全部知识
+
+## 8. 关键记忆 / Pin（PR-14 新增）
+
+`memory-correct` 加两个 action 把记忆标记为"核心"：
+
+```json
+{
+  "assistantId": "...",
+  "action": "pin",
+  "memoryId": "019dca12-...",
+  "reason": "关键关系节点"
+}
+```
+
+也支持 `unpin` 取消。
+
+### 自动注入到 system prompt
+
+`memory-context` response 现在带 `coreMemories[]` 字段（无论 shouldRetrieve 是否为
+true 都返回，按 salience DESC 排序，上限 8 条）：
+
+```json
+{
+  "ok": true,
+  "shouldRetrieve": true,
+  "memoryLines": [...],         ← query-driven，按当前问题检索
+  "coreMemories": [             ← always-on，pin 标记的关键记忆
+    {"id": "...", "content": "和用户初见于 3/13 凌晨", "memoryType": "user_turn", ...},
+    {"id": "...", "content": "用户的妈妈是医生", "memoryType": "knowledge", ...}
+  ],
+  "relationshipState": {...}
+}
+```
+
+**客户端建议的 system prompt 拼装顺序**：
+
+```
+你是 {{characterName}}。
+{{character_background}}
+
+【你和用户的核心记忆】（始终在你脑海里，不论用户当下问什么）
+- {{coreMemory[0].content}}
+- {{coreMemory[1].content}}
+...
+
+【你当前状态】
+情绪 {{relationshipState.mood.emotionZh}} / 关系 {{relationshipState.relationship.levelName}} / 精力 {{relationshipState.energy.value}}
+
+【根据用户当前问题检索到的相关记忆】
+{{memoryLines}}
+
+用户输入：{{userInput}}
+```
+
+LLM 看到 `coreMemories` 时**应该把它当成已经知道的事实**，不需要"我需要查一下"——这是
+角色的内化记忆。`memoryLines` 才是"刚刚 search 出来的"。
+
+### 什么时候 pin
+
+AI 决策原则（写进 system prompt 让 LLM 自主判断）：
+
+- 用户透露关键身份信息（家庭、职业、健康状况、长期目标）→ pin
+- 关系节点 / 重要承诺 / 转折时刻 → pin
+- 反复被提及 / 影响后续对话主旨的事件 → pin
+- 普通日常聊天 → 不 pin
+
+数量控制：单角色 pinned 上限不要超过 ~20 条，否则 prompt 过长。AI 可主动 unpin
+低优先级的旧 pin 给新的腾位置。
+
+最后更新：2026-05-07（PR-14）
 对应实现：`src/routes/api.js` `/tool/memory-recall` + `/tool/memory-correct` + `src/services/memoryRetrievalService.js` + `src/services/memoryEditService.js` + migration 017
