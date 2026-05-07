@@ -26,6 +26,23 @@ function computeSemanticScoresForIds(memoryIds, queryVector) {
 
 const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
 
+// 不同 category 的 recency 半衰期（天）。代表"这类记忆多久衰减到一半"。
+// 偏好/关系/目标这类长期知识衰减慢；闲聊噪声衰减快；其它中等。
+const RECENCY_HALF_LIFE_DAYS = {
+  preferences:           180,  // 半年（喜欢喝拿铁这种基本不变）
+  relationship_info:     180,  // 半年（家庭关系）
+  goals_plans:            90,  // 3 个月（短期目标会过期）
+  personal_experience:    90,  // 3 个月（个人经历有时效）
+  decisions_reflections:  90,
+  knowledge:              90,
+  ideas:                  60,
+  wellbeing:              30,  // 1 个月（情绪状态时效短）
+  chitchat:               14,  // 2 周（闲聊快忘）
+};
+const RECENCY_HALF_LIFE_DEFAULT = 60;
+// 永不归零的下限：远的记忆也保留底分，让"语义强 + 巩固高"的老记忆能挤进 top
+const RECENCY_FLOOR = 0.15;
+
 // source 参数 → memory_type IN (...) 映射
 const SOURCE_TYPES = {
   user:      ["user_turn"],
@@ -38,10 +55,27 @@ function normalize(value, min, max) {
   return (value - min) / (max - min);
 }
 
-function scoreRecency(ts, now) {
+/**
+ * recency 评分：指数衰减 + 不归零地板 + 按 category 不同半衰期 + 巩固效应。
+ *
+ * 公式：score = floor + (1 - floor) * 0.5^(deltaDays / effectiveHalfLife)
+ *
+ * effectiveHalfLife = baseHalfLife(category) * (1 + log1p(citeCount) * 0.5)
+ * cite_count 高的"被反复唤起的"记忆，半衰期延长——这就是认知科学说的巩固效应。
+ *
+ * 例（category=preferences, halfLife=180d, floor=0.15）：
+ *   0d → 1.00       30d → 0.91       90d → 0.71       365d → 0.31
+ *   180d → 0.58     720d → 0.18      不会归零
+ */
+function scoreRecency(ts, now, category = null, citeCount = 0) {
   const oneDay = 24 * 3600 * 1000;
   const deltaDays = Math.max(0, (now - ts) / oneDay);
-  return Math.max(0, 1 - deltaDays / config.retrievalWindowDays);
+  const baseHalfLife = (category && RECENCY_HALF_LIFE_DAYS[category]) || RECENCY_HALF_LIFE_DEFAULT;
+  // 巩固效应：cite=0 不变；cite=5 → halfLife * 1.9；cite=20 → halfLife * 2.5
+  const consolidationMul = 1 + Math.log1p(citeCount || 0) * 0.5;
+  const halfLife = baseHalfLife * consolidationMul;
+  const raw = Math.pow(0.5, deltaDays / halfLife);
+  return RECENCY_FLOOR + (1 - RECENCY_FLOOR) * raw;
 }
 
 function scoreQuality(grade) {
@@ -236,7 +270,7 @@ async function retrieveMemory({
     .map((row) => {
       const rawSemantic    = matchScoreMap.get(row.id);
       const semantic       = rawSemantic == null ? 0.5 : (rawSemantic + 1) / 2;
-      const recency        = scoreRecency(row.created_at, now);
+      const recency        = scoreRecency(row.created_at, now, row.memory_category, row.cite_count);
       const salience       = row.salience || 0.5;
       const confidence     = row.confidence || 0.5;
       const qualityScore   = scoreQuality(row.quality_grade);

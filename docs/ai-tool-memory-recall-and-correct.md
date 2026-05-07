@@ -48,6 +48,8 @@
 
 > ⚠️ **重要：embedding 不懂日期**。LLM 不要靠纯 query 找日期（"3 月 13 日初见"这种），embedding 把日期当普通 token，召回率会归零。**用户提日期 → 必须传 `dateString` 或 `fromMs/toMs`**。窗 ≤ 31 天时 server 自动走 SQL-first 路径（先 SQL 时间过滤再算语义分），召回率 100%。
 >
+> 💡 **远期记忆不会"完全消失"**：recency 用指数衰减 + floor=0.15，且按 category 不同半衰期（preferences/relationship_info 180 天，chitchat 14 天）。一年前的偏好/关系记忆 recency 仍有 0.25，配合 cite_count 巩固效应可以反超新 chitchat。无需担心查不到老记忆——但日期类问题仍要传 `dateString` 把候选池强行扩到那天。
+>
 > ⚠️ **反幻觉硬规则**：如果 `search_memory` 返回 `count=0` 或所有结果与用户问题语义不匹配，**直接告诉用户"我那天/那段时间没有记录"**，**禁止编造内容**。AI 编造记忆会污染用户对你的信任。
 
 **`category` 9 类**：
