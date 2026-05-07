@@ -24,7 +24,14 @@ const {
   setMemoryQuality,
   addFact,
   removeFact,
+  setMemoryPinned,
+  getCoreMemories,
 } = require("../services/memoryEditService");
+const {
+  upsertKnowledgeItem,
+  listKnowledgeItems,
+  listKnowledgeBases,
+} = require("../services/knowledgeService");
 const {
   generatePlans,
   listPendingPlans,
@@ -173,9 +180,12 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
 
   const { assistantId, sessionId, userInput, topK } = parsed.data;
   const decision = await shouldRetrieveMemory({ userInput });
-  // 在所有 return 路径都附带 relationshipState，让客户端不论是否检索记忆，
-  // 都能拿到最新的角色情绪/关系/精力快照（state 不存在时为 null）。
+  // 在所有 return 路径都附带 relationshipState 和 coreMemories：
+  //   relationshipState — 关系/情绪/精力实时快照
+  //   coreMemories      — 始终注入的关键记忆（is_pinned=1），跟 query 无关
+  // 客户端把这两个塞进 system prompt 就有"持久人设记忆"，不用每次靠语义检索碰运气。
   const relationshipState = safeBuildRelationshipState(assistantId);
+  const coreMemories = safeGetCoreMemories(assistantId);
 
   if (!config.memoryRetrievalEnabled) {
     return res.json({
@@ -186,6 +196,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
       decisionSource: "system",
       memoryLines: [],
       relationshipState,
+      coreMemories,
     });
   }
 
@@ -198,6 +209,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
       decisionSource: decision.source,
       memoryLines: [],
       relationshipState,
+      coreMemories,
     });
   }
 
@@ -225,11 +237,20 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
         score: item.score,
       })),
       relationshipState,
+      coreMemories,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+
+function safeGetCoreMemories(assistantId) {
+  try {
+    return getCoreMemories(assistantId, { limit: 8 });
+  } catch (e) {
+    return [];
+  }
+}
 
 // 防御性 wrapper：state builder 抛错不应该让 memory-context 整个 500
 function safeBuildRelationshipState(assistantId) {
@@ -278,7 +299,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
     query: z.string().min(1),
-    source: z.enum(["user", "character", "all"]).default("user"),
+    source: z.enum(["user", "character", "knowledge", "all"]).default("user"),
     category: z.enum([
       "chitchat", "personal_experience", "relationship_info", "knowledge",
       "goals_plans", "preferences", "decisions_reflections", "wellbeing", "ideas",
@@ -289,7 +310,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     // PR-11 新增过滤维度
     memoryType: z.enum([
       "user_turn", "assistant_turn", "life_event", "work_event",
-      "tool_call", "tool_result", "system_event",
+      "tool_call", "tool_result", "system_event", "knowledge",
     ]).optional(),
     fromMs: z.coerce.number().int().min(0).optional(),
     toMs: z.coerce.number().int().min(0).optional(),
@@ -300,14 +321,20 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     // PR-12 新增
     dateString: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "format YYYY-MM-DD").optional(),
     excludeRecentEcho: z.coerce.boolean().optional(),
+    // PR-14 新增（仅在指定 kb_name 知识空间内搜）
+    kbName: z.string().min(1).max(100).optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
   const {
     assistantId, query, source, category, minQuality, topK, sessionId,
     memoryType, fromMs, toMs, withinDays, minScore, excludeIds, includeFacts,
-    dateString, excludeRecentEcho,
+    dateString, excludeRecentEcho, kbName,
   } = parsed.data;
+
+  // kbName 隐含 source='knowledge'：用户传 kbName 时显然只想搜知识库，
+  // 不应该被默认 source='user' 过滤掉
+  const effectiveSource = kbName ? "knowledge" : source;
 
   try {
     const memories = await retrieveMemory({
@@ -315,7 +342,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
       sessionId: sessionId || "",
       query,
       topK,
-      source,
+      source: effectiveSource,
       category: category || null,
       minQuality: minQuality || null,
       memoryType: memoryType || null,
@@ -327,6 +354,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
       includeFacts: includeFacts === true,
       dateString: dateString || null,
       excludeRecentEcho: excludeRecentEcho !== false, // 默认 true
+      kbName: kbName || null,
     });
     return res.json({
       ok: true,
@@ -366,7 +394,7 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
 router.post("/tool/memory-correct", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
-    action: z.enum(["delete", "delete_batch", "update", "set_quality", "add_fact", "remove_fact"]),
+    action: z.enum(["delete", "delete_batch", "update", "set_quality", "add_fact", "remove_fact", "pin", "unpin"]),
     // 单条动作用 memoryId
     memoryId: z.string().min(1).optional(),
     // 批量动作用 memoryIds
@@ -479,11 +507,124 @@ router.post("/tool/memory-correct", authMiddleware, (req, res) => {
           removed: result.removed,
         });
       }
+      case "pin":
+      case "unpin": {
+        if (!p.memoryId) return res.status(400).json({ ok: false, error: `${p.action}_requires_memoryId` });
+        const result = setMemoryPinned(p.memoryId, p.action === "pin", sharedOpts);
+        if (!result.found) {
+          return res.status(404).json({ ok: false, error: result.reason || "memory_not_found" });
+        }
+        return res.json({
+          ok: true,
+          action: p.action,
+          memoryId: p.memoryId,
+          isPinned: result.isPinned,
+          changed: result.changed,
+        });
+      }
       default:
         return res.status(400).json({ ok: false, error: "unknown_action" });
     }
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+// ─────────────────────────── Knowledge base endpoints ──────────────────────
+//
+// memory_type='knowledge' 的条目独立于对话流。AI 可主动 add（值得长期保留的事实），
+// 用户/管理员也可在浏览器手动维护（角色设定、世界观、长期偏好等）。
+// 检索时通过 memory-recall 加 source='knowledge' 或 kbName='xxx' 过滤。
+//
+
+router.post("/knowledge/upsert", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    kbName: z.string().min(1).max(100),
+    content: z.string().min(1).max(8000),
+    id: z.string().min(1).optional(),       // 传现有 id 则更新
+    tags: z.array(z.string().max(40)).max(20).optional(),
+    salience: z.coerce.number().min(0).max(1).optional(),
+    quality: z.enum(["A", "B", "C", "D", "E"]).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const r = upsertKnowledgeItem({
+      assistantId: parsed.data.assistantId,
+      kbName: parsed.data.kbName,
+      content: parsed.data.content,
+      id: parsed.data.id,
+      tags: parsed.data.tags,
+      salience: parsed.data.salience ?? 0.9,
+      quality: parsed.data.quality || "A",
+    });
+    return res.json({ ok: true, ...r });
+  } catch (e) {
+    const status =
+      e.message === "knowledge_item_not_found"
+        ? 404
+        : e.message === "assistant_mismatch" || e.message === "not_a_knowledge_item"
+        ? 400
+        : 500;
+    return res.status(status).json({ ok: false, error: e.message });
+  }
+});
+
+router.get("/knowledge/list", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    kbName: z.string().optional(),
+    limit: z.coerce.number().int().positive().max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const items = listKnowledgeItems(parsed.data);
+    return res.json({ ok: true, count: items.length, items });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+router.get("/knowledge/bases", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const bases = listKnowledgeBases({ assistantId: parsed.data.assistantId });
+    return res.json({ ok: true, bases });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/**
+ * AI 主动写入知识库（区别于 memory-correct 的修正语义）。
+ * 例：用户透露关键事实 → AI 调本接口写入 kbName='user_profile' 知识库。
+ */
+router.post("/tool/knowledge-add", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().min(1),
+    kbName: z.string().min(1).max(100),
+    content: z.string().min(1).max(8000),
+    tags: z.array(z.string().max(40)).max(20).optional(),
+    reason: z.string().max(500).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const r = upsertKnowledgeItem({
+      assistantId: parsed.data.assistantId,
+      kbName: parsed.data.kbName,
+      content: parsed.data.content,
+      tags: parsed.data.tags,
+      salience: 0.85, // AI 主动写默认 0.85，比用户手动写（0.9）略低
+    });
+    return res.json({ ok: true, ...r });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 

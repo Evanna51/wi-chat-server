@@ -25,6 +25,8 @@ const AUDIT_ACTIONS = {
   SET_QUALITY: "set_quality",
   ADD_FACT: "add_fact",
   REMOVE_FACT: "remove_fact",
+  PIN: "pin",
+  UNPIN: "unpin",
 };
 
 const VALID_QUALITY_GRADES = new Set(["A", "B", "C", "D", "E"]);
@@ -381,6 +383,68 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
   return { found: true, deleted };
 }
 
+/**
+ * Pin / unpin 一条 memory（关键记忆开关）。
+ * is_pinned=1 的记忆会被 memory-context 始终注入到 system prompt 作为"核心记忆"。
+ * 不同于"高质量"或"高置信"——pin 是显式人工/AI 决策。
+ */
+function setMemoryPinned(memoryId, pinned, opts = {}) {
+  if (!memoryId) return { found: false, reason: "missing_memoryId" };
+  const memRow = db.prepare("SELECT id, assistant_id, is_pinned FROM memory_items WHERE id = ?").get(memoryId);
+  if (!memRow) return { found: false, reason: "memory_not_found" };
+  if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
+    return { found: false, reason: "assistant_mismatch" };
+  }
+  const flag = pinned ? 1 : 0;
+  if (memRow.is_pinned === flag) {
+    return { found: true, changed: false, isPinned: !!flag };
+  }
+  const now = Date.now();
+  db.prepare(
+    `UPDATE memory_items SET is_pinned = ?, pinned_at = ?, updated_at = ? WHERE id = ?`
+  ).run(flag, flag ? now : null, now, memoryId);
+
+  recordAudit({
+    assistantId: memRow.assistant_id,
+    memoryId,
+    action: pinned ? AUDIT_ACTIONS.PIN : AUDIT_ACTIONS.UNPIN,
+    actor: opts.actor || "ai",
+    reason: opts.reason || null,
+    payload: { wasPinned: !!memRow.is_pinned, nowPinned: !!flag },
+  });
+
+  return { found: true, changed: true, isPinned: !!flag };
+}
+
+/**
+ * 拉取本 assistant 的关键记忆（pinned=1）—— 给 memory-context 注入用。
+ * 按 (salience DESC, pinned_at DESC) 排序，限 limit 条防 prompt 爆。
+ */
+function getCoreMemories(assistantId, { limit = 8 } = {}) {
+  if (!assistantId) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, content, memory_type, memory_category, quality_grade,
+              salience, created_at, pinned_at, kb_name
+         FROM memory_items
+        WHERE assistant_id = ? AND is_pinned = 1
+        ORDER BY salience DESC, pinned_at DESC
+        LIMIT ?`
+    )
+    .all(assistantId, limit);
+  return rows.map((r) => ({
+    id: r.id,
+    content: r.content,
+    memoryType: r.memory_type,
+    category: r.memory_category,
+    quality: r.quality_grade,
+    salience: r.salience,
+    kbName: r.kb_name || null,
+    createdAt: r.created_at,
+    pinnedAt: r.pinned_at,
+  }));
+}
+
 module.exports = {
   deleteConversationTurnCascade,
   deleteMemoryItemCascade,
@@ -389,5 +453,7 @@ module.exports = {
   setMemoryQuality,
   addFact,
   removeFact,
+  setMemoryPinned,
+  getCoreMemories,
   AUDIT_ACTIONS,
 };

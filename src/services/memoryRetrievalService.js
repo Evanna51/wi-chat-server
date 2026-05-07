@@ -47,7 +47,8 @@ const RECENCY_FLOOR = 0.15;
 const SOURCE_TYPES = {
   user:      ["user_turn"],
   character: ["life_event", "work_event", "assistant_turn"],
-  all:       null, // 不过滤
+  knowledge: ["knowledge"],     // 知识库条目
+  all:       null,              // 不过滤（含 knowledge）
 };
 
 function normalize(value, min, max) {
@@ -67,7 +68,9 @@ function normalize(value, min, max) {
  *   0d → 1.00       30d → 0.91       90d → 0.71       365d → 0.31
  *   180d → 0.58     720d → 0.18      不会归零
  */
-function scoreRecency(ts, now, category = null, citeCount = 0) {
+function scoreRecency(ts, now, category = null, citeCount = 0, memoryType = null) {
+  // knowledge 类记忆视为不衰减（用户主动添加的稳定知识）
+  if (memoryType === "knowledge") return 1.0;
   const oneDay = 24 * 3600 * 1000;
   const deltaDays = Math.max(0, (now - ts) / oneDay);
   const baseHalfLife = (category && RECENCY_HALF_LIFE_DAYS[category]) || RECENCY_HALF_LIFE_DEFAULT;
@@ -127,6 +130,8 @@ async function retrieveMemory({
   // ── PR-12 新增 ───────────────────────────────────────────
   dateString = null,    // "YYYY-MM-DD" 便捷参数 → 自动转当天 fromMs/toMs (本地时区)
   excludeRecentEcho = true, // 默认 true：屏蔽最近 60s 同 session 的 user_turn 防 echo
+  // ── PR-14 新增（知识库）─────────────────────────────────
+  kbName = null,        // 仅在指定 kb_name 知识空间内搜
 }) {
   const now = Date.now();
 
@@ -175,6 +180,10 @@ async function retrieveMemory({
     if (minQuality) {
       whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
       params.push(minQuality);
+    }
+    if (kbName) {
+      whereClauses.push("kb_name = ?");
+      params.push(kbName);
     }
     const allInWindow = db
       .prepare(
@@ -244,6 +253,10 @@ async function retrieveMemory({
       whereClauses.push(`(quality_grade IS NULL OR quality_grade <= ?)`);
       params.push(minQuality);
     }
+    if (kbName) {
+      whereClauses.push("kb_name = ?");
+      params.push(kbName);
+    }
     if (effectiveFrom != null) {
       whereClauses.push("created_at >= ?");
       params.push(effectiveFrom);
@@ -270,7 +283,7 @@ async function retrieveMemory({
     .map((row) => {
       const rawSemantic    = matchScoreMap.get(row.id);
       const semantic       = rawSemantic == null ? 0.5 : (rawSemantic + 1) / 2;
-      const recency        = scoreRecency(row.created_at, now, row.memory_category, row.cite_count);
+      const recency        = scoreRecency(row.created_at, now, row.memory_category, row.cite_count, row.memory_type);
       const salience       = row.salience || 0.5;
       const confidence     = row.confidence || 0.5;
       const qualityScore   = scoreQuality(row.quality_grade);
