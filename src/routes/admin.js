@@ -120,4 +120,34 @@ router.post("/run-indexer-once", async (_req, res) => {
   res.json({ ok: true, processed });
 });
 
+/**
+ * 手动触发 facts backfill（用于一次性补存量数据）
+ * Body: { limit?: number, mode?: "facts" | "all" }
+ *   mode="facts"（默认）只跑 backfillMissingFacts
+ *   mode="all"          先跑 backfillUnclassified 再跑 backfillMissingFacts
+ */
+router.post("/run-facts-backfill", async (req, res) => {
+  const schema = z.object({
+    limit: z.number().int().min(1).max(500).default(50),
+    mode: z.enum(["facts", "all"]).default("facts"),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { limit, mode } = parsed.data;
+  try {
+    const {
+      backfillUnclassified,
+      backfillMissingFacts,
+    } = require("../services/memoryClassificationService");
+    const out = {};
+    if (mode === "all") {
+      out.classify = await backfillUnclassified({ limit });
+    }
+    out.facts = await backfillMissingFacts({ limit });
+    return res.json({ ok: true, mode, limit, result: out });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
 module.exports = router;

@@ -9,6 +9,7 @@ const {
 } = require("../db");
 const { ingestInteraction, SEMANTIC_ROLES } = require("./memoryIngestService");
 const { deleteConversationTurnCascade } = require("./memoryEditService");
+const { classifyAndPersist } = require("./memoryClassificationService");
 
 const MIN_VALID_TS = Date.parse("2020-01-01T00:00:00Z"); // 1577836800000
 const FUTURE_TOLERANCE_MS = 86_400_000; // now + 1 天
@@ -39,6 +40,8 @@ function ingestTurnsBatch({ deviceId, turns }) {
   // 给路由层用：本批次每个 assistantId 接受的 user-role turn 数 / 最新一条 user 内容 + 时间。
   // 路由层据此决定是否触发 character_state 更新（仅对有 profile 的 assistant）。
   const perAssistant = new Map();
+  // 收集本批次新生成的 user-turn memory，事务 commit 后 setImmediate 异步触发分类 + 抽事实
+  const newUserMemories = [];
 
   // 按 createdAt ASC 排序，让 memory_edges 时序正确
   const sorted = [...turns].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -185,6 +188,10 @@ function ingestTurnsBatch({ deviceId, turns }) {
               stats.lastUserAt = createdAt;
             }
             perAssistant.set(turn.assistantId, stats);
+            // 收集 memoryId 给后续异步分类，跳过 logOnly / dedup 路径
+            if (result?.memoryId && !result.skipped && !result.logOnly) {
+              newUserMemories.push({ memoryId: result.memoryId, content: turn.content });
+            }
           }
         }
       } catch (error) {
@@ -199,6 +206,20 @@ function ingestTurnsBatch({ deviceId, turns }) {
   });
 
   tx(sorted);
+
+  // 异步触发分类 + 抽事实（每条独立 setImmediate 避免阻塞，单条失败不互相影响）。
+  // 串行而非并行，避免本地 LLM endpoint 同时收到 N 个请求。
+  if (newUserMemories.length > 0) {
+    setImmediate(async () => {
+      for (const item of newUserMemories) {
+        try {
+          await classifyAndPersist(item.memoryId, item.content);
+        } catch (e) {
+          // non-blocking; cron backfill will retry NULL category rows
+        }
+      }
+    });
+  }
 
   return {
     accepted,

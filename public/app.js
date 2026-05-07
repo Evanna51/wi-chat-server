@@ -1136,7 +1136,7 @@ async function renderManageTab(body, a) {
 
   const newOps = el("article", {}, [
     el("header", {}, [el("strong", {}, "Catchup & Plans（推荐）")]),
-    el("p", { class: "muted" }, "lazy catchup 按需补叙生活记忆；regenerate-plans 重新生成本角色今日主动消息计划。"),
+    el("p", { class: "muted" }, "lazy catchup 按需补叙生活记忆；force=true 模式立即合成一条今日消息（绕过 trigger 评估，2 分钟后派发）。"),
     el("div", { class: "run-row" }, [
       el("label", {}, [
         "gap hours",
@@ -1185,6 +1185,7 @@ async function renderManageTab(body, a) {
         "button",
         {
           class: "outline",
+          title: "force=true，绕过 trigger 评估，立即生成一条主动消息（2 分钟后派发）",
           onclick: async (ev) => {
             ev.preventDefault();
             const btn = ev.currentTarget;
@@ -1194,9 +1195,10 @@ async function renderManageTab(body, a) {
             try {
               const resp = await api.post("/api/proactive/regenerate-plans", {
                 assistantId: a.assistantId,
+                force: true,
               });
               out.textContent = JSON.stringify(resp, null, 2);
-              showToast(`plan 生成: generated=${resp.generated ?? 0}`, "ok");
+              showToast(`今日消息: generated=${resp.generated ?? 0}`, "ok");
             } catch (err) {
               out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
               showToast(`生成失败: ${err.message}`, "err");
@@ -1205,7 +1207,7 @@ async function renderManageTab(body, a) {
             }
           },
         },
-        "重新生成本角色今日计划"
+        "立即生成一条今日消息（强制）"
       ),
     ]),
     el("h5", {}, "结果"),
@@ -1217,7 +1219,7 @@ async function renderManageTab(body, a) {
 async function viewPlans() {
   const container = clearRoot();
   const head = el("article", {}, [
-    el("header", {}, [el("strong", {}, "主动消息计划")]),
+    el("header", {}, [el("strong", {}, "今日消息（主动 plan 队列）")]),
     el("div", { class: "filter-row" }, [
       el("label", {}, [
         "状态",
@@ -1246,7 +1248,7 @@ async function viewPlans() {
           class: "outline",
           id: "plan-regen",
         },
-        "立即生成全部角色计划"
+        "重新评估全部角色（按 trigger）"
       ),
     ]),
   ]);

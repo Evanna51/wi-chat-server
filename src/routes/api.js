@@ -461,13 +461,19 @@ router.post("/character/catchup", authMiddleware, async (req, res) => {
 router.post("/proactive/regenerate-plans", authMiddleware, async (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1).optional(),
+    // force=true 时跳过 trigger 评估、忽略 allow_proactive_message 开关，
+    // 用 manual_request trigger 强制生成一条 plan，scheduled_at = now + 2min
+    force: z.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
   try {
-    const result = await generatePlans({ assistantId: parsed.data.assistantId || null });
+    const result = await generatePlans({
+      assistantId: parsed.data.assistantId || null,
+      force: parsed.data.force === true,
+    });
     return res.json({ ok: true, ...result });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });

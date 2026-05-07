@@ -114,9 +114,21 @@ async function runMemoryClassifyBackfillTick() {
     return { skippedByLock: true };
   }
   try {
-    const { backfillUnclassified } = require("./services/memoryClassificationService");
-    const result = await backfillUnclassified({ limit: 100 });
-    if (result.scanned > 0) {
+    const {
+      backfillUnclassified,
+      backfillMissingFacts,
+    } = require("./services/memoryClassificationService");
+    // 两阶段，每次 cron 各跑一小批：
+    //   阶段 1：未分类的行（含分类 + 抽事实）
+    //   阶段 2：已分类但 memory_facts 空的事实型行
+    // 单次 cron 总计调 LLM ≤ 50+20 = 70 次（10 分钟跑一次），避免过载
+    const classifyResult = await backfillUnclassified({ limit: 50 });
+    const factsResult = await backfillMissingFacts({ limit: 20 });
+    const result = { classify: classifyResult, facts: factsResult };
+    if (
+      classifyResult.scanned > 0 ||
+      factsResult.scanned > 0
+    ) {
       infoLog("[scheduler] memory-classify backfill:", JSON.stringify(result));
     }
     return result;

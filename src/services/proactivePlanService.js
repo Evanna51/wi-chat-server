@@ -386,9 +386,28 @@ function fetchDuePendingPlans(now = Date.now()) {
 
 // ---- Main generator ----
 
-async function generatePlanForAssistant({ profile, now, userId }) {
+async function generatePlanForAssistant({ profile, now, userId, force = false }) {
   const assistantId = profile.assistant_id;
-  const triggers = evaluateAllTriggers({ assistantId, now, profile });
+  let triggers = evaluateAllTriggers({ assistantId, now, profile });
+
+  // force 模式：用户在管理面板手动点"立即生成一条主动消息"，绕过 trigger 评估，
+  // 直接合成一个 manual_request 类型的 trigger，scheduled_at 为 2 分钟后让 plan
+  // executor 立刻派发。
+  if (force && triggers.length === 0) {
+    let scheduledAt = now + 2 * 60 * 1000;
+    if (isInQuietHours(new Date(scheduledAt), QUIET_HOURS)) {
+      scheduledAt = nextQuietEndHourMs(scheduledAt);
+    }
+    triggers = [
+      {
+        triggerReason: "manual_request",
+        triggerExplanation: "用户在管理面板手动触发，立即生成一条问候/关心",
+        triggerContext: "manual override; no organic trigger condition matched",
+        scheduledAt,
+      },
+    ];
+  }
+
   if (!triggers.length) {
     return { generated: 0, skipped: [{ reason: "no_trigger_hit", assistantId }] };
   }
@@ -555,12 +574,15 @@ async function generatePlans({
   assistantId = null,
   now = Date.now(),
   windowHours = 24,
+  force = false,
 } = {}) {
   let profiles;
   if (assistantId) {
     const p = getAssistantProfile(assistantId);
-    profiles = p && p.allow_proactive_message === 1 ? [p] : [];
+    // force 模式下忽略 allow_proactive_message 开关
+    profiles = p && (force || p.allow_proactive_message === 1) ? [p] : [];
   } else {
+    // 全量场景仍尊重 allow_proactive_message=1
     profiles = listProactiveAssistantProfiles();
   }
 
@@ -574,7 +596,7 @@ async function generatePlans({
   };
   for (const profile of profiles) {
     try {
-      const r = await generatePlanForAssistant({ profile, now, userId });
+      const r = await generatePlanForAssistant({ profile, now, userId, force });
       stats.generated += r.generated || 0;
       stats.skipped += (r.skipped || []).length;
       stats.details.push({
