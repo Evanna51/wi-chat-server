@@ -39,6 +39,12 @@ const {
   setImportance,
   VALID_STATUSES,
 } = require("../services/character/persistentTopicService");
+// Phase 3: reflection
+const {
+  getLatestReflection,
+  listReflections,
+  reflectFor,
+} = require("../services/character/reflectionService");
 const {
   deleteMemoryItemCascade,
   deleteMemoryItemsBatch,
@@ -454,6 +460,52 @@ router.post("/character/topics/:id/status", authMiddleware, (req, res) => {
     return res.json({ ok: true, topic: transitionStatus(req.params.id, parsed.data.status) });
   } catch (error) {
     return res.status(/not found/.test(error.message) ? 404 : 400).json({ ok: false, error: error.message });
+  }
+});
+
+/**
+ * Phase 3: relationship reflection (T-CC3-05)
+ *
+ * GET  /api/character/reflection?assistantId=  最新一条
+ * GET  /api/character/reflections?assistantId=&type=&limit=  时间线（多条）
+ * POST /api/admin/character/reflect  body={ assistantId, reflectionType?, triggerReason? }
+ */
+router.get("/character/reflection", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const r = getLatestReflection(parsed.data.assistantId);
+  return res.json({ ok: true, reflection: r || null });
+});
+
+router.get("/character/reflections", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    type: z.enum(["weekly", "event_triggered", "manual"]).optional(),
+    limit: z.coerce.number().int().positive().max(50).optional(),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, type = null, limit = 20 } = parsed.data;
+  return res.json({ ok: true, reflections: listReflections(assistantId, { limit, type }) });
+});
+
+router.post("/admin/character/reflect", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    reflectionType: z.enum(["weekly", "event_triggered", "manual"]).optional(),
+    triggerReason: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const result = await reflectFor(parsed.data.assistantId, {
+      reflectionType: parsed.data.reflectionType || "manual",
+      triggerReason: parsed.data.triggerReason || null,
+    });
+    return res.json({ ok: true, result });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
   }
 });
 

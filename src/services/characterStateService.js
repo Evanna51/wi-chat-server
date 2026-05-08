@@ -17,6 +17,8 @@ const {
   findTopicMatchesInMessage,
   recordMention,
 } = require("./character/persistentTopicService");
+// T-CC3-03: 事件触发 reflection（异步，不阻塞）
+const { maybeTriggerEventReflection } = require("./character/reflectionService");
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -437,6 +439,15 @@ function onUserMessage(assistantId, { content = "", now = Date.now() } = {}) {
     } catch (err) {
       console.warn(
         `[characterState] topic update failed for ${assistantId}: ${err.message}`
+      );
+    }
+
+    // T-CC3-03: 事件触发 reflection（设了阈值 + 6h cooldown，异步触发不阻塞 hot path）
+    try {
+      maybeTriggerEventReflection(assistantId, { now });
+    } catch (err) {
+      console.warn(
+        `[characterState] event-reflection trigger check failed for ${assistantId}: ${err.message}`
       );
     }
   }

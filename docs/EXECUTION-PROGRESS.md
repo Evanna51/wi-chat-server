@@ -411,6 +411,69 @@ hot path 不创建新 topic ✓
 
 ---
 
+## 阶段 CC-3: Character Cognition Layer Phase 3（Relationship Reflection）
+
+**状态**: ✅ 已完成
+**开始时间**: 2026-05-08
+**完成时间**: 2026-05-08
+**分支**: `feature/character-system`
+
+> AI 对当下整体关系的元认知层。不是 retrieval 也不是 narrative —— 是 synthesis：
+> "最近你跟 ta 之间在哪个方向" / "ta 现在主要的需要是什么" / "你应该担心 / 抓住的是什么"。
+
+**子任务**
+
+| # | 任务 | 状态 |
+|---|------|------|
+| T-CC3-01 | Migration 029: relationship_reflection（14 字段，含 emotional_trend / direction / userNeeds / concerns / opportunities / sourceData）| ✅ |
+| T-CC3-02 | reflectionService: reflectFor / runReflectionTickWeekly / maybeTriggerEventReflection + LLM synthesis prompt | ✅ |
+| T-CC3-03 | onUserMessage 接 maybeTriggerEventReflection（异步, 6h cooldown）+ scheduler weekly cron | ✅ |
+| T-CC3-04 | characterContextBuilder 注入 reflection 段（14d 内才算 fresh）+ 段排序：dynamics → reflection → episodes → topics → socialMode | ✅ |
+| T-CC3-05 | 3 个新 API endpoint（reflection / reflections / admin reflect）| ✅ |
+| T-CC3-06 | 25 断言测试套件（reflection.test.js 4 suites）+ 文档 + commit | ✅ |
+
+**新增/修改**
+
+- `src/db/migrations/029_relationship_reflection.sql`
+- `src/services/character/reflectionService.js`（500+ 行：CRUD + 触发判断 + prompt + LLM 调用 + cron）
+- `src/services/characterStateService.js` — onUserMessage 加 maybeTriggerEventReflection
+- `src/services/character/characterContextBuilder.js` — 注入 reflection 段，预算 1200→1500
+- `src/routes/api.js` — 3 个新端点
+- `src/scheduler.js` + `src/config.js` + `.env.example` — REFLECTION_WEEKLY_CRON
+- `tests/reflection.test.js` — 25 断言
+
+**关键决策**
+
+- **不替换旧 reflection**：累积时间线，新一轮把旧 summary 喂 LLM 做"接续判断"
+- **3 类触发**：weekly cron / event-triggered（trust drop / unresolved / silence）/ manual API
+- **6h cooldown** for event-triggered 防止短时间反复反思
+- **14d freshness** 老反思不进 prompt，防误导
+- **避免循环依赖**：reflectionService 不 require characterStateService（hot path 反向依赖），直接 raw `SELECT * FROM character_state`
+- **段级丢弃顺序**：dynamics 之后 / episodes 之前注入 reflection（reflection 是 AI 上层视角，比具体 episode 更稳定）
+
+**E2E 验证**
+
+```
+trust drop -0.20 in 1h  → trigger='trust_dropped_-0.20_in_1h' ✓
+6h cooldown 后再次跌    → null（被 cooldown 拦） ✓
+unresolved_conflict 0.6 → trigger='unresolved_conflict_0.60' ✓
+silence > 14d           → trigger='silence_16d' ✓
+fresh reflection (manual) 注入 promptFragment："[关系反思（manual, 2026/5/8）]..." ✓
+stale reflection (15d 前) 不注入 ✓
+```
+
+**测试**
+
+- 25 passed, 0 failed (Phase 3)
+- 累计 202 passed, 0 failed (Phase 1 + 2 + 3)
+
+**未决/遗留**
+
+- reflectFor 的 LLM 路径无单测（mock 太重）—— 同 episodeBuilder 模式，靠 admin 触发 + 生产观测
+- reflection 事件 → behavior 触发（用 reflection.opportunities 自动唤起 ritualistic mode 等）等 Phase 4
+
+---
+
 ## 已完成阶段总览
 
 | 阶段 | 描述 | 完成时间 | Commit 数 |
@@ -421,7 +484,8 @@ hot path 不创建新 topic ✓
 | C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
 | D | 用户记忆分类（migration 013 + 启发式+LLM 两段 + 质量 A-E + cite_count + 检索加权） | 2026-04-28 | 5 |
 | CC-1 | Character Cognition Phase 1（identity + 12 维 dynamics + emotion inertia + socialModes + context endpoint）| 2026-05-08 | 1 |
-| CC-2 | Character Cognition Phase 2（narrative episodes + persistent topics + cron + retrieval enrichment）| 2026-05-08 | 1（待 commit） |
+| CC-2 | Character Cognition Phase 2（narrative episodes + persistent topics + cron + retrieval enrichment）| 2026-05-08 | 1 |
+| CC-3 | Character Cognition Phase 3（relationship reflection: weekly cron + event-triggered + 14d 注入）| 2026-05-08 | 1（待 commit） |
 
 ---
 

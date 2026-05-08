@@ -132,6 +132,19 @@ async function runTopicDormantSweepTick() {
   }
 }
 
+async function runReflectionTickWeekly() {
+  // T-CC3-03: 每周给所有 character 类 assistant 跑 weekly reflection
+  try {
+    const { runReflectionTickWeekly: tick } = require("./services/character/reflectionService");
+    const result = await tick();
+    infoLog(`[scheduler] weekly reflection done: ${result.ticked} assistants`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] weekly reflection failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 async function runMemoryClassifyBackfillTick() {
   try {
     const {
@@ -370,6 +383,8 @@ function startScheduler() {
   // T-CC2-07: Phase 2 narrative + topic 后台维护
   scheduleIfEnabled(config.episodeBuilderCron, "episode-builder", runEpisodeBuilderTick);
   scheduleIfEnabled(config.topicDormantSweepCron, "topic-dormant-sweep", runTopicDormantSweepTick);
+  // T-CC3-03: Phase 3 weekly reflection
+  scheduleIfEnabled(config.reflectionWeeklyCron, "reflection-weekly", runReflectionTickWeekly);
   startPlanExecutorLoop();
 }
 
@@ -384,4 +399,5 @@ module.exports = {
   runDeadLetterMonitorTick,
   runEpisodeBuilderTick,
   runTopicDormantSweepTick,
+  runReflectionTickWeekly,
 };

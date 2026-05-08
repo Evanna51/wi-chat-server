@@ -38,15 +38,21 @@ const {
   buildTopicsPromptFragment,
 } = require("./persistentTopicService");
 const { listEpisodes } = require("./episodeBuilder");
+// T-CC3-04: 注入 reflection summary
+const {
+  getLatestReflection,
+  buildReflectionPromptFragment,
+} = require("./reflectionService");
 const { resolveEmotion } = require("../emotionTaxonomy");
 
-// T-CC2-06: 加叙事/话题段后，预算从 800 → 1200。两段加起来约 200-300 字，
-// 但要留余量给 character_background 较长的角色。超出按段级丢，砍顺序见 buildPromptFragment。
-const MAX_FRAGMENT_LEN_CHARS = 1200;
+// T-CC3-04: reflection 段加进来后，预算 1200 → 1500。reflection summary 约 100-200 字。
+const MAX_FRAGMENT_LEN_CHARS = 1500;
 const RECENT_EPISODES_DAYS = 30;
 const RECENT_EPISODES_LIMIT = 3;
 const RECENT_EPISODES_MIN_IMPORTANCE = 0.5;
 const ACTIVE_TOPICS_LIMIT = 5;
+// reflection 7d 内的不算太陈旧；超过则不注入（避免老反思误导 LLM）
+const REFLECTION_FRESHNESS_DAYS = 14;
 
 /**
  * 主入口：返回完整的 character context payload。
@@ -88,6 +94,13 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
     minImportance: RECENT_EPISODES_MIN_IMPORTANCE,
   }).filter((e) => e.timeRangeEnd >= now - RECENT_EPISODES_DAYS * 24 * 3600 * 1000);
 
+  // T-CC3-04: 拉最新 reflection（14d 内才算新鲜，老的不注入）
+  const latestReflection = getLatestReflection(assistantId);
+  const freshReflection =
+    latestReflection && now - latestReflection.createdAt < REFLECTION_FRESHNESS_DAYS * 24 * 3600 * 1000
+      ? latestReflection
+      : null;
+
   const result = {
     assistantId,
     ts: now,
@@ -102,6 +115,7 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
     },
     activeTopics,
     recentEpisodes,
+    latestReflection: freshReflection,
   };
 
   if (includePromptFragment) {
@@ -113,6 +127,7 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
       socialModeFragment: socialMode.promptFragment,
       topicsFragment: buildTopicsPromptFragment(assistantId, { limit: ACTIVE_TOPICS_LIMIT, now }),
       episodesFragment: buildEpisodesPromptFragment(recentEpisodes),
+      reflectionFragment: freshReflection ? buildReflectionPromptFragment(assistantId) : "",
     });
   }
 
@@ -250,7 +265,7 @@ function toEmotionPayload(state) {
 
 function buildPromptFragment({
   identity, profile, characterState, now,
-  socialModeFragment, topicsFragment, episodesFragment,
+  socialModeFragment, topicsFragment, episodesFragment, reflectionFragment,
 }) {
   const parts = [];
 
@@ -281,7 +296,11 @@ function buildPromptFragment({
   const dynFragment = buildRelationshipFragment(profile.assistant_id, now);
   if (dynFragment) parts.push(dynFragment);
 
-  // T-CC2-06 新加：长期叙事 + 长期话题
+  // T-CC3-04: reflection 段排在 dynamics 之后，长期叙事之前
+  // —— reflection 是 AI 的"上层视角"，比具体 episode 更重要，但稳定度低于 identity/state
+  if (reflectionFragment) parts.push(reflectionFragment);
+
+  // T-CC2-06：长期叙事 + 长期话题
   if (episodesFragment) parts.push(episodesFragment);
   if (topicsFragment) parts.push(topicsFragment);
 

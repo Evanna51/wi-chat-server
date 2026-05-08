@@ -15,7 +15,7 @@
 | 3 | Emotion System | 秒 / 分钟（明面） / 24h（压抑） | ✅ Phase CC-1 完成（含 inertia + 趋势）|
 | 4 | Narrative Memory | 天 / 周（episode 化） | ✅ Phase CC-2 完成 |
 | 5 | Topic Persistence | 月级（长期话题） | ✅ Phase CC-2 完成 |
-| 6 | Reflective | 周 / 触发式 | ⏳ Phase CC-3 |
+| 6 | Reflective | 周 / 触发式 | ✅ Phase CC-3 完成 |
 | 7 | Behavior | 实时（合成） | ⏳ Phase CC-4（雏形：socialModes 已落） |
 
 ---
@@ -174,18 +174,28 @@ detached / caretaker / inquisitive / ritualistic / confessional / reassuring
 
 **自动维护**：`runTopicDormantSweepTick` 每天 04:00 把 21 天未提的 topic 转 dormant。
 
-### Reflective Cognition（CC-3）
+## 第 6 层：Reflective Cognition（CC-3 完成）
 
-```sql
-CREATE TABLE relationship_reflection (
-  id, assistant_id, reflection_type, summary,
-  emotional_trend, user_needs_json, relationship_direction,
-  concerns_json, opportunities_json, source_data_json, created_at
-);
-```
+**Schema**：[`relationship_reflection`](../src/db/migrations/029_relationship_reflection.sql)（14 字段）
 
-- 周级 cron（每周日 03:00）+ 事件触发（trust 大跌 / 长 silence break / unresolved_conflict 持续 > 7d）
-- 输出会被 `characterContextBuilder.buildPromptFragment` 拼进 promptFragment
+**核心服务**：[`reflectionService.js`](../src/services/character/reflectionService.js)
+- `reflectFor(assistantId, opts)` 主入口：拉 7d 窗口的事件 + episode + topic + 当前态 → LLM synthesis → 写一条 reflection
+- `runReflectionTickWeekly()` cron：每周日 04:30 给所有 character 类 assistant 跑 weekly reflection
+- `maybeTriggerEventReflection()` hot path 异步触发（带 6h cooldown）
+- `getLatestReflection / listReflections` 读
+- `buildReflectionPromptFragment` 渲染段
+
+**触发条件**（`shouldTriggerEventReflection`）：
+- trust 单次窗口（1h）累计跌幅 ≥ 0.15
+- `unresolved_conflict ≥ 0.5`
+- silence > 14 天
+- 6h cooldown 防短时间反复触发
+
+**关键设计**：
+- **不替换旧 reflection** —— 累积成时间线（"AI 关于你们关系的视角史"）。新 reflection 把上一条作为 `previousReflection` 喂 LLM，形成连续叙事
+- LLM 失败不抛错（同 episodeBuilder 模式，让 cron 继续）
+- 14 天以内的 reflection 才注入 prompt（避免老反思误导 LLM）
+- 不读 `getEffectiveState`（衰减后的 mood）防循环依赖（characterStateService 也 require reflectionService）—— 直接 raw character_state，对一周窗口反思精度无影响
 
 ### Behavior Layer（CC-4，完整版）
 

@@ -100,6 +100,8 @@ const config = {
   // Phase 2 narrative + topic 后台维护
   episodeBuilderCron: process.env.EPISODE_BUILDER_CRON || "30 3 * * *",         // 每天 03:30，避开 backup 03:00
   topicDormantSweepCron: process.env.TOPIC_DORMANT_SWEEP_CRON || "0 4 * * *",   // 每天 04:00
+  // Phase 3 weekly relationship reflection
+  reflectionWeeklyCron: process.env.REFLECTION_WEEKLY_CRON || "30 4 * * 0",     // 每周日 04:30
 };
 
 module.exports = config;
