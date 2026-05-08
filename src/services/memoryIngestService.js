@@ -1,10 +1,17 @@
 const { v7: uuidv7 } = require("uuid");
 
 /**
- * 进入 memory pipeline (memory_items + facts + edges + outbox + 向量索引 + 分类) 的 role 集合。
- * 其它 role (tool_call / tool_result / system) 视为日志型，仅写 conversation_turns。
+ * 携带用户对话语义、空 content 应被拒收的 role 集合。
+ *
+ * 注：进 memory pipeline 的只有 'user' 一种 —— assistant 的回复经过 T-08 后
+ * 不再写 memory_items（仅留在 conversation_turns）。
+ *
+ * 'tool_call' / 'tool_result' / 'system' 是日志型 role，本来就只写 conversation_turns。
  */
 const SEMANTIC_ROLES = new Set(["user", "assistant"]);
+
+/** 真正进入 memory_items + facts + edges + 向量索引 + 分类管线的 role。 */
+const MEMORY_ROLES = new Set(["user"]);
 
 /**
  * @deprecated 2026-05-06 弃用：原 regex `/喜欢([^，。！？\n]+)/` 太粗暴，
@@ -65,9 +72,10 @@ function ingestInteraction({
     toolName,
   });
 
-  // log-only roles (tool_call / tool_result / system)：只写 conversation_turns，
+  // 非 user role（assistant / tool_call / tool_result / system）：只写 conversation_turns，
   // 不进 memory pipeline、不分类、不索引、不出 outbox。
-  if (!SEMANTIC_ROLES.has(role)) {
+  // T-08 之前 assistant role 也写 memory_items，实测 0 facts、被排除出检索池，纯垃圾行。
+  if (!MEMORY_ROLES.has(role)) {
     return { turnId, memoryId: null, factCount: 0, skipped: false, logOnly: true };
   }
 
@@ -90,9 +98,9 @@ function ingestInteraction({
     sessionId,
     sourceTurnId: turnId,
     content,
-    memoryType: role === "user" ? "user_turn" : "assistant_turn",
+    memoryType: "user_turn",
     salience: estimateSalience(role, content),
-    confidence: role === "user" ? 0.8 : 0.6,
+    confidence: 0.8,
     createdAt: now, // 用 turn 真实发生时间，不要用 server ingest 时间
   });
 
@@ -143,4 +151,4 @@ function ingestInteraction({
   return { turnId, memoryId, factCount: facts.length, skipped: false };
 }
 
-module.exports = { ingestInteraction, SEMANTIC_ROLES };
+module.exports = { ingestInteraction, SEMANTIC_ROLES, MEMORY_ROLES };

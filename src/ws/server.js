@@ -8,7 +8,10 @@ const {
 const {
   pullPendingMessagesForUser,
   ackPulledMessage,
+  updateConversationTurnContent,
 } = require("../db");
+const { ingestTurnsBatch } = require("../services/syncIngestService");
+const { turnEvents } = require("../events/turnEvents");
 
 function safeParse(data) {
   try {
@@ -88,9 +91,105 @@ function handleClientFrame(ws, raw) {
       flushPendingForUser(ws.userId, ws);
       return;
     }
+    case "message_create": {
+      // 单条消息落库（替代批量 /api/sync/push 的实时通道）。
+      // 入参字段同 sync-push 的 turn schema：
+      //   { id, assistantId, sessionId, role, content, createdAt, toolCallsJson?, toolCallId?, toolName? }
+      // 落库后，user-role 触发 cancel pending long-term + scheduleNextPushPlan。
+      handleMessageCreate(ws, frame);
+      return;
+    }
+    case "message_update": {
+      // 编辑既有消息内容。memory_item 同步 re-embed，facts 不改（让 AI 后续 memory-correct 再修）。
+      handleMessageUpdate(ws, frame);
+      return;
+    }
     default:
       return;
   }
+}
+
+function ackOk(ws, op, extras = {}) {
+  try {
+    ws.send(JSON.stringify({ op, ok: true, ts: Date.now(), ...extras }));
+  } catch {}
+}
+
+function ackErr(ws, op, error, extras = {}) {
+  try {
+    ws.send(JSON.stringify({ op, ok: false, error, ts: Date.now(), ...extras }));
+  } catch {}
+}
+
+function handleMessageCreate(ws, frame) {
+  const turn = frame.turn || frame.message || frame;
+  const requiredFields = ["id", "assistantId", "sessionId", "role", "content"];
+  for (const f of requiredFields) {
+    if (typeof turn?.[f] !== "string" || !turn[f].length) {
+      // content 允许 "" 但 role 必须 string；后端 ingest 会再做 sanity
+      if (f === "content" && typeof turn?.content === "string") continue;
+      return ackErr(ws, "message_persisted", `missing_${f}`, { id: turn?.id || null });
+    }
+  }
+  const turns = [{
+    id: turn.id,
+    assistantId: turn.assistantId,
+    sessionId: turn.sessionId,
+    role: turn.role,
+    content: turn.content,
+    createdAt: Number(turn.createdAt) || Date.now(),
+    toolCallsJson: turn.toolCallsJson || undefined,
+    toolCallId: turn.toolCallId || undefined,
+    toolName: turn.toolName || undefined,
+  }];
+  let result;
+  try {
+    result = ingestTurnsBatch({ deviceId: ws.deviceId || `ws:${ws.userId}`, turns });
+  } catch (e) {
+    return ackErr(ws, "message_persisted", e.message || String(e), { id: turn.id });
+  }
+  const detail = result.details?.[0] || { status: "unknown" };
+  ackOk(ws, "message_persisted", {
+    id: turn.id,
+    status: detail.status,
+    reason: detail.reason || null,
+  });
+
+  // user-role 触发器：发事件，订阅者处理 cancel / state / scheduleNextPush
+  if (turn.role === "user" && detail.status !== "rejected") {
+    for (const [assistantId, stats] of result.perAssistantStats) {
+      if (stats.userTurnCount <= 0) continue;
+      turnEvents.emitUserBatch({
+        assistantId,
+        userId: ws.userId,
+        cause: "ws.message_create",
+        stats: {
+          userTurnCount: stats.userTurnCount,
+          lastUserAt: stats.lastUserAt,
+          lastUserContent: stats.lastUserContent,
+        },
+      });
+    }
+  }
+}
+
+function handleMessageUpdate(ws, frame) {
+  const id = String(frame.id || frame.messageId || "");
+  const newContent = String(frame.content || frame.newContent || "");
+  const assistantId = frame.assistantId ? String(frame.assistantId) : null;
+  if (!id || !newContent) {
+    return ackErr(ws, "message_updated", "missing_id_or_content", { id });
+  }
+  let result;
+  try {
+    result = updateConversationTurnContent({ id, newContent, assistantId });
+  } catch (e) {
+    return ackErr(ws, "message_updated", e.message || String(e), { id });
+  }
+  if (!result.found) {
+    return ackErr(ws, "message_updated", result.reason || "not_found", { id });
+  }
+  ackOk(ws, "message_updated", { id, memoryUpdated: result.memoryUpdated });
 }
 
 function attachSocketHandlers(ws) {

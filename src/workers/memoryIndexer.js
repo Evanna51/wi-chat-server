@@ -65,13 +65,15 @@ async function processEvent(event) {
   }
   const memory = db
     .prepare(
-      "SELECT id, assistant_id, session_id, content, created_at FROM memory_items WHERE id = ?"
+      "SELECT id, assistant_id, session_id, memory_type, content, created_at FROM memory_items WHERE id = ?"
     )
     .get(payload.memoryId);
   if (!memory) {
     markDone(event.id);
     return;
   }
+
+  const now = Date.now();
 
   const vector = await embedText(memory.content);
   await vectorStore.upsert({
@@ -80,7 +82,6 @@ async function processEvent(event) {
     vector,
   });
 
-  const now = Date.now();
   db.prepare(
     `UPDATE memory_items
      SET vector_status='ready', vector_provider=?, vector_updated_at=?, updated_at=?

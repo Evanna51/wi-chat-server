@@ -3,6 +3,7 @@ const express = require("express");
 const path = require("path");
 const config = require("./config");
 require("./db");
+require("./subscribers").registerAll();   // T-09 事件总线订阅 — 必须在 router 接第一条 turn 前注册
 const apiRouter = require("./routes/api");
 const adminRouter = require("./routes/admin");
 const browseRouter = require("./routes/browse");

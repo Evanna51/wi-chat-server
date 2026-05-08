@@ -96,47 +96,38 @@ function buildPlanPrompt({
     )
     .join("\n");
 
+  const scenarioOneLine = (
+    triggerReason === "inactive_7d"
+      ? "用户已经几天没回你了。这是隔了一段时间重新开口，不是延续上次话题。"
+      : triggerReason === "daily_greeting"
+      ? "早上的节奏型日常问候，轻量自然就好。"
+      : "按你的角色性格自由发挥。"
+  );
+
   return [
-    `你是 AI 角色「${characterName}」，要给用户主动发一条消息。这条消息是开场——发完之后用户会回，会展开成一段对话。`,
+    `你是「${characterName}」，要给用户主动发一条消息。`,
+    scenarioOneLine,
     "",
     ...(stateFragment ? [stateFragment, ""] : []),
-    "【触发原因】",
-    `原因码：${triggerReason}`,
-    `原因描述：${triggerExplanation}`,
-    `原因背景：${triggerContext}`,
+    `触发：${triggerReason} — ${triggerExplanation}`,
     "",
-    "【角色档案】",
+    "角色档案：",
     clipText(characterBackground || "无", 800),
     "",
-    "【最近 6 条对话】",
+    "最近 6 条对话：",
     turnLines || "- 无",
     "",
-    "【已知用户事实，请认真利用】",
+    "用户事实：",
     factLines || "- 无",
     "",
-    "【相关记忆，可以从中找引子】",
+    "相关记忆：",
     memLines || "- 无",
     "",
-    "【你之前发过的主动消息草稿（不论已发未发），本次必须用完全不同的开场角度】",
+    "你最近发过的主动消息（避免角度雷同）：",
     draftLines || "- 无",
     "",
-    "【硬性要求】",
-    "1. 一到两句话，总长 ≤ 50 字",
-    "2. **必须有具体引子**：从 userFacts、recentMemories 或 recentTurns 里抓**一个具体的人/事/物**作为切入点",
-    "3. **绝对禁止**这些通用开场（出现立即作废）：",
-    "   - \"最近怎么样\" \"在干嘛\" \"想你了\" \"好久没聊\" \"近况如何\" \"你还好吗\" \"睡了吗\"",
-    "   - \"今天过得怎么样\" \"有没有空\" \"在忙什么\"",
-    "4. 语气和角色性格一致",
-    "5. 主动消息的目的不是问候，是**让用户感到\"被记住\"**——开口要让用户立刻知道你记得他说过的某件具体事",
-    "",
-    "严格输出 JSON：",
-    "{",
-    '  "intent": "ask_followup" | "check_in" | "share_thought" | "remind",',
-    '  "title": "<≤ 20 字的通知标题>",',
-    '  "body": "<开场消息正文，≤ 50 字>",',
-    '  "anchorTopic": "<被引用的具体话题/事物，3-12 字，不能为空>",',
-    '  "rationale": "<为什么这一条比泛泛问候更值得发，一句话>"',
-    "}",
+    "输出 JSON：",
+    '{"intent":"ask_followup|check_in|share_thought|remind","title":"<≤20字>","body":"<正文>","anchorTopic":"<引用的具体事物，没有就空字符串>","rationale":"<为什么这时候写这条>"}',
   ].join("\n");
 }
 
@@ -149,7 +140,7 @@ function normalizePlanDraft(raw = {}) {
     .replace(/[\s-]+/g, "_");
   const intent = VALID_INTENTS.has(intentRaw) ? intentRaw : "check_in";
   const title = clipText(raw.title || "", 40);
-  const body = clipText(raw.body || "", 200);
+  const body = clipText(raw.body || "", 1000);
   const anchorTopic = clipText(raw.anchorTopic || "", 60);
   const rationale = clipText(raw.rationale || "", 200);
   return { intent, title, body, anchorTopic, rationale };
@@ -178,6 +169,10 @@ function evaluateInactive7d({ assistantId, now }) {
   const lastAt = getLastAssistantInteractionAt(assistantId);
   if (!lastAt) return null;
   if (lastAt >= now - 7 * 24 * 60 * 60 * 1000) return null;
+  // 如果 72h 内有用户消息，next_push 在管，长期 trigger 不重复出手
+  // （理论上 72h+无用户消息才会触到这里，但显式兜一道）
+  const lastUserAt = getLastUserMessageAt(assistantId);
+  if (lastUserAt && (now - lastUserAt) <= NEXT_PUSH_FRESHNESS_WINDOW_MS) return null;
   const daysSince = Math.floor((now - lastAt) / (24 * 60 * 60 * 1000));
   let scheduledAt = now + 2 * 60 * 60 * 1000; // 2h after now
   if (isInQuietHours(new Date(scheduledAt), QUIET_HOURS)) {
@@ -486,19 +481,15 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
       }
       const draft = normalizePlanDraft(raw);
       const reasons = [];
+      // 仅保留两条最低质量门槛：
+      //   - body 太短（< 4 字）：基本不像一句话
+      //   - 与最近草稿语义太重（jaccard > 0.55）：连续几条角度雷同
+      // 黑名单短语 / anchor 必填 / anchor 7 天去重 全部移除——它们会把"中午问吃饭"
+      // 这种自然问候和"延续上轮话题"这种连续性都误杀。
       if (!draft.body || draft.body.length < 4) reasons.push("body_too_short");
-      if (!draft.anchorTopic) reasons.push("anchor_topic_empty");
-      if (containsBlacklistedPhrase(draft.body)) reasons.push("blacklisted_phrase");
       const corpus = recentDrafts.map((d) => d.draft_body || "").filter(Boolean);
       const score = maxJaccardAgainst(draft.body, corpus);
-      if (score > 0.4) reasons.push(`jaccard_against_drafts:${score.toFixed(2)}`);
-      const usedAnchor = findUsedAnchorTopicWithin({
-        assistantId,
-        anchorTopic: draft.anchorTopic,
-        withinMs: 7 * 24 * 60 * 60 * 1000,
-        now,
-      });
-      if (usedAnchor) reasons.push("anchor_topic_used_within_7d");
+      if (score > 0.55) reasons.push(`jaccard_against_drafts:${score.toFixed(2)}`);
       if (!reasons.length) {
         chosen = draft;
         break;
@@ -616,6 +607,329 @@ async function generatePlans({
   return stats;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Next-push（滚动单条计划，72h 窗口内事件驱动）
+//
+// 与 long-term cron 触发的 inactive_7d / daily_greeting 不同：
+//
+//   1. 每次 turn（user 或 AI）落库 → cancel 已存在的 next_push pending 行 →
+//      调 LLM，输入完整上下文，让 AI 自己决定 delayMs + body + intent，
+//      或者主动 skip（例如判断"用户在忙"）。
+//   2. 同一 (assistant, user) 同一时刻最多 1 条 pending next_push（不变量）。
+//   3. 72h 内用户没回 → 不再排 next_push，让 inactive_7d 接管长期计划。
+//      用户一回 → 取消长期 plan + 重新进入 next_push 模式。
+//   4. AI 派发完一条 next_push 后会立刻再 schedule 一次（option A）；如果 AI
+//      连续 3 次都决定 "skip 用户在忙"，自然就静默到下次用户回复。
+//
+// userId 取 process.env.DEFAULT_USER_ID（single-user 模型，跟 long-term plan 一致）。
+// ────────────────────────────────────────────────────────────────────────────
+
+const NEXT_PUSH_TRIGGER_REASON = "next_push";
+const NEXT_PUSH_FRESHNESS_WINDOW_MS = 72 * 60 * 60 * 1000;
+const NEXT_PUSH_MIN_DELAY_MS = 60 * 1000; // 最少 1 分钟，防 LLM 给 0 立即派发
+const NEXT_PUSH_MAX_DELAY_MS = NEXT_PUSH_FRESHNESS_WINDOW_MS; // 最多顶到 72h 边界
+
+// T-15 自递归限流：plan-executor 派发完一条 next_push 后会立刻再 schedule，
+// 若 LLM 持续返回小 delay 会导致连环推送。下面两个闸门确保即便 LLM 抽风，单 assistant 不会被淹。
+const NEXT_PUSH_MIN_GAP_FROM_LAST_MS = 30 * 60 * 1000;       // 距离上一条主动消息最少间隔 30min
+const NEXT_PUSH_24H_MAX_COUNT = 12;                          // 24h 滑窗最多 12 条 next_push（约每 2h 一条）
+
+function getLastProactiveAt(assistantId) {
+  try {
+    const row = db
+      .prepare("SELECT last_proactive_at FROM character_state WHERE assistant_id = ?")
+      .get(assistantId);
+    return row?.last_proactive_at || null;
+  } catch {
+    return null;
+  }
+}
+
+function countNextPushIn24h(assistantId, now) {
+  const since = now - 24 * 60 * 60 * 1000;
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM proactive_plans
+        WHERE assistant_id = ?
+          AND trigger_reason = ?
+          AND status IN ('sent', 'pending')
+          AND created_at >= ?`
+    )
+    .get(assistantId, NEXT_PUSH_TRIGGER_REASON, since);
+  return row?.n || 0;
+}
+
+function getLastUserMessageAt(assistantId) {
+  const row = db
+    .prepare(
+      `SELECT created_at FROM conversation_turns
+        WHERE assistant_id = ? AND role = 'user'
+        ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(assistantId);
+  return row?.created_at || null;
+}
+
+function cancelExistingNextPushPlans(assistantId, reason = "replaced_by_new_turn") {
+  const now = Date.now();
+  return db
+    .prepare(
+      `UPDATE proactive_plans
+          SET status = 'cancelled', cancelled_reason = ?, updated_at = ?
+        WHERE assistant_id = ?
+          AND trigger_reason = ?
+          AND status = 'pending'`
+    )
+    .run(reason, now, assistantId, NEXT_PUSH_TRIGGER_REASON).changes || 0;
+}
+
+function buildNextPushPrompt({
+  characterName,
+  characterBackground,
+  recentTurns,
+  userFacts,
+  coreFacts,
+  lifeEvents,
+  lastUserMessage,
+  recentAssistantMessages,
+  stateFragment,
+  nowIso,
+  hoursSinceLastUserReply,
+}) {
+  const turnLines = recentTurns
+    .slice(0, 6)
+    .map((t) => `- ${t.role}: ${clipText(t.content, 140)}`)
+    .join("\n");
+  const factLines = (userFacts || [])
+    .slice(0, 8)
+    .map((f) => `- ${f.fact_key}=${clipText(f.fact_value, 80)}`)
+    .join("\n");
+  const coreFactLines = (coreFacts || [])
+    .slice(0, 8)
+    .map((f) => `- ${f.factKey}=${clipText(f.factValue, 80)} (imp=${(f.importance ?? 0).toFixed(2)})`)
+    .join("\n");
+  const lifeLines = (lifeEvents || [])
+    .slice(0, 5)
+    .map((m) => `- ${clipText(m.content, 120)}`)
+    .join("\n");
+  const myMsgLines = (recentAssistantMessages || [])
+    .slice(0, 3)
+    .map((t) => `- ${clipText(t.content, 140)}`)
+    .join("\n");
+
+  return [
+    `你是「${characterName}」。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
+    "",
+    ...(stateFragment ? [stateFragment, ""] : []),
+    "角色档案：",
+    clipText(characterBackground || "无", 600),
+    "",
+    "关键 facts：",
+    coreFactLines || "- 无",
+    "",
+    "用户事实：",
+    factLines || "- 无",
+    "",
+    "你最近的生活/心境：",
+    lifeLines || "- 无",
+    "",
+    "最近 6 条对话：",
+    turnLines || "- 无",
+    "",
+    `用户上一句：「${clipText(lastUserMessage || "（无）", 200)}」`,
+    "",
+    "你最近发过的话（避免角度雷同）：",
+    myMsgLines || "- 无",
+    "",
+    `当前时间：${nowIso}（距用户上次回复约 ${hoursSinceLastUserReply.toFixed(1)} 小时）`,
+    "",
+    `delayMs ∈ [${NEXT_PUSH_MIN_DELAY_MS}, 72h]，要不发则 skip=true 配 skipReason（任意理由）。`,
+    "频率完全自由，按角色 + 当下情境自己定。亲密关系想几分钟一条就几分钟一条，想隔半天就隔半天；普通关系自然拉长；不需要任何\"标准节奏\"。",
+    "",
+    "输出 JSON：",
+    '{"skip":false,"skipReason":"","delayMs":1800000,"intent":"ask_followup|check_in|share_thought|remind","title":"<≤20字>","body":"<正文>","anchorTopic":"<引用的具体事物，没有就空字符串>","rationale":"<为什么这时候这条/为什么 skip>"}',
+  ].join("\n");
+}
+
+function normalizeNextPushDraft(raw = {}) {
+  if (raw.skip === true || String(raw.skip || "").toLowerCase() === "true") {
+    return { skip: true, skipReason: clipText(raw.skipReason || "ai_chose_skip", 80) };
+  }
+  const intentRaw = String(raw.intent || "")
+    .trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const intent = VALID_INTENTS.has(intentRaw) ? intentRaw : "check_in";
+  const delayMs = Math.max(
+    NEXT_PUSH_MIN_DELAY_MS,
+    Math.min(NEXT_PUSH_MAX_DELAY_MS, Number(raw.delayMs) || 0)
+  );
+  return {
+    skip: false,
+    skipReason: null,
+    delayMs,
+    intent,
+    title: clipText(raw.title || "", 40),
+    body: clipText(raw.body || "", 1000),
+    anchorTopic: clipText(raw.anchorTopic || "", 60),
+    rationale: clipText(raw.rationale || "", 200),
+  };
+}
+
+/**
+ * 给 (assistantId, userId) 排下一次推送计划。事件驱动，调用方：
+ *   - HTTP /api/sync/push 收到 user-role turn 后
+ *   - WS message_create 收到消息后（同样路径）
+ *   - plan-executor 派发完一条 next_push 后（option A）
+ *
+ * 返回 { ok, planId? , skipped? , reason? }；不抛错（内部 try/catch）让调用方放心
+ * 在事件 hook 里直接调。
+ */
+async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now() } = {}) {
+  if (!assistantId) return { ok: false, skipped: "no_assistant_id" };
+
+  try {
+    const profile = getAssistantProfile(assistantId);
+    if (!profile) return { ok: false, skipped: "no_profile" };
+    if (profile.allow_proactive_message !== 1) return { ok: false, skipped: "proactive_disabled" };
+
+    const lastUserAt = getLastUserMessageAt(assistantId);
+    if (!lastUserAt) return { ok: false, skipped: "no_user_history" };
+
+    const sinceLastUserMs = now - lastUserAt;
+    if (sinceLastUserMs > NEXT_PUSH_FRESHNESS_WINDOW_MS) {
+      // 72h 已过 — next_push 不再排，让 inactive_7d 等长期 trigger 接管。
+      // 顺带 cancel 任何残留 pending（理论上不会有）
+      cancelExistingNextPushPlans(assistantId, "past_72h_handover_to_long_term");
+      return { ok: false, skipped: "past_72h_handover_to_long_term" };
+    }
+
+    // T-15 限流闸门 1：距离上一条主动消息不能太近，防自递归冲量
+    const lastProactiveAt = getLastProactiveAt(assistantId);
+    if (lastProactiveAt && now - lastProactiveAt < NEXT_PUSH_MIN_GAP_FROM_LAST_MS) {
+      return {
+        ok: false,
+        skipped: "min_gap_from_last_proactive",
+        msSinceLastProactive: now - lastProactiveAt,
+      };
+    }
+
+    // T-15 限流闸门 2：24h 滑窗 next_push 派发次数封顶
+    const recent24hCount = countNextPushIn24h(assistantId, now);
+    if (recent24hCount >= NEXT_PUSH_24H_MAX_COUNT) {
+      return {
+        ok: false,
+        skipped: "next_push_24h_cap_exceeded",
+        recent24hCount,
+      };
+    }
+
+    // 不变量：先 cancel 旧的，再插新的
+    cancelExistingNextPushPlans(assistantId, "replaced_by_new_turn");
+
+    const recentTurns = getRecentTurnsAcrossSessions({ assistantId, limit: 8 });
+    const lastUserTurn = recentTurns.find((t) => t.role === "user");
+    const recentAssistantMessages = recentTurns.filter((t) => t.role === "assistant").slice(0, 3);
+    const userFacts = getConfidentFactsForAssistant({ assistantId, minConfidence: 0.5, limit: 12 });
+
+    let coreFacts = [];
+    try {
+      const { getCoreFacts } = require("./memoryEditService");
+      coreFacts = getCoreFacts(assistantId, { limit: 8 });
+    } catch (e) { /* ignore */ }
+
+    let lifeEvents = [];
+    try {
+      lifeEvents = getRecentMemoryItems({
+        assistantId,
+        memoryTypes: ["life_event", "work_event"],
+        limit: 5,
+      });
+    } catch (e) { /* ignore */ }
+
+    const stateFragment = (() => {
+      try { return buildStatePromptFragment(assistantId); } catch { return ""; }
+    })();
+
+    const prompt = buildNextPushPrompt({
+      characterName: profile.character_name || assistantId,
+      characterBackground: profile.character_background || "",
+      recentTurns,
+      userFacts,
+      coreFacts,
+      lifeEvents,
+      lastUserMessage: lastUserTurn?.content || "",
+      recentAssistantMessages,
+      stateFragment,
+      nowIso: new Date(now).toISOString(),
+      hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
+    });
+
+    let raw;
+    try {
+      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800 });
+    } catch (e) {
+      return { ok: false, skipped: "llm_unreachable", error: e.message };
+    }
+
+    const draft = normalizeNextPushDraft(raw);
+
+    if (draft.skip) {
+      insertBehaviorJournalEntry({
+        runType: "next_push_schedule",
+        assistantId,
+        sessionId: profile.last_session_id || null,
+        shouldPushMessage: false,
+        status: "skipped",
+        reason: "ai_chose_skip",
+        input: { sinceLastUserMs, lastUserPreview: clipText(lastUserTurn?.content || "", 80) },
+        result: { skipReason: draft.skipReason },
+        createdAt: now,
+      });
+      return { ok: true, skipped: "ai_chose_skip", skipReason: draft.skipReason };
+    }
+
+    if (!draft.body || draft.body.length < 2) {
+      return { ok: false, skipped: "empty_body" };
+    }
+
+    const scheduledAt = now + draft.delayMs;
+    if (scheduledAt - lastUserAt > NEXT_PUSH_FRESHNESS_WINDOW_MS) {
+      // delay 超出 72h 窗口边界 → 让 long-term 接管
+      return { ok: false, skipped: "scheduled_beyond_72h_window" };
+    }
+
+    const planId = insertProactivePlan({
+      assistantId,
+      userId: userId || process.env.DEFAULT_USER_ID || "default-user",
+      triggerReason: NEXT_PUSH_TRIGGER_REASON,
+      intent: draft.intent,
+      draftTitle: draft.title || `${profile.character_name || assistantId} 想说`,
+      draftBody: draft.body,
+      anchorTopic: draft.anchorTopic,
+      rationale: draft.rationale,
+      scheduledAt,
+      now,
+    });
+
+    insertBehaviorJournalEntry({
+      runType: "next_push_schedule",
+      assistantId,
+      sessionId: profile.last_session_id || null,
+      shouldPushMessage: true,
+      status: "ok",
+      reason: "next_push_planned",
+      messageIntent: draft.intent,
+      draftMessage: draft.body,
+      input: { sinceLastUserMs, delayMs: draft.delayMs },
+      result: { planId, anchorTopic: draft.anchorTopic, scheduledAt },
+      createdAt: now,
+    });
+
+    return { ok: true, planId, scheduledAt, delayMs: draft.delayMs, body: draft.body };
+  } catch (error) {
+    return { ok: false, skipped: "exception", error: error.message };
+  }
+}
+
 module.exports = {
   generatePlans,
   cancelPendingPlansForAssistant,
@@ -626,4 +940,8 @@ module.exports = {
   cancelPlanById,
   getRecentDraftsForAssistant,
   fetchDuePendingPlans,
+  scheduleNextPushPlan,
+  cancelExistingNextPushPlans,
+  NEXT_PUSH_TRIGGER_REASON,
+  NEXT_PUSH_FRESHNESS_WINDOW_MS,
 };

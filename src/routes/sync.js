@@ -1,19 +1,8 @@
 const express = require("express");
 const { z } = require("zod");
-const {
-  db,
-  upsertAssistantProfile,
-  upsertCharacterState,
-  getAssistantProfile,
-} = require("../db");
+const { upsertAssistantProfile } = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
-const {
-  cancelPendingPlansForAssistant,
-} = require("../services/proactivePlanService");
-const {
-  ensureDefaultState,
-  onUserMessage: onUserMessageState,
-} = require("../services/characterStateService");
+const { turnEvents } = require("../events/turnEvents");
 const config = require("../config");
 
 const router = express.Router();
@@ -58,43 +47,25 @@ const pushSchema = z.object({
 });
 
 /**
- * 对 ingestTurnsBatch 返回的 perAssistantStats 做后置处理：
- * - 仅对**已存在 assistant_profile** 的 assistant 触发 character_state 更新
- *   （没有 profile 的 assistant 视为 phone 端尚未 push profile，不污染 state 表）
- * - 累计 totalTurns / 重算 familiarity / 推进 last_user_message_at
- * - 对该 assistant 在本批次的最后一条 user content 调用一次 mood 状态机
- *   （而非每条都跑，避免 silenceEffect 在历史消息间错乱触发）
+ * 给每个有 user-role turn 的 assistant 发一条 'turn.user.batch' 事件。
+ * 订阅者（src/subscribers/）异步处理 cancel pending plans / character_state /
+ * scheduleNextPushPlan。emit 是 sync 调用，但每个 subscriber 自己 setImmediate
+ * 长任务，不阻塞 HTTP 响应。
  */
-function applyStateUpdatesForProfileAssistants(perAssistantStats) {
-  let updated = 0;
+function emitUserBatchEvents(perAssistantStats, { cause, userId = null } = {}) {
   for (const [assistantId, stats] of perAssistantStats) {
     if (!assistantId || stats.userTurnCount <= 0) continue;
-    const profile = getAssistantProfile(assistantId);
-    if (!profile) continue; // 没 profile 的 assistant 跳过
-    try {
-      ensureDefaultState(assistantId);
-      const current = db
-        .prepare("SELECT total_turns FROM character_state WHERE assistant_id = ?")
-        .get(assistantId);
-      const newTotal = (current?.total_turns || 0) + stats.userTurnCount;
-      upsertCharacterState(assistantId, {
-        total_turns: newTotal,
-        familiarity: Math.min(100, Math.floor(newTotal / 3)),
-        last_user_message_at: stats.lastUserAt,
-      });
-      if (stats.lastUserContent) {
-        // 用历史时间戳触发 mood，让 silenceEffect 比对的是过去的"最后一次活跃时刻"
-        onUserMessageState(assistantId, {
-          content: stats.lastUserContent,
-          now: stats.lastUserAt,
-        });
-      }
-      updated += 1;
-    } catch (e) {
-      // 单 assistant state 更新失败不阻塞主流程
-    }
+    turnEvents.emitUserBatch({
+      assistantId,
+      userId,
+      cause,
+      stats: {
+        userTurnCount: stats.userTurnCount,
+        lastUserAt: stats.lastUserAt,
+        lastUserContent: stats.lastUserContent,
+      },
+    });
   }
-  return updated;
 }
 
 router.post("/push", authMiddleware, (req, res) => {
@@ -105,25 +76,7 @@ router.post("/push", authMiddleware, (req, res) => {
   const { deviceId, turns } = parsed.data;
   try {
     const result = ingestTurnsBatch({ deviceId, turns });
-    // For any user-role turn pushed in, cancel pending plans for that assistant.
-    const userAssistantIds = new Set();
-    for (const t of turns) {
-      if (t && t.role === "user" && t.assistantId) {
-        userAssistantIds.add(t.assistantId);
-      }
-    }
-    let cancelledPlans = 0;
-    for (const aid of userAssistantIds) {
-      try {
-        cancelledPlans += cancelPendingPlansForAssistant(aid, "user_active");
-      } catch (e) {
-        // ignore single-assistant cancel errors
-      }
-    }
-
-    // 仅对有 profile 的 assistant 触发 character_state（mood / totalTurns / familiarity）更新
-    const stateUpdated = applyStateUpdatesForProfileAssistants(result.perAssistantStats);
-
+    emitUserBatchEvents(result.perAssistantStats, { cause: "sync.push" });
     return res.json({
       ok: true,
       deviceId,
@@ -131,8 +84,6 @@ router.post("/push", authMiddleware, (req, res) => {
       skipped: result.skipped,
       rejected: result.rejected,
       details: result.details,
-      cancelledPlans,
-      stateUpdated,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
@@ -237,22 +188,8 @@ router.post("/snapshot", authMiddleware, (req, res) => {
       turnResult = ingestTurnsBatch({ deviceId, turns });
     }
 
-    // 3. cancel pending plans for any assistant with new user-role turns
-    const userAssistantIds = new Set();
-    for (const t of turns) {
-      if (t && t.role === "user" && t.assistantId) userAssistantIds.add(t.assistantId);
-    }
-    let cancelledPlans = 0;
-    for (const aid of userAssistantIds) {
-      try {
-        cancelledPlans += cancelPendingPlansForAssistant(aid, "user_active");
-      } catch (e) {
-        /* ignore */
-      }
-    }
-
-    // 4. character_state 更新（仅对有 profile 的 assistant）
-    const stateUpdated = applyStateUpdatesForProfileAssistants(turnResult.perAssistantStats);
+    // 3. 发事件，订阅者处理 cancel / state / next_push
+    emitUserBatchEvents(turnResult.perAssistantStats, { cause: "sync.snapshot" });
 
     return res.json({
       ok: true,
@@ -270,8 +207,6 @@ router.post("/snapshot", authMiddleware, (req, res) => {
         rejected: turnResult.rejected,
         details: turnResult.details,
       },
-      cancelledPlans,
-      stateUpdated,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });

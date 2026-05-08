@@ -3,6 +3,7 @@ const { z } = require("zod");
 const {
   db,
   upsertAssistantProfile,
+  getAssistantProfile,
   countAllowAutoLifeAssistants,
   searchConversation,
   searchMemory,
@@ -26,6 +27,7 @@ const {
   removeFact,
   setMemoryPinned,
   getCoreMemories,
+  getCoreFacts,
 } = require("../services/memoryEditService");
 const {
   upsertKnowledgeItem,
@@ -252,6 +254,14 @@ function safeGetCoreMemories(assistantId) {
   }
 }
 
+function safeGetCoreFacts(assistantId) {
+  try {
+    return getCoreFacts(assistantId, { limit: 15 });
+  } catch (e) {
+    return [];
+  }
+}
+
 // 防御性 wrapper：state builder 抛错不应该让 memory-context 整个 500
 function safeBuildRelationshipState(assistantId) {
   try {
@@ -289,6 +299,52 @@ router.get("/relationship/state", authMiddleware, (req, res) => {
 });
 
 /**
+ * GET /api/character/bootstrap?assistantId=xxx
+ *
+ * 客户端 session 启动 / 每日固定 调一次，一把拿齐拼 system prompt 的所有静态/会话级信息：
+ *   - profile           对照本地缓存（客户端权威，server 返回仅用于对比；server 无记录则为 null）
+ *   - relationshipState 关系/情绪/精力实时快照（无 row 时 ensureDefaultState 兜底初始化）
+ *   - coreMemories      pinned=1 的关键记忆，跟 query 无关，始终注入
+ *
+ * 与 /api/tool/memory-context 区分：bootstrap 只取静态/会话级，不做语义检索；
+ * memory-context 才是每轮对话的查询入口。
+ */
+router.get("/character/bootstrap", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { assistantId } = parsed.data;
+  try {
+    ensureDefaultState(assistantId);
+    const row = getAssistantProfile(assistantId);
+    const profile = row
+      ? {
+          assistantId: row.assistant_id,
+          characterName: row.character_name,
+          characterBackground: row.character_background,
+          assistantType: row.assistant_type || "",
+        }
+      : null;
+    const relationshipState = safeBuildRelationshipState(assistantId);
+    const coreMemories = safeGetCoreMemories(assistantId);
+    const coreFacts = safeGetCoreFacts(assistantId);
+    return res.json({
+      ok: true,
+      assistantId,
+      profile,
+      relationshipState,
+      coreMemories,
+      coreFacts,
+      ts: Date.now(),
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+/**
  * Agentic RAG 搜索端点：给 app 端 LLM 的 search_memory tool 直接调用。
  *
  * - 默认 source='user'，只搜用户说过的话；角色信息（life_event 等）多在上下文里已有
@@ -307,10 +363,9 @@ router.post("/tool/memory-recall", authMiddleware, async (req, res) => {
     minQuality: z.enum(["A", "B", "C", "D", "E"]).optional(),
     topK: z.coerce.number().int().positive().max(20).default(5),
     sessionId: z.string().optional(),
-    // PR-11 新增过滤维度
+    // PR-11 新增过滤维度。值与 ALLOWED_MEMORY_TYPES (src/db.js) 同步。
     memoryType: z.enum([
-      "user_turn", "assistant_turn", "life_event", "work_event",
-      "tool_call", "tool_result", "system_event", "knowledge",
+      "user_turn", "life_event", "work_event", "knowledge",
     ]).optional(),
     fromMs: z.coerce.number().int().min(0).optional(),
     toMs: z.coerce.number().int().min(0).optional(),
@@ -407,6 +462,7 @@ router.post("/tool/memory-correct", authMiddleware, (req, res) => {
     factKey: z.string().min(1).max(60).optional(),
     factValue: z.string().min(1).max(200).optional(),
     factConfidence: z.coerce.number().min(0).max(1).optional(),
+    factImportance: z.coerce.number().min(0).max(1).optional(),
     // 共用
     reason: z.string().max(500).optional(),
     actor: z.string().max(40).optional(), // 默认 'ai'，可传 'user'/'system'
@@ -473,6 +529,7 @@ router.post("/tool/memory-correct", authMiddleware, (req, res) => {
           factKey: p.factKey,
           factValue: p.factValue,
           confidence: p.factConfidence ?? 0.8,
+          importance: p.factImportance ?? 0.5,
           opts: sharedOpts,
         });
         if (!result.added) {
