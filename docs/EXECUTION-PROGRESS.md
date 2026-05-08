@@ -257,6 +257,86 @@ POST /api/report-interaction { content: "我家阳台上的薄荷又长出新叶
 
 ---
 
+## 阶段 CC-1: Character Cognition Layer Phase 1（Identity + Relationship Engine）
+
+**状态**: ✅ 已完成
+**开始时间**: 2026-05-08
+**完成时间**: 2026-05-08
+**分支**: `feature/character-system`
+
+> 把"AI 角色"从"带 prompt 的 LLM"演进成"有结构化人格 + 多维关系动力学 + 情绪惯性 + 社交姿态选择"的认知系统。完整 7 层架构图见 [character-cognition-architecture.md](./character-cognition-architecture.md)。
+
+**子任务**
+
+| # | 任务 | 状态 |
+|---|------|------|
+| T-CC-01 | Migration 025 character_identity（21 字段）+ identityVocab（35 traits / 12 modes / 8 tensions） | ✅ |
+| T-CC-02 | Migration 026 relationship_state（12 维 + 6 时间戳）+ relationship_event 流水 | ✅ |
+| T-CC-03 | identityService（read + coefficients）+ relationshipDynamicsService（13 类事件 × 12 维 × identity 系数） | ✅ |
+| T-CC-04 | Migration 027 emotion inertia（suppressed_emotion / unresolved_topic / mood_trend_24h）+ helpers | ✅ |
+| T-CC-05 | onUserMessage 接入 identity 系数 + 事件分类 + dynamics 写入 + suppression patch + EMA | ✅ |
+| T-CC-06 | POST /api/character/context 聚合端点（identity + state + emotion + dynamics + socialMode + promptFragment） | ✅ |
+| T-CC-07 | identity CRUD（GET/POST + vocab endpoint）+ seed-character-identities 脚本（--all / --from / --dry-run） | ✅ |
+| T-CC-08 | identity/dynamics fragment 注入 catchupService + proactivePlanService（buildPlanPrompt / buildNextPushPrompt） | ✅ |
+| T-CC-09 | socialModes.js（12 mode + 评分函数 + prompt 模板）+ chooseSocialMode 接入 context builder | ✅ |
+| T-CC-10 | characterCognition.test.js（67 断言，8 suites）+ characterState.test.js（38 断言）继续全过 | ✅ |
+| T-CC-11 | docs/character-cognition-architecture.md + EXECUTION-PROGRESS Phase CC-1 章节 | ✅ |
+| T-CC-12 | seed 脚本 + dynamics 自带 ensureRelationshipState 幂等初始化（无独立 migrate-mood-trend，EMA 起始 0 自然累积） | ✅ |
+
+**新增文件**
+
+- `src/db/migrations/025_character_identity.sql` — 21 字段
+- `src/db/migrations/026_relationship_state.sql` — 12 维 + 流水表
+- `src/db/migrations/027_emotion_inertia.sql` — character_state 加 5 列
+- `src/services/character/identityVocab.js` — 受控词表 + validators
+- `src/services/character/identityService.js` — CRUD + ensureDefault + getIdentityCoefficients
+- `src/services/character/relationshipDynamicsService.js` — 13 类事件 × 12 维 × identity 系数
+- `src/services/character/socialModes.js` — 12 mode 评分 + prompt 模板
+- `src/services/character/characterContextBuilder.js` — 7 层 payload 聚合 + promptFragment 拼装
+- `scripts/seed-character-identities.js` — --all / --from / --dry-run
+- `tests/characterCognition.test.js` — 67 断言
+
+**关键决策**
+
+- **identity 第一公民化**：从 character_background 的裸 TEXT 升级为 21 字段 + JSON 数组 + 受控词表
+- **关系 1 维 → 12 维**：与现有 character_state 共存，分工是"实时态 vs 中期累积态 vs 长期态（CC-3）"
+- **identity-aware delta**：所有 dynamics delta 过 identity 系数。同样的 cold_response，anxious 角色 abandonment_fear +0.053，secure 仅 +0.020（2.65× 差距）
+- **不衰减字段**：unresolved_conflict / resentment 必须由 reconciliation / gratitude_expressed 事件清掉，符合"未化解就一直在那里"
+- **emotion inertia**：valence 大反转（≥0.4）+ 旧 intensity ≥0.5 时把旧情绪推进 suppressed（24h 半衰期，比明面 6h 慢 4×）
+- **socialMode 是 behavior layer 雏形**：12 个 mode 评分 + top-1（或 top-1+2 联合），identity.socialStrategyDefault 给 +0.3 基线加成
+- **token 预算硬约束**：promptFragment ≤ 800 字符（约 512 tokens），超长按 "social mode → dynamics narrative" 顺序砍
+
+**E2E 验证**
+
+```
+identity-aware 差异（同样 cold_response，intensity 0.7）：
+  anxious + high_sensitivity: abandonment_fear +0.053
+  secure  + thick_skinned:    abandonment_fear +0.020   # 2.65× 差距 ✓
+
+emotion inertia：
+  frustrated(0.6, valence=-0.55) → accomplished(0.7, valence=+0.7)
+  → suppressed='frustrated' intensity=0.36 (= 0.6 × 0.6 retain)
+  → mood_trend_24h: -0.165 → 0.095 (EMA α=0.3) ✓
+
+socialMode 4 场景：
+  playful_teasing + 高 closeness   → primary=teasing
+  avoidant + recent conflict        → primary=defensive, secondary=detached
+  anxious + abandonment_fear=0.7    → primary=reassuring
+  valence=-0.6 + suppressed=sad     → primary=depressive ✓
+```
+
+**测试**
+
+- 105 passed, 0 failed（67 新 + 38 旧）
+
+**未决/遗留**
+
+- 现有 4 个生产 assistant 还没人手 hand-craft identity（用 seed --all 配最小默认即可，业务方面用户可自己通过 admin UI 手填）
+- Phase 2-4 蓝图已写在 character-cognition-architecture.md，等用户决定优先级
+- 老端点 `/api/relationship/state` 和 `/character/bootstrap` 暂留 1 个 release 兼容窗口，下个 release 删
+
+---
+
 ## 已完成阶段总览
 
 | 阶段 | 描述 | 完成时间 | Commit 数 |
@@ -266,6 +346,7 @@ POST /api/report-interaction { content: "我家阳台上的薄荷又长出新叶
 | B.2 | 情绪词库扩展（GoEmotions 27+95=122 词，两段启发式，中英 prompt）| 2026-04-28 | 4 |
 | C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
 | D | 用户记忆分类（migration 013 + 启发式+LLM 两段 + 质量 A-E + cite_count + 检索加权） | 2026-04-28 | 5 |
+| CC-1 | Character Cognition Phase 1（identity + 12 维 dynamics + emotion inertia + socialModes + context endpoint）| 2026-05-08 | 1（待 commit） |
 
 ---
 

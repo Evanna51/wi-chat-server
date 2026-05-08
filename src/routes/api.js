@@ -18,6 +18,13 @@ const {
 const { runCatchup } = require("../services/catchupService");
 const { ensureDefaultState } = require("../services/characterStateService");
 const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
+const { buildCharacterContext } = require("../services/character/characterContextBuilder");
+const {
+  getCharacterIdentity,
+  upsertIdentity,
+  listAllIdentities,
+} = require("../services/character/identityService");
+const identityVocab = require("../services/character/identityVocab");
 const {
   deleteMemoryItemCascade,
   deleteMemoryItemsBatch,
@@ -293,6 +300,92 @@ router.get("/relationship/state", authMiddleware, (req, res) => {
       return res.status(500).json({ ok: false, error: "state_init_failed" });
     }
     return res.json({ ok: true, assistantId, relationshipState, ts: Date.now() });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+/**
+ * POST /api/character/context  (T-CC-06)
+ *
+ * 把 7 层 character cognition 聚合成单一 payload，并由 server 拼好 promptFragment。
+ *   - identity              人格底色（结构化）
+ *   - characterState        实时态（mood + 关系 + 精力，复用 buildRelationshipStatePayload）
+ *   - emotion               增强的情绪 payload（含 suppressed / trend24h / unresolvedTopic）
+ *   - relationshipDynamics  12 维多维动力学 + 6 个事件时间戳
+ *   - promptFragment        拼好的 system prompt 段落（identity + state + dynamics narrative）
+ *
+ * 与 /tool/memory-context 的区分：
+ *   memory-context 关心"这条 query 要带哪些 memory"
+ *   character/context 关心"这个角色此刻是谁、和用户处于什么关系"
+ *   两者并行调用：memory 给具体事实，context 给人格 + 关系叙事
+ *
+ * 老路径（/relationship/state、/character/bootstrap）暂不下线，给 client 一个 release 的迁移窗口。
+ */
+/**
+ * Identity CRUD (T-CC-07)
+ *
+ * GET  /api/character/identity?assistantId=
+ * POST /api/character/identity/upsert  body={ assistantId, ...fields }
+ * GET  /api/character/identity/vocab    返回所有受控词表（供 admin UI）
+ *
+ * 校验：upsertIdentity 内部用 identityVocab.validate*，非法字段抛错 → 400。
+ */
+router.get("/character/identity", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const identity = getCharacterIdentity(parsed.data.assistantId);
+  return res.json({ ok: true, identity: identity || null });
+});
+
+router.post("/character/identity/upsert", authMiddleware, (req, res) => {
+  // identity 字段集合大，不在这里逐个 zod —— 让 service 层 validate*** 兜底。
+  // 仅 assistantId 必填校验。
+  const schema = z.object({ assistantId: z.string().trim().min(1) }).passthrough();
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, ...fields } = parsed.data;
+  try {
+    const identity = upsertIdentity(assistantId, fields);
+    return res.json({ ok: true, identity });
+  } catch (error) {
+    const msg = error?.message || String(error);
+    return res.status(/identity validation/i.test(msg) ? 400 : 500).json({ ok: false, error: msg });
+  }
+});
+
+router.get("/character/identity/vocab", authMiddleware, (_req, res) => {
+  return res.json({
+    ok: true,
+    personalityTraits: identityVocab.PERSONALITY_TRAITS,
+    attachmentStyles: identityVocab.ATTACHMENT_STYLES,
+    socialStrategies: identityVocab.SOCIAL_STRATEGIES,
+    careLanguages: identityVocab.CARE_LANGUAGES,
+    tensions: identityVocab.TENSIONS,
+    commonInsecurities: identityVocab.COMMON_INSECURITIES,
+    commonCoreWounds: identityVocab.COMMON_CORE_WOUNDS,
+    commonDesires: identityVocab.COMMON_DESIRES,
+  });
+});
+
+router.post("/character/context", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    sessionId: z.string().trim().optional(),
+    includePromptFragment: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { assistantId, includePromptFragment = true } = parsed.data;
+  try {
+    const ctx = buildCharacterContext(assistantId, { includePromptFragment });
+    if (!ctx) {
+      return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
+    }
+    return res.json({ ok: true, ...ctx });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
   }

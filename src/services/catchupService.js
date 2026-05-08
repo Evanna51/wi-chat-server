@@ -1,6 +1,12 @@
 const { v7: uuidv7 } = require("uuid");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+// T-CC-08: 注入结构化 identity + 多维 dynamics 体感到 catchup prompt
+const {
+  getCharacterIdentity,
+  buildIdentityPromptFragment,
+} = require("./character/identityService");
+const { buildRelationshipFragment } = require("./character/relationshipDynamicsService");
 const {
   getAssistantProfile,
   getRecentTurnsAcrossSessions,
@@ -94,6 +100,8 @@ function buildCatchupPrompt({
   anchorMin,
   seed,
   stateFragment,
+  identityFragment,
+  dynamicsFragment,
 }) {
   const turnLines = recentTurns
     .slice(0, 6)
@@ -116,7 +124,11 @@ function buildCatchupPrompt({
   return [
     `你正在为 AI 角色「${characterName}」写一份"在用户不在的这段时间里发生了什么"的私人日记。这是给角色自己的内部记录，不是要发给用户的内容。`,
     "",
+    // T-CC-08 注入顺序：identity（不变层）→ state（实时态）→ dynamics（关系叙事）
+    // 顺序按"稳定性递减"排，让 LLM 先建立"我是谁"再代入"我此刻在哪"
+    ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
+    ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
     "【时间窗】",
     `开始：${formatHumanTs(lastInteractionAt)}（${lastInteractionAt} 时间戳）`,
     `现在：${formatHumanTs(now)}（${now} 时间戳）`,
@@ -310,6 +322,8 @@ async function runCatchup({
       anchorMin,
       seed,
       stateFragment: buildStatePromptFragment(assistantId, now),
+      identityFragment: buildIdentityPromptFragment(getCharacterIdentity(assistantId)),
+      dynamicsFragment: buildRelationshipFragment(assistantId, now),
     });
 
     let parsed;

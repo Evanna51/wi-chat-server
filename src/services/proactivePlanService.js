@@ -2,6 +2,12 @@ const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+// T-CC-08: identity + dynamics 注入
+const {
+  getCharacterIdentity,
+  buildIdentityPromptFragment,
+} = require("./character/identityService");
+const { buildRelationshipFragment } = require("./character/relationshipDynamicsService");
 const {
   db,
   getAssistantProfile,
@@ -72,6 +78,8 @@ function buildPlanPrompt({
   relevantMemories,
   recentDrafts,
   stateFragment,
+  identityFragment,
+  dynamicsFragment,
 }) {
   const turnLines = recentTurns
     .slice(0, 6)
@@ -108,7 +116,10 @@ function buildPlanPrompt({
     `你是「${characterName}」，要给用户主动发一条消息。`,
     scenarioOneLine,
     "",
+    // T-CC-08 注入：identity → state → dynamics
+    ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
+    ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
     `触发：${triggerReason} — ${triggerExplanation}`,
     "",
     "角色档案：",
@@ -471,6 +482,8 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
         relevantMemories,
         recentDrafts,
         stateFragment: buildStatePromptFragment(assistantId),
+        identityFragment: buildIdentityPromptFragment(getCharacterIdentity(assistantId)),
+        dynamicsFragment: buildRelationshipFragment(assistantId),
       });
       let raw;
       try {
@@ -693,6 +706,8 @@ function buildNextPushPrompt({
   lastUserMessage,
   recentAssistantMessages,
   stateFragment,
+  identityFragment,
+  dynamicsFragment,
   nowIso,
   hoursSinceLastUserReply,
 }) {
@@ -720,7 +735,10 @@ function buildNextPushPrompt({
   return [
     `你是「${characterName}」。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
     "",
+    // T-CC-08 注入：identity → state → dynamics
+    ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
+    ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
     "角色档案：",
     clipText(characterBackground || "无", 600),
     "",
@@ -848,6 +866,12 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
     const stateFragment = (() => {
       try { return buildStatePromptFragment(assistantId); } catch { return ""; }
     })();
+    const identityFragment = (() => {
+      try { return buildIdentityPromptFragment(getCharacterIdentity(assistantId)); } catch { return ""; }
+    })();
+    const dynamicsFragment = (() => {
+      try { return buildRelationshipFragment(assistantId); } catch { return ""; }
+    })();
 
     const prompt = buildNextPushPrompt({
       characterName: profile.character_name || assistantId,
@@ -859,6 +883,8 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       lastUserMessage: lastUserTurn?.content || "",
       recentAssistantMessages,
       stateFragment,
+      identityFragment,
+      dynamicsFragment,
       nowIso: new Date(now).toISOString(),
       hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });

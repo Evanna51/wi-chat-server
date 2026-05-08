@@ -1,0 +1,221 @@
+# Character Cognition Layer — 7 层架构
+
+> 把"AI 角色"从"带 prompt 的 LLM"演进成"有稳定人格结构、多维关系动力学、情绪惯性、长期反思"的认知系统。
+>
+> 本文是路线图，不是 API 文档（API 见各 service 头部 JSDoc）。
+
+---
+
+## 总览
+
+| 层 | 名称 | 时间尺度 | 当前状态 |
+|----|------|----------|----------|
+| 1 | Identity | 不变 / 缓慢演进 | ✅ Phase CC-1 完成 |
+| 2 | Relationship Model | 小时 / 天 | ✅ Phase CC-1 完成（12 维 + 13 类事件）|
+| 3 | Emotion System | 秒 / 分钟（明面） / 24h（压抑） | ✅ Phase CC-1 完成（含 inertia + 趋势）|
+| 4 | Narrative Memory | 天 / 周（episode 化） | ⏳ Phase CC-2 |
+| 5 | Topic Persistence | 月级（长期话题） | ⏳ Phase CC-2 末尾 / CC-4 开头 |
+| 6 | Reflective | 周 / 触发式 | ⏳ Phase CC-3 |
+| 7 | Behavior | 实时（合成） | ⏳ Phase CC-4（雏形：socialModes 已落） |
+
+---
+
+## 数据流（Phase CC-1）
+
+```
+用户消息
+   │
+   ▼
+characterStateService.onUserMessage
+   ├─ getCharacterIdentity → coefficients (sensitivity, abandonmentMul, …)
+   ├─ scoreHeuristicSignals(content, coefficients)
+   ├─ detectSilenceEffect(state, silenceMultiplier)
+   ├─ deriveSuppressionPatch (压抑情绪)
+   ├─ nextMoodTrendEma   (趋势 EMA)
+   ├─ updateStateFields  → character_state 表
+   └─ if profile exists:
+        relationshipDynamics.classifyRelationshipEvent
+        relationshipDynamics.applyRelationshipEvent → relationship_state + relationship_event 表
+
+POST /api/character/context  (聚合)
+   ▼
+characterContextBuilder.buildCharacterContext
+   ├─ identity payload
+   ├─ characterState payload (含 mood/level/energy)
+   ├─ emotion payload (含 suppressed / trend / unresolvedTopic)
+   ├─ relationshipDynamics payload (12 维 + 6 时间戳)
+   ├─ socialModes.chooseSocialMode → primary / secondary mode
+   └─ promptFragment (集中拼好的 system prompt 段，≤800 字)
+```
+
+---
+
+## 第 1 层：Identity（人格底色）
+
+**核心论点**：现有 `assistant_profile.character_background` 是裸 TEXT，下游服务无法结构化消费 → identity 第一公民化。
+
+**Schema**：[`character_identity`](../src/db/migrations/025_character_identity.sql)（21 字段）
+
+关键字段分组：
+- 基本：`age_years` `gender_expression` `speaking_style` `worldview`
+- 人格结构：`personality_traits_json`（35 选 N）`attachment_style`（4 选 1）
+  `emotional_sensitivity` `empathy_level` `expressiveness` `social_strategy_default`
+- 价值/边界：`values_json` `hard_boundaries_json` `soft_boundaries_json`
+  `avoidance_topics_json` `triggering_topics_json`
+- 内核：`insecurities_json` `core_wounds_json` `desires_json`
+  `care_languages_json`（区分 give/receive）
+- 张力：`tensions_json`（8 个张力维度，每个 0-1）
+
+**受控词表**：[`identityVocab.js`](../src/services/character/identityVocab.js)
+- 35 个 personality traits（依恋 / 情绪调节 / 敏感度 / 社交 / 共情 / 嫉妒 / 自我向度 / 浪漫向度 / 表达向度）
+- 4 attachment styles（secure / anxious / avoidant / disorganized）
+- 12 social modes
+- 5 care languages
+- 8 tensions
+
+**关键派生**：identity → coefficients（[`identityService.getIdentityCoefficients`](../src/services/character/identityService.js)）
+将人格特征转成 9 个数：sensitivityMul / empathyMul / abandonmentMul / dependencyMul / trustGainMul / trustLossMul / resentmentMul / tensionThreshold / silenceMultiplier。
+
+---
+
+## 第 2 层：Relationship Model（多维关系动力学）
+
+**核心论点**：1 维 intimacyScore 不能表达"trust 高 + abandonment_fear 也高"这种活人特有的张力。
+
+**Schema**：[`relationship_state`](../src/db/migrations/026_relationship_state.sql)（12 维 + 6 事件时间戳）
+
+12 维：trust / dependency / emotional_safety / attachment / tension / unresolved_conflict /
+abandonment_fear / reciprocity_balance / emotional_closeness / social_distance / resentment / gratitude
+
+**事件流水**：`relationship_event` 表（id / event_type / intensity / source_turn_id / delta_json）—— Phase 3 reflection 的数据源。
+
+**13 类关系事件**（[`relationshipDynamicsService.EVENT_DELTA_TEMPLATES`](../src/services/character/relationshipDynamicsService.js)）：
+vulnerable_share / reciprocated_care / cold_response / unanswered_message / conflict /
+reconciliation / trust_gained / trust_broken / boundary_violation / silence_break /
+shared_intimacy / distancing_signal / gratitude_expressed
+
+每个事件 × 12 维 = 156 条 base delta。运行时再乘 identity 系数 × 事件 intensity。
+
+**衰减**：12 维独立半衰期（trust 30d、tension 3d、abandonment_fear 7d 等），
+`unresolved_conflict` 和 `resentment` **不自动衰减** —— 必须由 reconciliation / gratitude 事件清掉，
+符合"未化解就一直在那里"的现实。
+
+**Identity-aware baseline**：[`deriveBaselinesFromIdentity`](../src/services/character/relationshipDynamicsService.js)
+把 identity 的 traits / insecurities / core_wounds 翻译成 baseline 偏移。例：
+- `anxious_attachment` + `fear_of_abandonment` + `abandonment_history` → abandonment_fear baseline 0.5
+- `avoidant_attachment` → social_distance baseline +0.15、emotional_closeness -0.05
+- `betrayal_trauma` → trust baseline -0.1
+
+---
+
+## 第 3 层：Emotion System（情绪惯性）
+
+复用现有 [`characterStateService`](../src/services/characterStateService.js)（122 词 GoEmotions vocab，6h 半衰期）+ Phase CC-1 新增：
+
+- **suppressed_emotion**：valence 大反转时旧情绪被推进 suppressed（24h 半衰期，比明面慢 4×）
+- **mood_trend_24h**：EMA(α=0.3) 平滑 valence，给后续 reflection 用作"近期心情"输入
+- **unresolved_emotion_topic**：自由文本，由事件分类填，必须显式清掉
+
+数据流见上"数据流"图，关键 helper：`deriveSuppressionPatch` / `applySuppressedEmotionDecay` / `nextMoodTrendEma`。
+
+---
+
+## 第 7 层（雏形）：Behavior — Social Modes
+
+[`socialModes.js`](../src/services/character/socialModes.js) 定义 12 个 mode 的**触发评分函数** + **prompt 模板**。
+`chooseSocialMode(identity, characterState, dynamics, emotion)` 给每个 mode 打分，挑 top-1（或 top-1+top-2 联合，如果差距 < 0.15）。
+
+12 个 mode：casual / defensive / intimate / philosophical / depressive / teasing /
+detached / caretaker / inquisitive / ritualistic / confessional / reassuring
+
+`identity.socialStrategyDefault` 给基线加 0.3 分（用户配的"角色默认 mode"是底色）。
+
+---
+
+## 第 4-6 层（待 Phase CC-2/3 实现）
+
+### Narrative Memory（CC-2）
+
+**Schema 草案**：
+```sql
+CREATE TABLE narrative_episode (
+  id, assistant_id, title, summary, participants_json,
+  emotional_tone, importance, unresolved_threads_json,
+  time_range_start, time_range_end, created_at, updated_at
+);
+```
+
+复用 `memory_edges` 加 `relation_type='episode_member'` 关联 episode → memory_items。
+
+后台 cron 每天扫近 24h memory_items，用 LLM 做 clustering 合成 episode。`memoryRetrievalService` 增强：命中 memory_item 属于某 episode 时，把 episode summary 也带上。
+
+### Persistent Topic（CC-2 末尾 / CC-4 开头）
+
+```sql
+CREATE TABLE persistent_topic (
+  id, assistant_id, topic, emotional_association, status,
+  importance, trajectory_json, first_mentioned_at,
+  last_discussed_at, mention_count
+);
+```
+
+status: growing / unresolved / painful / nostalgic / exciting
+
+### Reflective Cognition（CC-3）
+
+```sql
+CREATE TABLE relationship_reflection (
+  id, assistant_id, reflection_type, summary,
+  emotional_trend, user_needs_json, relationship_direction,
+  concerns_json, opportunities_json, source_data_json, created_at
+);
+```
+
+- 周级 cron（每周日 03:00）+ 事件触发（trust 大跌 / 长 silence break / unresolved_conflict 持续 > 7d）
+- 输出会被 `characterContextBuilder.buildPromptFragment` 拼进 promptFragment
+
+### Behavior Layer（CC-4，完整版）
+
+`behaviorPlanner.evaluate(assistantId)` 综合 identity + relationship + reflection + topics → 输出意图（intent），喂给现有 `proactivePlanService`。
+
+intent 候选：
+- check_in_after_silence
+- follow_up_unresolved_topic
+- share_persistent_topic_progress
+- reassure_after_conflict
+- reciprocate_care
+- ...
+
+---
+
+## API 表（Phase CC-1）
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/character/identity` | GET | 读 identity |
+| `/api/character/identity/upsert` | POST | 创建 / 更新 identity（vocab 校验） |
+| `/api/character/identity/vocab` | GET | 拿全部受控词表（admin UI 用） |
+| `/api/character/context` | POST | **聚合端点**：identity + state + dynamics + emotion + socialMode + promptFragment |
+| `/api/relationship/state` | GET | 老端点（保留 1 个 release 兼容） |
+| `/api/character/bootstrap` | GET | 老端点（保留 1 个 release 兼容） |
+
+`promptFragment` 总长 ≤ 800 字符（约 512 tokens），超出按"末尾砍 social mode → dynamics narrative"顺序 truncate。
+
+---
+
+## 测试
+
+- `tests/characterCognition.test.js` — 67 断言（8 suite，覆盖 vocab / identity / dynamics / emotion / socialModes / context builder）
+- `tests/characterState.test.js` — 38 断言（向后兼容验证，Phase B 老逻辑保持稳定）
+
+合计 **105 断言全过**。
+
+---
+
+## 维护者备忘
+
+1. **`character_state` 不要再加列**。Phase B/B.2/CC-1 已经加到 11+5=16 列，再加就该考虑拆表。新维度往 `relationship_state` 加。
+2. **identity 字段添加流程**：先在 [`identityVocab.js`](../src/services/character/identityVocab.js) 加常量 + validator → 再加 migration 列 → 再改 [`identityService.upsertIdentity`](../src/services/character/identityService.js) 的 colMap → 最后改 [`buildIdentityPromptFragment`](../src/services/character/identityService.js) 输出。
+3. **新事件类型添加流程**：[`EVENT_DELTA_TEMPLATES`](../src/services/character/relationshipDynamicsService.js) 加条目 → [`pickEventTimestamps`](../src/services/character/relationshipDynamicsService.js) 决定时间戳 → [`classifyRelationshipEvent`](../src/services/character/relationshipDynamicsService.js) 加分类启发式。
+4. **`unresolved_conflict` / `resentment` 不会自动衰减** —— 设计选择，不要"修"它。要清掉只能靠 `reconciliation` / `gratitude_expressed` 事件。
+5. **测试 setup 注意**：测试用 `setupAssistant` 全套（profile + character_state + identity + relationship_state），不能像老 `characterState.test.js` 只插一行 character_state，否则 onUserMessage 的 dynamics 路径会跳过。
