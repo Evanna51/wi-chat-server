@@ -32,9 +32,21 @@ const {
   buildRelationshipFragment,
 } = require("./relationshipDynamicsService");
 const { chooseSocialMode } = require("./socialModes");
+// T-CC2-06: 注入长期话题 + 重要 episode
+const {
+  listActiveTopics,
+  buildTopicsPromptFragment,
+} = require("./persistentTopicService");
+const { listEpisodes } = require("./episodeBuilder");
 const { resolveEmotion } = require("../emotionTaxonomy");
 
-const MAX_FRAGMENT_LEN_CHARS = 800;
+// T-CC2-06: 加叙事/话题段后，预算从 800 → 1200。两段加起来约 200-300 字，
+// 但要留余量给 character_background 较长的角色。超出按段级丢，砍顺序见 buildPromptFragment。
+const MAX_FRAGMENT_LEN_CHARS = 1200;
+const RECENT_EPISODES_DAYS = 30;
+const RECENT_EPISODES_LIMIT = 3;
+const RECENT_EPISODES_MIN_IMPORTANCE = 0.5;
+const ACTIVE_TOPICS_LIMIT = 5;
 
 /**
  * 主入口：返回完整的 character context payload。
@@ -61,13 +73,20 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
   const dynamicsPayload = dynamicsState ? toDynamicsPayload(dynamicsState) : null;
   const emotionPayload = toEmotionPayload(characterState);
 
-  // T-CC-09: 选当前社交姿态，把模式 prompt 也喂到 promptFragment
+  // T-CC-09: 选当前社交姿态
   const socialMode = chooseSocialMode({
     identity,
     characterState,
     dynamics: dynamicsState,
     emotion: emotionPayload,
   });
+
+  // T-CC2-06: 拉长期话题 + 重要 episode（30d 内 importance ≥ 0.5）
+  const activeTopics = listActiveTopics(assistantId, { limit: ACTIVE_TOPICS_LIMIT });
+  const recentEpisodes = listEpisodes(assistantId, {
+    limit: RECENT_EPISODES_LIMIT,
+    minImportance: RECENT_EPISODES_MIN_IMPORTANCE,
+  }).filter((e) => e.timeRangeEnd >= now - RECENT_EPISODES_DAYS * 24 * 3600 * 1000);
 
   const result = {
     assistantId,
@@ -81,6 +100,8 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
       secondary: socialMode.secondary,
       scores: socialMode.scores,
     },
+    activeTopics,
+    recentEpisodes,
   };
 
   if (includePromptFragment) {
@@ -90,10 +111,26 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
       characterState,
       now,
       socialModeFragment: socialMode.promptFragment,
+      topicsFragment: buildTopicsPromptFragment(assistantId, { limit: ACTIVE_TOPICS_LIMIT, now }),
+      episodesFragment: buildEpisodesPromptFragment(recentEpisodes),
     });
   }
 
   return result;
+}
+
+// T-CC2-06: episodes prompt fragment
+function buildEpisodesPromptFragment(episodes) {
+  if (!episodes || !episodes.length) return "";
+  const lines = ["[最近的重要叙事]"];
+  for (const e of episodes) {
+    const summary = e.summary.length > 80 ? e.summary.slice(0, 78) + "…" : e.summary;
+    lines.push(`- ${e.title}（${e.emotionalTone}）：${summary}`);
+    if (e.unresolvedThreads && e.unresolvedThreads.length) {
+      lines.push(`  尚未化解：${e.unresolvedThreads.slice(0, 2).join("；")}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 // ── payload 拍平 ─────────────────────────────────────────────────────
@@ -211,10 +248,21 @@ function toEmotionPayload(state) {
 
 // ── prompt 拼装 ─────────────────────────────────────────────────────
 
-function buildPromptFragment({ identity, profile, characterState, now, socialModeFragment }) {
+function buildPromptFragment({
+  identity, profile, characterState, now,
+  socialModeFragment, topicsFragment, episodesFragment,
+}) {
   const parts = [];
 
-  // Header：角色名 + 背景
+  // 段排序按"被砍优先级倒序"：越靠后越早被丢。
+  // header → identity（不变层，最稳定，最该保留）
+  // → state（实时态）
+  // → dynamics（中期叙事）
+  // → episodes（长期叙事）  ← Phase 2 新加
+  // → topics（长期话题）   ← Phase 2 新加
+  // → socialMode（最易重算，超长时先丢）
+
+  // Header
   const header = [];
   header.push(`你是角色"${profile.character_name}"。`);
   if (profile.character_background) {
@@ -222,21 +270,22 @@ function buildPromptFragment({ identity, profile, characterState, now, socialMod
   }
   parts.push(header.join("\n"));
 
-  // Identity 段（不变层）
   if (identity) {
     const id = buildIdentityPromptFragment(identity);
     if (id) parts.push(id);
   }
 
-  // 状态段：实时 mood / 关系等级 / 精力 / suppressed / trend
   const stateFragment = buildStatePromptFragment(profile.assistant_id, now);
   if (stateFragment) parts.push(stateFragment);
 
-  // 关系动力学叙述
   const dynFragment = buildRelationshipFragment(profile.assistant_id, now);
   if (dynFragment) parts.push(dynFragment);
 
-  // T-CC-09: 当前社交姿态（behavior 雏形）
+  // T-CC2-06 新加：长期叙事 + 长期话题
+  if (episodesFragment) parts.push(episodesFragment);
+  if (topicsFragment) parts.push(topicsFragment);
+
+  // T-CC-09: 当前社交姿态（最易重算，最先被砍）
   if (socialModeFragment) parts.push(socialModeFragment);
 
   // Phase 1 review P1: 按段丢弃，不切中文/emoji 中间。

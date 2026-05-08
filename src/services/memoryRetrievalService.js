@@ -150,6 +150,10 @@ async function retrieveMemory({
   excludeRecentEcho = true, // 默认 true：屏蔽最近 60s 同 session 的 user_turn 防 echo
   // ── PR-14 新增（知识库）─────────────────────────────────
   kbName = null,        // 仅在指定 kb_name 知识空间内搜
+  // ── T-CC2-05 新增（叙事 episode 关联）──────────────────
+  // true 时给每条返回的 memory 附上其归属的 narrative_episode 列表（id+title+summary+tone）。
+  // 默认 false 保持向后兼容；character/context 路径打开它，让 retrieval 自带"那段时间整体氛围"。
+  includeEpisodes = false,
 }) {
   const now = Date.now();
 
@@ -374,6 +378,40 @@ async function retrieveMemory({
     }
     for (const item of sliced) {
       item.facts = factsByMem.get(item.id) || [];
+    }
+  }
+
+  // T-CC2-05: 给每条 memory 附 episode 信息（如果关联到 narrative_episode）
+  if (includeEpisodes && sliced.length > 0) {
+    const ids = sliced.map((r) => r.id);
+    const ph = ids.map(() => "?").join(",");
+    const epRows = db
+      .prepare(
+        `SELECT l.memory_item_id, e.id AS episode_id, e.title, e.summary,
+                e.emotional_tone, e.importance
+           FROM episode_memory_link l
+           JOIN narrative_episode e ON e.id = l.episode_id
+          WHERE l.memory_item_id IN (${ph})
+          ORDER BY e.importance DESC, e.time_range_end DESC`
+      )
+      .all(...ids);
+    const epsByMem = new Map();
+    for (const r of epRows) {
+      const arr = epsByMem.get(r.memory_item_id) || [];
+      // 一条 memory 可能在多个 episode 里，但常见 ≤ 2，截到 3 防 prompt 膨胀
+      if (arr.length < 3) {
+        arr.push({
+          id: r.episode_id,
+          title: r.title,
+          summary: r.summary,
+          emotionalTone: r.emotional_tone,
+          importance: r.importance,
+        });
+      }
+      epsByMem.set(r.memory_item_id, arr);
+    }
+    for (const item of sliced) {
+      item.episodes = epsByMem.get(item.id) || [];
     }
   }
 

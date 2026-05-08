@@ -12,6 +12,11 @@ const {
   classifyRelationshipEvent,
   applyRelationshipEvent,
 } = require("./character/relationshipDynamicsService");
+// T-CC2-04: 长期话题命中即更新 mention（hot path 不创建新 topic，那由 episodeBuilder 做）
+const {
+  findTopicMatchesInMessage,
+  recordMention,
+} = require("./character/persistentTopicService");
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -416,6 +421,22 @@ function onUserMessage(assistantId, { content = "", now = Date.now() } = {}) {
       // 静默吞 = 衰减/事件流水永久丢失却无观察性。Phase 1 review (P0) 改进。
       console.warn(
         `[characterState] dynamics enrichment failed for ${assistantId}: ${err.message}`
+      );
+    }
+
+    // T-CC2-04: persistent topic update (hot path 只 mention，不创建)
+    try {
+      const matched = findTopicMatchesInMessage(assistantId, content);
+      for (const t of matched) {
+        recordMention(t.id, {
+          mentionText: content,
+          valence: patch.mood_valence ?? 0,
+          now,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `[characterState] topic update failed for ${assistantId}: ${err.message}`
       );
     }
   }

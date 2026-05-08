@@ -13,8 +13,8 @@
 | 1 | Identity | 不变 / 缓慢演进 | ✅ Phase CC-1 完成 |
 | 2 | Relationship Model | 小时 / 天 | ✅ Phase CC-1 完成（12 维 + 13 类事件）|
 | 3 | Emotion System | 秒 / 分钟（明面） / 24h（压抑） | ✅ Phase CC-1 完成（含 inertia + 趋势）|
-| 4 | Narrative Memory | 天 / 周（episode 化） | ⏳ Phase CC-2 |
-| 5 | Topic Persistence | 月级（长期话题） | ⏳ Phase CC-2 末尾 / CC-4 开头 |
+| 4 | Narrative Memory | 天 / 周（episode 化） | ✅ Phase CC-2 完成 |
+| 5 | Topic Persistence | 月级（长期话题） | ✅ Phase CC-2 完成 |
 | 6 | Reflective | 周 / 触发式 | ⏳ Phase CC-3 |
 | 7 | Behavior | 实时（合成） | ⏳ Phase CC-4（雏形：socialModes 已落） |
 
@@ -132,34 +132,47 @@ detached / caretaker / inquisitive / ritualistic / confessional / reassuring
 
 ---
 
-## 第 4-6 层（待 Phase CC-2/3 实现）
+## 第 4 层：Narrative Memory（CC-2 完成）
 
-### Narrative Memory（CC-2）
+**Schema**：[`narrative_episode`](../src/db/migrations/028_narrative_episode.sql)（13 字段）+ [`episode_memory_link`](../src/db/migrations/028_narrative_episode.sql)（多对多）
 
-**Schema 草案**：
-```sql
-CREATE TABLE narrative_episode (
-  id, assistant_id, title, summary, participants_json,
-  emotional_tone, importance, unresolved_threads_json,
-  time_range_start, time_range_end, created_at, updated_at
-);
-```
+不复用 memory_edges：episode↔memory 是"概念↔实例"不同型，硬塞进同型 edge 表会模糊语义。
 
-复用 `memory_edges` 加 `relation_type='episode_member'` 关联 episode → memory_items。
+**核心服务**：[`episodeBuilder.js`](../src/services/character/episodeBuilder.js)
+- `runEpisodeBuilderTick()` cron：每天 03:30 扫所有 character 类 assistant
+- `buildEpisodesFor(assistantId)`：拉 last_episode_built_at 之后到 now 的 memory_items（最多 30 条），用 LLM 聚合成最多 5 个 episode + 识别 topic 候选
+- `listEpisodes / getEpisodesForMemory / insertEpisode`（admin 手工建用）
 
-后台 cron 每天扫近 24h memory_items，用 LLM 做 clustering 合成 episode。`memoryRetrievalService` 增强：命中 memory_item 属于某 episode 时，把 episode summary 也带上。
+**关键设计**：
+- cursor 不存表 —— 直接 query "最新 episode 的 time_range_end" 作为下次起点
+- LLM 失败不抛错（console.warn）让 cron 继续处理其他 assistant
+- 一次扫 30 条 memory + 最多 5 episode + 最多 5 新 topic（避免 prompt + 表膨胀）
 
-### Persistent Topic（CC-2 末尾 / CC-4 开头）
+**检索增强**：[`memoryRetrievalService`](../src/services/memoryRetrievalService.js) 加 `includeEpisodes` 参数。命中的 memory_item 如属于某 episode，把 episode summary 一起返回。
 
-```sql
-CREATE TABLE persistent_topic (
-  id, assistant_id, topic, emotional_association, status,
-  importance, trajectory_json, first_mentioned_at,
-  last_discussed_at, mention_count
-);
-```
+## 第 5 层：Persistent Topic（CC-2 完成）
 
-status: growing / unresolved / painful / nostalgic / exciting
+**Schema**：[`persistent_topic`](../src/db/migrations/028_narrative_episode.sql)（13 字段）
+
+字段要点：`topic`（标准化名）+ `aliases_json`（命中匹配用）+ `status`（7 状态机）+ `trajectory_json`（最近 20 个 mention 数据点）。
+
+**状态机**（[`persistentTopicService.VALID_STATUSES`](../src/services/character/persistentTopicService.js)）：
+| status | 触发条件 | 转出 |
+|--------|----------|------|
+| `growing` | 默认创建 | 21d 未提 → dormant |
+| `unresolved` | 用户表达过不安/无解 | reconciliation → resolved |
+| `painful` | 谈起就疼 | 用户主动放下 → resolved |
+| `nostalgic` | 很久没谈，回忆带怀念 | 重新提及 → growing |
+| `exciting` | 最近多次正面提及 | mention 间隔变长 → growing |
+| `dormant` | applyDormantSweep 自动 (>21d) | 重新提及 → growing |
+| `resolved` | 用户明确"放下了" | （终态）|
+
+**写入策略**（关键）：
+- **hot path**（onUserMessage）只做 update：命中已知 topic 的 alias → mention_count++ + trajectory append。**不创建新 topic**。
+- 创建新 topic 主要由 `episodeBuilder` 发起（cron + LLM 识别）。
+- admin / API 也可手动 create。
+
+**自动维护**：`runTopicDormantSweepTick` 每天 04:00 把 21 天未提的 topic 转 dormant。
 
 ### Reflective Cognition（CC-3）
 

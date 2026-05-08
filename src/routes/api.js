@@ -25,6 +25,20 @@ const {
   listAllIdentities,
 } = require("../services/character/identityService");
 const identityVocab = require("../services/character/identityVocab");
+// Phase 2: narrative + topics
+const {
+  listEpisodes,
+  getEpisodeById,
+  buildEpisodesFor,
+} = require("../services/character/episodeBuilder");
+const {
+  listActiveTopics,
+  listAllTopics,
+  createTopic,
+  transitionStatus,
+  setImportance,
+  VALID_STATUSES,
+} = require("../services/character/persistentTopicService");
 const {
   deleteMemoryItemCascade,
   deleteMemoryItemsBatch,
@@ -352,6 +366,105 @@ router.post("/character/identity/upsert", authMiddleware, (req, res) => {
   } catch (error) {
     const msg = error?.message || String(error);
     return res.status(/identity validation/i.test(msg) ? 400 : 500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * Phase 2: narrative episodes + persistent topics (T-CC2-07)
+ *
+ * GET  /api/character/episodes?assistantId=&limit=&minImportance=
+ * GET  /api/character/episodes/:id
+ * POST /api/admin/character/build-episodes  body={ assistantId } 手动触发 LLM 构建
+ *
+ * GET  /api/character/topics?assistantId=&status=&limit=
+ * POST /api/character/topics/upsert      body={ assistantId, topic, ... } 创建（admin / 手工）
+ * POST /api/character/topics/:id/status  body={ status } 状态转换
+ * POST /api/character/topics/:id/importance body={ importance }
+ */
+router.get("/character/episodes", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    limit: z.coerce.number().int().positive().max(100).optional(),
+    minImportance: z.coerce.number().min(0).max(1).optional(),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, limit = 20, minImportance = 0 } = parsed.data;
+  return res.json({ ok: true, episodes: listEpisodes(assistantId, { limit, minImportance }) });
+});
+
+router.get("/character/episodes/:id", authMiddleware, (req, res) => {
+  const ep = getEpisodeById(req.params.id);
+  if (!ep) return res.status(404).json({ ok: false, error: "episode_not_found" });
+  return res.json({ ok: true, episode: ep });
+});
+
+router.post("/admin/character/build-episodes", authMiddleware, async (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const result = await buildEpisodesFor(parsed.data.assistantId, { source: "admin" });
+    return res.json({ ok: true, result });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+router.get("/character/topics", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    status: z.enum([...VALID_STATUSES]).optional(),
+    limit: z.coerce.number().int().positive().max(100).optional(),
+    includeInactive: z.coerce.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, status, limit = 20, includeInactive = false } = parsed.data;
+  const topics = includeInactive
+    ? listAllTopics(assistantId, { limit })
+    : listActiveTopics(assistantId, { limit, statuses: status ? [status] : undefined });
+  return res.json({ ok: true, topics });
+});
+
+router.post("/character/topics/upsert", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    topic: z.string().trim().min(1),
+    aliases: z.array(z.string()).optional(),
+    emotionalAssociation: z.string().optional(),
+    status: z.enum([...VALID_STATUSES]).optional(),
+    importance: z.number().min(0).max(1).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const created = createTopic(parsed.data.assistantId, parsed.data);
+    return res.json({ ok: true, topic: created });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+router.post("/character/topics/:id/status", authMiddleware, (req, res) => {
+  const schema = z.object({ status: z.enum([...VALID_STATUSES]) });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    return res.json({ ok: true, topic: transitionStatus(req.params.id, parsed.data.status) });
+  } catch (error) {
+    return res.status(/not found/.test(error.message) ? 404 : 400).json({ ok: false, error: error.message });
+  }
+});
+
+router.post("/character/topics/:id/importance", authMiddleware, (req, res) => {
+  const schema = z.object({ importance: z.number().min(0).max(1) });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    return res.json({ ok: true, topic: setImportance(req.params.id, parsed.data.importance) });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
   }
 });
 

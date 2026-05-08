@@ -105,6 +105,33 @@ async function runRetentionSweepTick() {
   }
 }
 
+async function runEpisodeBuilderTick() {
+  // T-CC2-07: 每天扫所有 character 类 assistant，把近 24h+ 未消化的 memory_items
+  // 聚合成 narrative_episode。LLM 调用串行，避免 rate limit。
+  try {
+    const { runEpisodeBuilderTick: build } = require("./services/character/episodeBuilder");
+    const result = await build();
+    infoLog(`[scheduler] episode builder done: ${result.tickedAssistants} assistants`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] episode builder failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+async function runTopicDormantSweepTick() {
+  // T-CC2-07: 每天扫一次，把 21+ 天未提的 topic 转 dormant
+  try {
+    const { applyDormantSweep } = require("./services/character/persistentTopicService");
+    const result = applyDormantSweep();
+    infoLog(`[scheduler] topic dormant sweep: ${result.transitioned}/${result.total} transitioned`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] topic dormant sweep failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 async function runMemoryClassifyBackfillTick() {
   try {
     const {
@@ -340,6 +367,9 @@ function startScheduler() {
   scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick);
   scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick);
   scheduleIfEnabled(config.deadLetterMonitorCron, "dead-letter-monitor", runDeadLetterMonitorTick);
+  // T-CC2-07: Phase 2 narrative + topic 后台维护
+  scheduleIfEnabled(config.episodeBuilderCron, "episode-builder", runEpisodeBuilderTick);
+  scheduleIfEnabled(config.topicDormantSweepCron, "topic-dormant-sweep", runTopicDormantSweepTick);
   startPlanExecutorLoop();
 }
 
@@ -352,4 +382,6 @@ module.exports = {
   runWeeklyBackupTick,
   runMemoryClassifyBackfillTick,
   runDeadLetterMonitorTick,
+  runEpisodeBuilderTick,
+  runTopicDormantSweepTick,
 };

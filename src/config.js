@@ -97,6 +97,9 @@ const config = {
   backupFullKeepWeeks: Number(process.env.BACKUP_FULL_KEEP_WEEKS || 4),
   memoryClassifyCron: process.env.MEMORY_CLASSIFY_CRON || "*/10 * * * *",
   deadLetterMonitorCron: process.env.DEAD_LETTER_MONITOR_CRON || "0 9 * * *",   // 每天 09:00 扫一次
+  // Phase 2 narrative + topic 后台维护
+  episodeBuilderCron: process.env.EPISODE_BUILDER_CRON || "30 3 * * *",         // 每天 03:30，避开 backup 03:00
+  topicDormantSweepCron: process.env.TOPIC_DORMANT_SWEEP_CRON || "0 4 * * *",   // 每天 04:00
 };
 
 module.exports = config;

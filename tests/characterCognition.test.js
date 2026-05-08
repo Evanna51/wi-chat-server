@@ -20,7 +20,7 @@ const idsvc = require("../src/services/character/identityService");
 const dyn = require("../src/services/character/relationshipDynamicsService");
 const cs = require("../src/services/characterStateService");
 const { chooseSocialMode } = require("../src/services/character/socialModes");
-const { buildCharacterContext } = require("../src/services/character/characterContextBuilder");
+const { buildCharacterContext, MAX_FRAGMENT_LEN_CHARS } = require("../src/services/character/characterContextBuilder");
 
 let passed = 0;
 let failed = 0;
@@ -418,7 +418,7 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
   assert(ctx.emotion !== null, "emotion in payload");
   assert(ctx.socialMode && ctx.socialMode.primary, "socialMode chosen");
   assert(typeof ctx.promptFragment === "string" && ctx.promptFragment.length > 0, "promptFragment present");
-  assert(ctx.promptFragment.length <= 800, `promptFragment within budget (${ctx.promptFragment.length} chars)`);
+  assert(ctx.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `promptFragment within budget (${ctx.promptFragment.length} chars / max ${MAX_FRAGMENT_LEN_CHARS})`);
   assert(/\[角色人格\]/.test(ctx.promptFragment), "promptFragment has identity section");
   assert(/\[关系动力学\]/.test(ctx.promptFragment) || /\[当前社交姿态\]/.test(ctx.promptFragment), "promptFragment has dynamics or social mode section");
 
@@ -458,7 +458,7 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
     careLanguages: { give: ["quality_time"], receive: ["verbal_affirmation"] },
   });
   const ctxLong = buildCharacterContext(aidLong);
-  assert(ctxLong.promptFragment.length <= 800, `long bg: still within 800 char budget (got ${ctxLong.promptFragment.length})`);
+  assert(ctxLong.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `long bg: still within budget (got ${ctxLong.promptFragment.length} / max ${MAX_FRAGMENT_LEN_CHARS})`);
   // 重要：段级丢弃不切中文字符；不应该有"..."拼在汉字一半
   assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.promptFragment), "truncation does not splice mid-CJK");
 

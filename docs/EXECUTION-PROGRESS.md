@@ -337,6 +337,80 @@ socialMode 4 场景：
 
 ---
 
+## 阶段 CC-2: Character Cognition Layer Phase 2（Narrative Memory + Persistent Topic）
+
+**状态**: ✅ 已完成
+**开始时间**: 2026-05-08
+**完成时间**: 2026-05-08
+**分支**: `feature/character-system`
+
+> 把"记忆"从 atomic memory_items 升级到结构化的"故事化叙事 + 长期话题"。让 LLM
+> 不只看到一堆零散事实，而是"那段你失恋时" / "钢琴学习初期" 这种故事化上下文。
+
+**子任务**
+
+| # | 任务 | 状态 |
+|---|------|------|
+| T-CC2-01 | Migration 028: narrative_episode + persistent_topic + episode_memory_link | ✅ |
+| T-CC2-02 | episodeBuilder service: LLM clustering + cursor-based 增量构建 + 13 字段 episode + topic 候选识别 | ✅ |
+| T-CC2-03 | persistentTopicService: 7 状态机 + alias 启发式匹配 + trajectory 滑窗 + dormant sweep | ✅ |
+| T-CC2-04 | onUserMessage 接入：hot path 命中 alias → recordMention（不创建新 topic） | ✅ |
+| T-CC2-05 | memoryRetrievalService.includeEpisodes：检索结果附 episode summary | ✅ |
+| T-CC2-06 | characterContextBuilder 注入 [最近的重要叙事] + [长期关注的话题]，预算 800 → 1200 | ✅ |
+| T-CC2-07 | 6 个新 API endpoint（episodes / topics CRUD + admin build）+ 2 个新 cron | ✅ |
+| T-CC2-08 | 45 断言测试套件 + 文档 + commit | ✅ |
+
+**新增文件**
+
+- `src/db/migrations/028_narrative_episode.sql` — 3 张表 + 6 索引
+- `src/services/character/persistentTopicService.js` — 13 字段 + 7 状态 + alias 匹配
+- `src/services/character/episodeBuilder.js` — LLM clustering + cron + admin 入口
+- `tests/narrativeAndTopics.test.js` — 45 断言（7 suites）
+
+**修改文件**
+
+- `src/services/characterStateService.js` — onUserMessage 加 topic mention update
+- `src/services/character/characterContextBuilder.js` — 注入叙事/话题段，预算 800→1200，段级丢弃
+- `src/services/memoryRetrievalService.js` — includeEpisodes 参数
+- `src/routes/api.js` — 6 个新 endpoint
+- `src/scheduler.js` + `src/config.js` + `.env.example` — 2 个新 cron
+
+**关键决策**
+
+- **不复用 memory_edges**: episode↔memory 是"概念↔实例"，复用同型 edge 表会模糊语义。新 episode_memory_link 表
+- **hot path 只 update 不创建 topic**: 避免每条消息打 LLM。新 topic 由 episodeBuilder cron 用 LLM 识别
+- **cursor 不存表**: query "最新 episode.time_range_end" 作为下次起点，免维护额外 KV 行
+- **topic alias 至少 2 字符**: 防"不"/"没"等单字误匹配（沿用 Phase 1 review fix 同款经验）
+- **episode 至少 2 条 memory**: 单条 memory 不构成"episode"，避免噪音
+- **dormant 状态自动转**: 21d 未提自动 dormant；resolved 是终态不参与衰减
+- **段排序按砍优先级**: header → identity → state → dynamics → episodes → topics → socialMode（最易重算的最先丢）
+
+**E2E 验证**
+
+```
+钢琴 topic mentionCount = 2（创建 1 + onUserMessage hit 1）✓
+trajectory 25 次 mention 后 length = 20（滑窗）✓
+dormant sweep: 25d-old growing topic → dormant ✓
+characterContext payload 含 activeTopics + recentEpisodes ✓
+promptFragment 含 [最近的重要叙事] + [长期关注的话题] 段 ✓
+低 importance episode (0.3) 不进 fragment ✓
+dormant topic 不进 fragment ✓
+hot path 不创建新 topic ✓
+```
+
+**测试**
+
+- 45 passed, 0 failed (Phase 2)
+- 累计 177 passed, 0 failed (Phase 1 + 2)
+
+**未决/遗留**
+
+- episodeBuilder 的 LLM clustering 没有 unit test（mock LLM 太重）—— 留给手动 admin 触发 + 生产观测
+- topic 自动状态转换（unresolved/painful/exciting）目前只能由 LLM 在 episodeBuilder 里建议；hot path 不会主动转
+- 老 dynamics + memory_retrieval 的 5 次重复 SELECT character_state（Phase 1 review #8）暂未优化
+
+---
+
 ## 已完成阶段总览
 
 | 阶段 | 描述 | 完成时间 | Commit 数 |
@@ -346,7 +420,8 @@ socialMode 4 场景：
 | B.2 | 情绪词库扩展（GoEmotions 27+95=122 词，两段启发式，中英 prompt）| 2026-04-28 | 4 |
 | C | LLM Provider 抽象（接口 + Qwen + Fake + 5 处迁移 + embedding + call log） | 2026-04-28 | 11 |
 | D | 用户记忆分类（migration 013 + 启发式+LLM 两段 + 质量 A-E + cite_count + 检索加权） | 2026-04-28 | 5 |
-| CC-1 | Character Cognition Phase 1（identity + 12 维 dynamics + emotion inertia + socialModes + context endpoint）| 2026-05-08 | 1（待 commit） |
+| CC-1 | Character Cognition Phase 1（identity + 12 维 dynamics + emotion inertia + socialModes + context endpoint）| 2026-05-08 | 1 |
+| CC-2 | Character Cognition Phase 2（narrative episodes + persistent topics + cron + retrieval enrichment）| 2026-05-08 | 1（待 commit） |
 
 ---
 
