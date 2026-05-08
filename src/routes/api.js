@@ -45,6 +45,11 @@ const {
   listReflections,
   reflectFor,
 } = require("../services/character/reflectionService");
+// Phase 4: behavior planner
+const {
+  evaluate: evaluateBehaviorIntent,
+  INTENT_DEFINITIONS,
+} = require("../services/character/behaviorPlanner");
 const {
   deleteMemoryItemCascade,
   deleteMemoryItemsBatch,
@@ -488,6 +493,24 @@ router.get("/character/reflections", authMiddleware, (req, res) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
   const { assistantId, type = null, limit = 20 } = parsed.data;
   return res.json({ ok: true, reflections: listReflections(assistantId, { limit, type }) });
+});
+
+/**
+ * Phase 4: behavior planner intent (T-CC4-03)
+ * GET /api/character/behavior-intent?assistantId=  当前主推荐意图（debug / admin）
+ * GET /api/character/behavior-intent/vocab          14 个 intent 定义
+ */
+router.get("/character/behavior-intent", authMiddleware, (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const result = evaluateBehaviorIntent(parsed.data.assistantId);
+  if (!result) return res.status(404).json({ ok: false, error: "no_character_state" });
+  return res.json({ ok: true, ...result });
+});
+
+router.get("/character/behavior-intent/vocab", authMiddleware, (_req, res) => {
+  return res.json({ ok: true, intents: INTENT_DEFINITIONS });
 });
 
 router.post("/admin/character/reflect", authMiddleware, async (req, res) => {

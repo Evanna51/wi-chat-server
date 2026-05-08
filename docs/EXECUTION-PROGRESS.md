@@ -474,6 +474,101 @@ stale reflection (15d 前) 不注入 ✓
 
 ---
 
+## 阶段 CC-4: Character Cognition Layer Phase 4（Behavior Planner）
+
+**状态**: ✅ 已完成
+**开始时间**: 2026-05-08
+**完成时间**: 2026-05-08
+**分支**: `feature/character-system`
+
+> Phase 1-3 给了"角色是谁 + 关系怎样 + 过去发生过什么 + AI 怎么理解"。
+> Phase 4 把它们综合成"现在该不该发、发什么意图、用什么姿态"——决定真正的行为。
+
+**子任务**
+
+| # | 任务 | 状态 |
+|---|------|------|
+| T-CC4-01 | behaviorPlanner.js: 14 个 intent + 优先级评分 + identity/dynamics/reflection/topics 综合决策 + buildIntentPromptFragment | ✅ |
+| T-CC4-02 | proactivePlanService.scheduleNextPushPlan 接入：intent='none' 早 return（不打 LLM）；其它 intent 注入 prompt | ✅ |
+| T-CC4-03 | 2 个新 API endpoint（GET /character/behavior-intent + /vocab）| ✅ |
+| T-CC4-04 | 27 断言测试套件（5 suites: 高/中/低优先级 + none/边界 + 优先级竞争）+ 文档 + commit | ✅ |
+
+**新增/修改**
+
+- `src/services/character/behaviorPlanner.js`（370 行：14 intent 定义 + 评分逻辑 + prompt fragment）
+- `src/services/proactivePlanService.js` — scheduleNextPushPlan 顶部调 evaluate，'none' 早 return
+- `src/routes/api.js` — 2 个新端点
+- `tests/behaviorPlanner.test.js` — 27 断言
+
+**14 个 intent**（按优先级排序，详见 [character-cognition-architecture.md](./character-cognition-architecture.md)）：
+- 100: reassure_after_conflict
+- 95: reassure_abandonment_fear
+- 85: pursue_reflection_opportunity
+- 80: reciprocate_vulnerable_share
+- 75: follow_up_unresolved_topic
+- 70: confess_suppressed_feeling
+- 60: reciprocate_gratitude
+- 55: share_topic_progress
+- 50: ritual_check_in / inquisitive_followup
+- 45: playful_check_in
+- 40: philosophical_invite
+- 20: life_check_in（兜底）
+- 0: none（用户 30 分钟内活跃 OR 无信号 → 不发）
+
+**关键决策**
+
+- **不打 LLM 决意图**：14 个触发条件都是 deterministic 阈值，启发式快+可解释+可测
+- **叠加而非替代** proactivePlan 原有逻辑（cooldown / quiet hours / 冲突取消）全部保留
+- **intent='none' 早 return**：节省 LLM 调用 + 避免在不该发时强行生成
+- **优先级竞争**：高优先级 intent 触发时低优先级仍打分（appears in `scores`），方便 admin 调试
+- **挑 socialMode 双路径**：intent.suggestedMode 优先；为空时 fallback 到 chooseSocialMode
+
+**E2E 验证（每个 intent 至少一个测试）**
+
+```
+unresolved_conflict=0.6           → reassure_after_conflict (100) ✓
+abandonment_fear=0.7              → reassure_abandonment_fear (95) ✓
+reflection.opportunities=[...]    → pursue_reflection_opportunity (85) ✓
+last_vulnerable_share=6h ago      → reciprocate_vulnerable_share (80) ✓
+suppressed sad intensity=0.5      → confess_suppressed_feeling (70) ✓
+unresolved topic 10d 未提         → follow_up_unresolved_topic (75) ✓
+growing topic importance=0.6 4d   → share_topic_progress (55) ✓
+playful_teasing trait + 高 closeness → playful_check_in (45) ✓
+12h silence 无信号                → life_check_in (20) ✓
+silenceHours=0.2                  → none ✓
+4 个信号同时触发                  → 取最高优先级 100 ✓
+```
+
+**测试**
+
+- 27 passed, 0 failed (Phase 4)
+- **累计 229 passed, 0 failed (Phase 1-4)**
+- Suite breakdown: 94 cognition + 38 state + 45 narrative + 25 reflection + 27 behavior
+
+**未决/遗留**
+
+- intent 对接的 next-push prompt 中 LLM 真实生成质量未做端到端 LLM 测试（成本+并发限制）
+- intent='none' 路径目前 silenceHours < 0.5 强制 none；将来可由 quiet hours 配置接管
+- behaviorPlanner 当前是 pure synchronous —— 多 assistant 并发评估都是单进程同步顺序，不会拥塞
+
+---
+
+## 7 层架构状态总图（CC-1 ~ CC-4 全部完成）
+
+| 层 | 名称 | 实现位置 | 状态 |
+|---|---|---|---|
+| 1 | Identity | `character/identityService.js` + `identityVocab.js` + migration 025 | ✅ CC-1 |
+| 2 | Relationship Model | `character/relationshipDynamicsService.js` + migration 026 | ✅ CC-1 |
+| 3 | Emotion System (含 inertia) | `characterStateService.js` + migration 027 | ✅ CC-1 |
+| 4 | Narrative Memory | `character/episodeBuilder.js` + migration 028 | ✅ CC-2 |
+| 5 | Topic Persistence | `character/persistentTopicService.js` + migration 028 | ✅ CC-2 |
+| 6 | Reflective | `character/reflectionService.js` + migration 029 | ✅ CC-3 |
+| 7 | Behavior | `character/behaviorPlanner.js` + `socialModes.js` | ✅ CC-4 |
+
+接入点：[`character/characterContextBuilder.js`](../src/services/character/characterContextBuilder.js) 把 7 层聚合到 `POST /api/character/context` + `promptFragment`（≤1500 字硬约束，段级丢弃）。
+
+---
+
 ## 已完成阶段总览
 
 | 阶段 | 描述 | 完成时间 | Commit 数 |
@@ -485,7 +580,8 @@ stale reflection (15d 前) 不注入 ✓
 | D | 用户记忆分类（migration 013 + 启发式+LLM 两段 + 质量 A-E + cite_count + 检索加权） | 2026-04-28 | 5 |
 | CC-1 | Character Cognition Phase 1（identity + 12 维 dynamics + emotion inertia + socialModes + context endpoint）| 2026-05-08 | 1 |
 | CC-2 | Character Cognition Phase 2（narrative episodes + persistent topics + cron + retrieval enrichment）| 2026-05-08 | 1 |
-| CC-3 | Character Cognition Phase 3（relationship reflection: weekly cron + event-triggered + 14d 注入）| 2026-05-08 | 1（待 commit） |
+| CC-3 | Character Cognition Phase 3（relationship reflection: weekly cron + event-triggered + 14d 注入）| 2026-05-08 | 1 |
+| CC-4 | Character Cognition Phase 4（behavior planner: 14 intent + proactive 接入）| 2026-05-08 | 1 |
 
 ---
 

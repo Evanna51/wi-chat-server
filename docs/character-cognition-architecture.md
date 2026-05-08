@@ -16,7 +16,7 @@
 | 4 | Narrative Memory | 天 / 周（episode 化） | ✅ Phase CC-2 完成 |
 | 5 | Topic Persistence | 月级（长期话题） | ✅ Phase CC-2 完成 |
 | 6 | Reflective | 周 / 触发式 | ✅ Phase CC-3 完成 |
-| 7 | Behavior | 实时（合成） | ⏳ Phase CC-4（雏形：socialModes 已落） |
+| 7 | Behavior | 实时（合成） | ✅ Phase CC-4 完成（完整 behaviorPlanner + 14 intent + 接入 proactivePlanService） |
 
 ---
 
@@ -197,17 +197,34 @@ detached / caretaker / inquisitive / ritualistic / confessional / reassuring
 - 14 天以内的 reflection 才注入 prompt（避免老反思误导 LLM）
 - 不读 `getEffectiveState`（衰减后的 mood）防循环依赖（characterStateService 也 require reflectionService）—— 直接 raw character_state，对一周窗口反思精度无影响
 
-### Behavior Layer（CC-4，完整版）
+## 第 7 层：Behavior Layer（CC-4 完成）
 
-`behaviorPlanner.evaluate(assistantId)` 综合 identity + relationship + reflection + topics → 输出意图（intent），喂给现有 `proactivePlanService`。
+[`behaviorPlanner.js`](../src/services/character/behaviorPlanner.js) 综合 identity + relationship + reflection + topics + emotion → 输出意图。**14 个 intent**（按优先级排序）：
 
-intent 候选：
-- check_in_after_silence
-- follow_up_unresolved_topic
-- share_persistent_topic_progress
-- reassure_after_conflict
-- reciprocate_care
-- ...
+| 优先级 | intent | 触发条件 | 建议 socialMode |
+|---|---|---|---|
+| 100 | reassure_after_conflict | unresolved_conflict > 0.4 OR 1h trust drop ≤ -0.15 | reassuring |
+| 95 | reassure_abandonment_fear | abandonment_fear > 0.6 | reassuring |
+| 85 | pursue_reflection_opportunity | reflection.opportunities[0] 存在 | （随 reflection） |
+| 80 | reciprocate_vulnerable_share | last_vulnerable_share_at 在 24h 内 | caretaker |
+| 75 | follow_up_unresolved_topic | topic.status='unresolved' 且 7d+ 未提 | intimate |
+| 70 | confess_suppressed_feeling | suppressed_emotion.intensity > 0.4 | confessional |
+| 60 | reciprocate_gratitude | dynamics.gratitude > 0.5 | intimate |
+| 55 | share_topic_progress | growing/exciting topic 且 importance≥0.5 且 3d+ | casual |
+| 50 | ritual_check_in | level≥5 且 silence 3-14d 且 trust>0.6 | ritualistic |
+| 50 | inquisitive_followup | last vshare 在 1-3d 前 | inquisitive |
+| 45 | playful_check_in | playful_teasing trait + closeness>0.5 + valence>0.2 | teasing |
+| 40 | philosophical_invite | intellectually_romantic + trust>0.5 + 平静 | philosophical |
+| 20 | life_check_in | 8h+ silence + 没其它信号（兜底） | casual |
+| 0 | none | 用户 30 分钟内有消息 OR 无任何信号 | （不发） |
+
+**接入路径**：
+- `proactivePlanService.scheduleNextPushPlan` 调 `behaviorPlanner.evaluate` 得 intent
+- intent='none' → 直接 return `skipped: 'behavior_intent_none'`，不打 LLM
+- 其它 intent → 把 `[这次主动发消息的意图]` 段拼进 next-push prompt
+- 这是**叠加**而非**替代** —— proactivePlan 原有的 cooldown / quiet hours / 冲突取消等逻辑全部保留
+
+**为什么不打 LLM 决意图**：14 个 intent 的触发条件都是 deterministic 的状态阈值，启发式打分快、可解释、可测。LLM 调用留给"具体怎么写出来"那一步。
 
 ---
 

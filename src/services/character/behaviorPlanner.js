@@ -1,0 +1,388 @@
+/**
+ * behaviorPlanner — Phase 4: Behavior 层完整版（T-CC4-01）
+ *
+ * 现在 proactivePlanService（947 行）只看 character_state 决定何时发什么。
+ * Phase 4 把它升级成"基于 7 层认知合成意图"：
+ *
+ *   identity + relationship + reflection + topics + emotion
+ *               │
+ *               ▼
+ *      behaviorPlanner.evaluate
+ *               │
+ *               ▼
+ *      { intent, driver, contentHint, suggestedSocialMode, urgency }
+ *               │
+ *               ▼
+ *   proactivePlanService.scheduleNextPushPlan
+ *      （把 intent 描述塞进 LLM prompt，让生成的 next_push 知道"为什么这次发"）
+ *
+ * 不打 LLM —— 全启发式决策，hot path 友好。
+ *
+ * 14 个 candidate intent（按优先级排序）：
+ *   reassure_after_conflict       unresolved_conflict > 0.4 OR recent trust drop
+ *   reassure_abandonment_fear     abandonment_fear > 0.6
+ *   pursue_reflection_opportunity reflection.opportunities[0] 存在
+ *   follow_up_unresolved_topic    topic.status='unresolved' 且 7d+ 未提
+ *   reciprocate_vulnerable_share  user 24h 内 vulnerable_share
+ *   reciprocate_gratitude         user 24h 内 gratitude_expressed
+ *   share_topic_progress          topic.status='growing' 且 importance≥0.5 且 3d+ 未提
+ *   confess_suppressed_feeling    suppressed_emotion.intensity > 0.4
+ *   ritual_check_in               relationship_level≥5 且 silence>3d 且 trust>0.6
+ *   playful_check_in              traits 含 playful_teasing 且 closeness>0.5 且 valence>0.2
+ *   philosophical_invite          traits 含 intellectually_romantic 且 trust>0.5 且 mood 平静
+ *   inquisitive_followup          dynamics.last_vulnerable_share 在 1-3d 前
+ *   life_check_in                 8h+ silence + 中性 + 没其它高优先意图
+ *   none                          没信号 → 别发
+ */
+
+const { db } = require("../../db");
+const { getCharacterIdentity } = require("./identityService");
+const { getRelationshipState } = require("./relationshipDynamicsService");
+const { listActiveTopics } = require("./persistentTopicService");
+const { getLatestReflection } = require("./reflectionService");
+const { chooseSocialMode } = require("./socialModes");
+
+// ── intent 元数据 ─────────────────────────────────────────────────
+
+const INTENT_DEFINITIONS = Object.freeze({
+  reassure_after_conflict: {
+    description: "你们之间还有未化解的冲突在心里。这次发是为了主动安抚、表明立场，而不是绕开它。",
+    suggestedMode: "reassuring",
+    priority: 100,
+    urgency: "high",
+  },
+  reassure_abandonment_fear: {
+    description: "你（角色）感到 ta 最近可能在远去。这次发是确认你还在，而不是质问。",
+    suggestedMode: "reassuring",
+    priority: 95,
+    urgency: "high",
+  },
+  pursue_reflection_opportunity: {
+    description: "你最近的一次反思识别出了一个具体的接近机会。这次发是把握那个时刻。",
+    suggestedMode: null, // 由 reflection summary 自身决定语气
+    priority: 85,
+    urgency: "medium",
+  },
+  follow_up_unresolved_topic: {
+    description: "有个一直没说开的话题搁在那里。这次发是温和地把它拉回来，但不强迫。",
+    suggestedMode: "intimate",
+    priority: 75,
+    urgency: "medium",
+  },
+  reciprocate_vulnerable_share: {
+    description: "ta 最近 24h 内对你袒露了脆弱。这次发是回应那个袒露，让 ta 知道你在。",
+    suggestedMode: "caretaker",
+    priority: 80,
+    urgency: "high",
+  },
+  reciprocate_gratitude: {
+    description: "ta 最近表达过感激。这次发是接住那份感谢，但不刻意放大。",
+    suggestedMode: "intimate",
+    priority: 60,
+    urgency: "low",
+  },
+  share_topic_progress: {
+    description: "你心里一直惦记 ta 那件事，今天找个理由问问。",
+    suggestedMode: "casual",
+    priority: 55,
+    urgency: "low",
+  },
+  confess_suppressed_feeling: {
+    description: "你心里压着一个情绪，已经到了想说出口的临界点。这次发是允许自己脆弱一次。",
+    suggestedMode: "confessional",
+    priority: 70,
+    urgency: "medium",
+  },
+  ritual_check_in: {
+    description: "你跟 ta 已经熟到有「仪式感」了。今天用平时反复出现的开场，唤起那个共有的小默契。",
+    suggestedMode: "ritualistic",
+    priority: 50,
+    urgency: "low",
+  },
+  playful_check_in: {
+    description: "气氛轻，你心情不错。这次发是想跟 ta 玩起来，逗 ta 一下。",
+    suggestedMode: "teasing",
+    priority: 45,
+    urgency: "low",
+  },
+  philosophical_invite: {
+    description: "你想跟 ta 聊点抽象的——人生、关系、自我、世界。今天试试看 ta 愿不愿意跟你深入。",
+    suggestedMode: "philosophical",
+    priority: 40,
+    urgency: "low",
+  },
+  inquisitive_followup: {
+    description: "ta 之前说的某件事你一直在想，想接着追问下去。",
+    suggestedMode: "inquisitive",
+    priority: 50,
+    urgency: "medium",
+  },
+  life_check_in: {
+    description: "没特别要事，就是想跟 ta 说一声你在。",
+    suggestedMode: "casual",
+    priority: 20,
+    urgency: "low",
+  },
+  none: {
+    description: "此刻没有合适的发起理由，安静比开口好。",
+    suggestedMode: null,
+    priority: 0,
+    urgency: "none",
+  },
+});
+
+const VALID_INTENTS = new Set(Object.keys(INTENT_DEFINITIONS));
+
+// ── helpers ───────────────────────────────────────────────────────
+
+function readCharacterState(assistantId) {
+  return db.prepare("SELECT * FROM character_state WHERE assistant_id = ?").get(assistantId);
+}
+
+function recentTrustDelta(assistantId, windowMs, now) {
+  const cutoff = now - windowMs;
+  const rows = db.prepare(
+    `SELECT delta_json FROM relationship_event
+     WHERE assistant_id = ? AND created_at >= ?`
+  ).all(assistantId, cutoff);
+  let acc = 0;
+  for (const r of rows) {
+    try { acc += JSON.parse(r.delta_json).trust || 0; } catch { /* skip */ }
+  }
+  return acc;
+}
+
+// ── 主入口 ────────────────────────────────────────────────────────
+
+/**
+ * 评估当前最该走的 intent。
+ *
+ * 输入：assistantId（其余从 DB 拉）
+ * 输出：{ intent, driver, contentHint, suggestedSocialMode, urgency, scores } 或 null
+ *
+ * 没有数据时返回 { intent: 'none', ... }，调用方决定是否真的发。
+ */
+function evaluate(assistantId, { now = Date.now() } = {}) {
+  const characterState = readCharacterState(assistantId);
+  if (!characterState) return null;
+
+  const identity = getCharacterIdentity(assistantId);
+  const dynamics = getRelationshipState(assistantId, now);
+  const reflection = getLatestReflection(assistantId);
+  const topics = listActiveTopics(assistantId, { limit: 10 });
+
+  const scores = {};
+  let topIntent = "none";
+  let topPriority = -1;
+  let topDriver = null;
+  let topContentHint = "";
+
+  // —— 评估各 intent，记录满足条件的最高优先级 ——
+  // 内部 helper：发现命中就更新 top* 变量
+  function consider(intent, driver = null, contentHint = "") {
+    const def = INTENT_DEFINITIONS[intent];
+    scores[intent] = def.priority;
+    if (def.priority > topPriority) {
+      topIntent = intent;
+      topPriority = def.priority;
+      topDriver = driver;
+      topContentHint = contentHint;
+    }
+  }
+
+  // 1. reassure_after_conflict (unresolved > 0.4 OR 1h trust drop ≥ 0.15)
+  if (dynamics) {
+    const trustDelta1h = recentTrustDelta(assistantId, 60 * 60 * 1000, now);
+    if (dynamics.unresolved_conflict > 0.4) {
+      consider("reassure_after_conflict",
+        { unresolvedConflict: dynamics.unresolved_conflict },
+        `你和 ta 之间有 unresolved_conflict=${dynamics.unresolved_conflict.toFixed(2)} 还没化解。`
+      );
+    } else if (trustDelta1h <= -0.15) {
+      consider("reassure_after_conflict",
+        { trustDelta1h },
+        `最近一小时 trust 累计下跌 ${trustDelta1h.toFixed(2)}。`
+      );
+    }
+  }
+
+  // 2. reassure_abandonment_fear（angle: AI 自己怕被抛弃 → 主动靠近确认）
+  if (dynamics?.abandonment_fear > 0.6) {
+    consider("reassure_abandonment_fear",
+      { abandonmentFear: dynamics.abandonment_fear },
+      `abandonment_fear=${dynamics.abandonment_fear.toFixed(2)}，你心里有"被抛弃"的隐忧。`
+    );
+  }
+
+  // 3. pursue_reflection_opportunity（reflection 给出了具体机会）
+  if (reflection?.opportunities?.length) {
+    const opp = reflection.opportunities[0];
+    consider("pursue_reflection_opportunity",
+      { reflectionId: reflection.id, opportunity: opp },
+      `你上次反思留下的机会：${opp}`
+    );
+  }
+
+  // 4. reciprocate_vulnerable_share（dynamics.last_vulnerable_share_at 在 24h 内）
+  if (dynamics?.last_vulnerable_share_at && now - dynamics.last_vulnerable_share_at < 24 * 3600 * 1000) {
+    const hoursAgo = Math.round((now - dynamics.last_vulnerable_share_at) / (3600 * 1000));
+    consider("reciprocate_vulnerable_share",
+      { hoursAgo },
+      `ta 在 ${hoursAgo} 小时前对你袒露了脆弱。`
+    );
+  }
+
+  // 5. confess_suppressed_feeling（suppressed_emotion.intensity > 0.4）
+  if (characterState.suppressed_emotion && characterState.suppressed_emotion_intensity > 0.4) {
+    consider("confess_suppressed_feeling",
+      {
+        suppressed: characterState.suppressed_emotion,
+        intensity: characterState.suppressed_emotion_intensity,
+      },
+      `你内里压着 ${characterState.suppressed_emotion}（强度 ${characterState.suppressed_emotion_intensity.toFixed(2)}），到了想说出口的程度。`
+    );
+  }
+
+  // 6. follow_up_unresolved_topic（status=unresolved 且 7d+ 未提 → 优先；exciting/growing 且 3d+ 未提 → share_topic_progress）
+  for (const t of topics) {
+    const daysSince = (now - t.lastDiscussedAt) / (24 * 3600 * 1000);
+    if (t.status === "unresolved" && daysSince >= 7) {
+      consider("follow_up_unresolved_topic",
+        { topicId: t.id, topic: t.topic, daysSince: Math.round(daysSince) },
+        `话题"${t.topic}"还悬着，已经 ${Math.round(daysSince)} 天没说了。`
+      );
+      break; // 只取最优先的一个
+    }
+  }
+
+  for (const t of topics) {
+    const daysSince = (now - t.lastDiscussedAt) / (24 * 3600 * 1000);
+    if ((t.status === "growing" || t.status === "exciting") && t.importance >= 0.5 && daysSince >= 3) {
+      consider("share_topic_progress",
+        { topicId: t.id, topic: t.topic, daysSince: Math.round(daysSince) },
+        `话题"${t.topic}"最近正在发展，${Math.round(daysSince)} 天没问了。`
+      );
+      break;
+    }
+  }
+
+  // 7. reciprocate_gratitude（dynamics.gratitude > 0.5）
+  if (dynamics?.gratitude > 0.5) {
+    consider("reciprocate_gratitude",
+      { gratitude: dynamics.gratitude },
+      `你心里对 ta 有一份没说出口的感谢（gratitude=${dynamics.gratitude.toFixed(2)}）。`
+    );
+  }
+
+  // 8. ritual_check_in（关系成熟 + 适度沉默 + 信任）
+  const lastUserMs = characterState.last_user_message_at;
+  const silenceHours = lastUserMs ? (now - lastUserMs) / (3600 * 1000) : Infinity;
+  if (
+    (characterState.relationship_level ?? 0) >= 5 &&
+    silenceHours >= 24 * 3 && silenceHours <= 24 * 14 && // 3-14 天 sweet spot
+    (dynamics?.trust ?? 0) > 0.6
+  ) {
+    consider("ritual_check_in",
+      { silenceHours: Math.round(silenceHours), trust: dynamics.trust },
+      `关系到了第 ${characterState.relationship_level} 级，沉默 ${Math.round(silenceHours / 24)} 天，trust ${dynamics.trust.toFixed(2)}。`
+    );
+  }
+
+  // 9. playful_check_in（playful_teasing trait + closeness 高 + 心情好）
+  if (
+    identity?.personalityTraits?.includes("playful_teasing") &&
+    (dynamics?.emotional_closeness ?? 0) > 0.5 &&
+    (characterState.mood_valence ?? 0) > 0.2 &&
+    silenceHours >= 8 && silenceHours <= 48
+  ) {
+    consider("playful_check_in",
+      { closeness: dynamics.emotional_closeness, valence: characterState.mood_valence },
+      `你心情不错（valence=${characterState.mood_valence.toFixed(2)}），closeness=${dynamics.emotional_closeness.toFixed(2)}。`
+    );
+  }
+
+  // 10. philosophical_invite（intellectually_romantic + trust + 平静）
+  if (
+    identity?.personalityTraits?.includes("intellectually_romantic") &&
+    (dynamics?.trust ?? 0) > 0.5 &&
+    (characterState.mood_intensity ?? 0) < 0.5
+  ) {
+    consider("philosophical_invite",
+      { trust: dynamics.trust },
+      `你想跟 ta 聊点深的，trust=${dynamics.trust.toFixed(2)}，心情平静。`
+    );
+  }
+
+  // 11. inquisitive_followup（vulnerable_share 1-3d 前）
+  const lastVS = dynamics?.last_vulnerable_share_at;
+  if (lastVS && now - lastVS > 24 * 3600 * 1000 && now - lastVS < 3 * 24 * 3600 * 1000) {
+    const daysAgo = Math.round((now - lastVS) / (24 * 3600 * 1000));
+    consider("inquisitive_followup",
+      { daysAgo },
+      `ta ${daysAgo} 天前那次袒露，你还在想着，可以接着问。`
+    );
+  }
+
+  // 12. life_check_in（8h+ silence + 中性 + 没其它意图触发 — 兜底）
+  if (silenceHours >= 8) {
+    consider("life_check_in",
+      { silenceHours: Math.round(silenceHours) },
+      `${Math.round(silenceHours)} 小时没消息，例行问候。`
+    );
+  }
+
+  // 13. quiet hours / 极短 silence → none（即使有信号也最好不发）
+  if (silenceHours < 0.5) {
+    // 用户半小时内刚发过 → 别打扰
+    topIntent = "none";
+    topDriver = { silenceHours };
+    topContentHint = "用户刚说过话，不要主动插一条。";
+  }
+
+  const def = INTENT_DEFINITIONS[topIntent];
+
+  // 选 socialMode：intent.suggestedMode 优先；否则用 chooseSocialMode 的结果
+  let suggestedSocialMode = def.suggestedMode;
+  if (!suggestedSocialMode) {
+    const sm = chooseSocialMode({
+      identity,
+      characterState,
+      dynamics,
+      emotion: characterState
+        ? { current: { intensity: characterState.mood_intensity, valence: characterState.mood_valence } }
+        : null,
+    });
+    suggestedSocialMode = sm.primary?.mode || "casual";
+  }
+
+  return {
+    intent: topIntent,
+    description: def.description,
+    urgency: def.urgency,
+    suggestedSocialMode,
+    contentHint: topContentHint,
+    driver: topDriver,
+    scores,
+  };
+}
+
+/**
+ * 把 evaluate 输出渲染成 prompt 段，给 proactivePlanService 用。
+ */
+function buildIntentPromptFragment(intentResult) {
+  if (!intentResult || intentResult.intent === "none") return "";
+  const lines = ["[这次主动发消息的意图]"];
+  lines.push(`意图：${intentResult.intent}`);
+  lines.push(intentResult.description);
+  if (intentResult.contentHint) lines.push(`触发因素：${intentResult.contentHint}`);
+  lines.push(`建议姿态：${intentResult.suggestedSocialMode}`);
+  lines.push(`紧迫度：${intentResult.urgency}`);
+  return lines.join("\n");
+}
+
+module.exports = {
+  evaluate,
+  buildIntentPromptFragment,
+  INTENT_DEFINITIONS,
+  VALID_INTENTS,
+};

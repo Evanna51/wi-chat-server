@@ -8,6 +8,11 @@ const {
   buildIdentityPromptFragment,
 } = require("./character/identityService");
 const { buildRelationshipFragment } = require("./character/relationshipDynamicsService");
+// T-CC4-02: behavior intent 注入
+const {
+  evaluate: evaluateBehaviorIntent,
+  buildIntentPromptFragment,
+} = require("./character/behaviorPlanner");
 const {
   db,
   getAssistantProfile,
@@ -708,6 +713,7 @@ function buildNextPushPrompt({
   stateFragment,
   identityFragment,
   dynamicsFragment,
+  intentFragment,
   nowIso,
   hoursSinceLastUserReply,
 }) {
@@ -739,6 +745,8 @@ function buildNextPushPrompt({
     ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
     ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
+    // T-CC4-02 注入：本次主动消息的意图（behaviorPlanner 决策）
+    ...(intentFragment ? [intentFragment, ""] : []),
     "角色档案：",
     clipText(characterBackground || "无", 600),
     "",
@@ -872,6 +880,17 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
     const dynamicsFragment = (() => {
       try { return buildRelationshipFragment(assistantId); } catch { return ""; }
     })();
+    // T-CC4-02: behaviorPlanner 决策本次推送意图。intent='none' 时早 return，不发。
+    const intentResult = (() => {
+      try { return evaluateBehaviorIntent(assistantId, { now }); } catch (err) {
+        console.warn(`[proactive] intent eval failed: ${err.message}`);
+        return null;
+      }
+    })();
+    if (intentResult?.intent === "none") {
+      return { ok: true, skipped: "behavior_intent_none", driver: intentResult.driver };
+    }
+    const intentFragment = intentResult ? buildIntentPromptFragment(intentResult) : "";
 
     const prompt = buildNextPushPrompt({
       characterName: profile.character_name || assistantId,
@@ -885,6 +904,7 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       stateFragment,
       identityFragment,
       dynamicsFragment,
+      intentFragment,
       nowIso: new Date(now).toISOString(),
       hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });
