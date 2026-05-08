@@ -1,0 +1,22 @@
+{
+  "name": "12-decay-old-chitchat",
+  "description": "30 天前的闲聊（半衰期 14d）应被 1 天前的同主题强偏好压过",
+  "assistantId": "eval-fix-12",
+  "sessionId": "eval-fix-12-s",
+  "seed": [
+    { "role": "user", "content": "看了一部恐怖片觉得蛮一般。", "createdAtOffsetMs": -2592000000 },
+    { "role": "user", "content": "我特别讨厌恐怖片，看完会失眠好几天，不要推荐。", "createdAtOffsetMs": -86400000 }
+  ],
+  "postSeedActions": [
+    { "type": "setCategory", "matchHints": ["蛮一般"], "category": "chitchat", "qualityGrade": "C" },
+    { "type": "setCategory", "matchHints": ["失眠好几天"], "category": "preferences", "qualityGrade": "A" }
+  ],
+  "query": "我对恐怖片什么态度？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["失眠好几天"], "minRank": 1, "maxRank": 1 }
+    ]
+  }
+}

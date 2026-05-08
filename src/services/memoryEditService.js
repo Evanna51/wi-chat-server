@@ -249,12 +249,15 @@ function setMemoryQuality(memoryId, grade, opts = {}) {
 
 /**
  * 给一条 memory 加 fact。如果 (memory_id, fact_key) 已存在，按 confidence 决定覆盖/丢弃。
+ *
+ * importance（0-1，默认 0.5）= 这个 fact 对角色行为影响多大，与 confidence 正交。
+ * 健康/重大身份建议 0.9+；偏好/兴趣 0.3-0.5。bootstrap 的 coreFacts 按其综合分排序。
  */
-function addFact({ memoryId, factKey, factValue, confidence = 0.8, opts = {} }) {
+function addFact({ memoryId, factKey, factValue, confidence = 0.8, importance = 0.5, opts = {} }) {
   if (!memoryId || !factKey || !factValue) {
     return { added: false, reason: "missing_required_field" };
   }
-  const memRow = db.prepare("SELECT id, assistant_id, session_id FROM memory_items WHERE id = ?").get(memoryId);
+  const memRow = db.prepare("SELECT id, assistant_id, session_id, created_at FROM memory_items WHERE id = ?").get(memoryId);
   if (!memRow) return { added: false, reason: "memory_not_found" };
   if (opts.assistantId && memRow.assistant_id !== opts.assistantId) {
     return { added: false, reason: "assistant_mismatch" };
@@ -267,14 +270,17 @@ function addFact({ memoryId, factKey, factValue, confidence = 0.8, opts = {} }) 
     return { added: false, reason: "existing_higher_confidence" };
   }
 
+  const clampedImportance = Math.max(0, Math.min(1, importance));
+  const eventTime = memRow.created_at || Date.now();
+
   db.transaction(() => {
     if (existing) {
       db.prepare("DELETE FROM memory_facts WHERE id = ?").run(existing.id);
     }
     db.prepare(
       `INSERT INTO memory_facts
-         (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, importance, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       uuidv7(),
       memRow.assistant_id,
@@ -283,7 +289,8 @@ function addFact({ memoryId, factKey, factValue, confidence = 0.8, opts = {} }) 
       factKey,
       factValue,
       confidence,
-      Date.now()
+      clampedImportance,
+      eventTime
     );
   })();
 
@@ -293,7 +300,7 @@ function addFact({ memoryId, factKey, factValue, confidence = 0.8, opts = {} }) 
     action: AUDIT_ACTIONS.ADD_FACT,
     actor: opts.actor || "ai",
     reason: opts.reason || null,
-    payload: { factKey, factValue, confidence, replacedExisting: !!existing },
+    payload: { factKey, factValue, confidence, importance: clampedImportance, replacedExisting: !!existing },
   });
 
   return { added: true, replacedExisting: !!existing };
@@ -445,6 +452,56 @@ function getCoreMemories(assistantId, { limit = 8 } = {}) {
   }));
 }
 
+/**
+ * 拉取本 assistant 的关键 facts（importance + confidence 综合分高的）—— 给 bootstrap 注入用。
+ *
+ * 综合分 = importance * 0.6 + confidence * 0.4
+ *   importance 主导：让"对角色行为影响大"的 fact 浮上来
+ *   confidence 收尾：同等重要时，提取得更准的优先
+ *
+ * minScore 默认 0.55：滤掉两者都偏低的 fact（importance=0.5 + confidence=0.6 的存量数据
+ * 综合分 0.54，正好不进；新写入由 LLM 显式打分通常 > 0.55）。
+ *
+ * 同 fact_key 在不同 memory_item 上可能重复（例如多次提到偏好），按 key 去重保最高分。
+ */
+function getCoreFacts(assistantId, { limit = 15, minScore = 0.55 } = {}) {
+  if (!assistantId) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, fact_key, fact_value, confidence, importance,
+              memory_item_id, created_at,
+              (importance * 0.6 + confidence * 0.4) AS composite_score
+         FROM memory_facts
+        WHERE assistant_id = ?
+          AND (importance * 0.6 + confidence * 0.4) >= ?
+        ORDER BY composite_score DESC, created_at DESC
+        LIMIT ?`
+    )
+    .all(assistantId, minScore, limit * 3); // 多取 3x 留给 dedup
+
+  const byKey = new Map();
+  for (const r of rows) {
+    const prev = byKey.get(r.fact_key);
+    if (!prev || r.composite_score > prev.composite_score) {
+      byKey.set(r.fact_key, r);
+    }
+  }
+  const deduped = Array.from(byKey.values())
+    .sort((a, b) => b.composite_score - a.composite_score)
+    .slice(0, limit);
+
+  return deduped.map((r) => ({
+    id: r.id,
+    factKey: r.fact_key,
+    factValue: r.fact_value,
+    confidence: r.confidence,
+    importance: r.importance,
+    score: Number(r.composite_score.toFixed(3)),
+    memoryItemId: r.memory_item_id,
+    createdAt: r.created_at,
+  }));
+}
+
 module.exports = {
   deleteConversationTurnCascade,
   deleteMemoryItemCascade,
@@ -455,5 +512,6 @@ module.exports = {
   removeFact,
   setMemoryPinned,
   getCoreMemories,
+  getCoreFacts,
   AUDIT_ACTIONS,
 };

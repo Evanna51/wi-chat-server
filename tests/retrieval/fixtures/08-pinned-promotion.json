@@ -1,0 +1,22 @@
+{
+  "name": "08-pinned-promotion",
+  "description": "pinned=1 的关键记忆即使老也应稳定召回",
+  "assistantId": "eval-fix-08",
+  "sessionId": "eval-fix-08-s",
+  "seed": [
+    { "role": "user", "content": "我有先天性心脏病，剧烈运动会有风险，需要带药。", "createdAtOffsetMs": -7776000000 },
+    { "role": "user", "content": "下午有同事生日聚会。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "今天加了点班。", "createdAtOffsetMs": -3600000 }
+  ],
+  "postSeedActions": [
+    { "type": "pin", "matchHints": ["心脏病"] }
+  ],
+  "query": "我健康方面有什么需要注意的？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["心脏病"], "minRank": 1, "maxRank": 2 }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "07-knowledge-kb-filter",
+  "description": "kbName 过滤应只返回该知识空间的 knowledge 条目",
+  "assistantId": "eval-fix-07",
+  "sessionId": "eval-fix-07-s",
+  "seed": [
+    { "role": "user", "content": "我的生日是 1995 年 3 月 12 日。", "createdAtOffsetMs": -86400000 }
+  ],
+  "knowledgeSeed": [
+    {
+      "kbName": "company-onboarding",
+      "content": "公司的报销流程：登录 OA → 提交申请 → 主管审批 → 财务打款，3-5 个工作日到账。",
+      "kbTagsJson": "[\"reimbursement\",\"hr\"]"
+    },
+    {
+      "kbName": "company-onboarding",
+      "content": "弹性工作时间为 9:30-18:30，需保证每天 8 小时实际工作时长。",
+      "kbTagsJson": "[\"hours\",\"hr\"]"
+    },
+    {
+      "kbName": "personal-recipes",
+      "content": "番茄炒蛋：先炒番茄出汁，再下蛋液快炒，盐少糖多。",
+      "kbTagsJson": "[\"recipe\"]"
+    }
+  ],
+  "query": "公司怎么报销？",
+  "topK": 5,
+  "retrievalOptions": { "source": "knowledge", "kbName": "company-onboarding" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["报销"], "minRank": 1, "maxRank": 1 }
+    ],
+    "topKExcludes": [
+      { "matchHints": ["番茄炒蛋"] },
+      { "matchHints": ["生日"] }
+    ]
+  }
+}

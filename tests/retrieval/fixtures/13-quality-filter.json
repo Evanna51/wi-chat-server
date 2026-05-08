@@ -1,0 +1,25 @@
+{
+  "name": "13-quality-filter",
+  "description": "minQuality='B' 应排除 D/E 质量条目",
+  "assistantId": "eval-fix-13",
+  "sessionId": "eval-fix-13-s",
+  "seed": [
+    { "role": "user", "content": "我房贷还有 18 年，每月利息加本金一万二。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "嗯。", "createdAtOffsetMs": -3600000 }
+  ],
+  "postSeedActions": [
+    { "type": "setCategory", "matchHints": ["房贷"], "category": "personal_experience", "qualityGrade": "A" },
+    { "type": "setCategory", "matchHints": ["嗯。"], "category": "chitchat", "qualityGrade": "E" }
+  ],
+  "query": "我有什么财务负担？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user", "minQuality": "B" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["房贷"], "minRank": 1, "maxRank": 1 }
+    ],
+    "topKExcludes": [
+      { "matchHints": ["嗯。"] }
+    ]
+  }
+}

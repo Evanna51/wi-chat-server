@@ -61,9 +61,7 @@ function buildQuery(args) {
     "outbox_events",
     "character_behavior_journal",
     "assistant_profile",
-    "proactive_message_log",
     "local_outbox_messages",
-    "local_subscribers",
     "push_token",
   ]);
   if (!allowedTables.has(args.table)) {
@@ -83,10 +81,9 @@ function buildQuery(args) {
     "memory_vectors",
     "character_behavior_journal",
     "assistant_profile",
-    "proactive_message_log",
     "local_outbox_messages",
   ]).has(args.table);
-  const hasUserId = new Set(["local_outbox_messages", "local_subscribers", "push_token"]).has(
+  const hasUserId = new Set(["local_outbox_messages", "push_token"]).has(
     args.table
   );
   const hasSessionId = new Set([
@@ -95,7 +92,6 @@ function buildQuery(args) {
     "memory_facts",
     "memory_retrieval_log",
     "character_behavior_journal",
-    "proactive_message_log",
     "local_outbox_messages",
   ]).has(args.table);
   const supportsNameLookup = hasAssistantId || args.table === "assistant_profile";
@@ -161,10 +157,8 @@ function buildQuery(args) {
     "memory_retrieval_log",
     "outbox_events",
     "character_behavior_journal",
-    "proactive_message_log",
     "local_outbox_messages",
     "push_token",
-    "local_subscribers",
   ]).has(args.table);
   const timeColumn = hasCreatedAt ? "created_at" : "updated_at";
 
@@ -186,13 +180,13 @@ Usage:
   npm run db:query -- --life --assistant <assistant_id> --limit 20
 
 Options:
-  --table      conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events|character_behavior_journal|assistant_profile|proactive_message_log|local_outbox_messages|local_subscribers|push_token
+  --table      conversation_turns|memory_items|memory_facts|memory_retrieval_log|outbox_events|character_behavior_journal|assistant_profile|local_outbox_messages|push_token
   --assistant  filter assistant_id
-  --user       filter user_id (local_outbox_messages|local_subscribers|push_token)
+  --user       filter user_id (local_outbox_messages|push_token)
   --name       fuzzy filter character_name, then map to assistant_id (supports multi-match)
   --session    filter session_id
   --role       filter role (only conversation_turns)
-  --memory-type  filter memory_type (only memory_items, e.g. life_event|work_event|user_turn|assistant_turn)
+  --memory-type  filter memory_type (only memory_items, e.g. user_turn|life_event|work_event|knowledge)
   --message-type  filter message_type (only local_outbox_messages, e.g. character_proactive)
   --run-type   filter run_type (only character_behavior_journal, e.g. life_tick|proactive_message_tick)
   --status     filter status (character_behavior_journal|local_outbox_messages)
@@ -208,7 +202,6 @@ Examples:
   npm run db:query -- --table conversation_turns --name 金琉 --limit 10
   npm run db:query -- --table character_behavior_journal --assistant d244... --run-type life_tick --limit 10
   npm run db:query -- --table local_outbox_messages --user default-user --status pending --limit 20
-  npm run db:query -- --table proactive_message_log --assistant d244... --limit 20
   npm run db:query -- --life --assistant d244... --limit 10
   npm run db:query -- --table memory_items --assistant d244... --memory-type life_event --limit 10
   npm run db:query -- --table memory_items --assistant d244... --from "2026-03-13T00:00:00+08:00" --json

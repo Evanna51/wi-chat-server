@@ -93,7 +93,7 @@ function classifyHeuristic(content) {
 // ── LLM classification + fact extraction ────────────────────────────────────
 
 const LLM_PROMPT_TEMPLATE = `将以下用户消息打标 + 抽事实，必须严格返回 JSON：
-{"category":"<id>","quality":"A|B|C|D|E","confidence":0.0~1.0,"facts":[{"key":"<snake_case>","value":"<≤50字>","confidence":0.0~1.0}]}
+{"category":"<id>","quality":"A|B|C|D|E","confidence":0.0~1.0,"facts":[{"key":"<snake_case>","value":"<≤50字>","confidence":0.0~1.0,"importance":0.0~1.0}]}
 
 类别：chitchat / personal_experience / relationship_info / knowledge / goals_plans / preferences / decisions_reflections / wellbeing / ideas
 
@@ -106,14 +106,33 @@ facts 抽取规则（重点）：
 - 否定/含糊/反讽/第三方主语 → 不抽
 - 闲聊 / 单字应答 / 噪声 → facts: []
 
+confidence vs importance（两个维度正交，分别评估）：
+- confidence = 这个 fact 提取得准不准。原句直白明确 → 0.9+；含糊推断 → 0.5-0.7
+- importance = 这个 fact 对角色行为影响多大（"该不该天天记着这件事"）
+  · 0.9-1.0：健康状况/重大身份/不可逆决定（"糖尿病"/"已婚"/"刚失业"）
+  · 0.7-0.9：长期关系/职业/居住地/重大目标（"妈妈是医生"/"在做 AI 创业"）
+  · 0.5-0.7：习惯/技能/中度偏好（"早起跑步"/"会弹吉他"）
+  · 0.3-0.5：轻偏好/兴趣（"喜欢拿铁"/"最近在看《三体》"）
+  · <0.3：临时心情/一次性事件
+
 正例：
-  "我每天早上六点起床跑步" → facts: [{"key":"habit_morning","value":"6点起床跑步","confidence":0.9}]
-  "我妈妈是医生，我爸是工程师" → facts: [{"key":"relationship_with_mom","value":"医生","confidence":0.9},{"key":"relationship_with_dad","value":"工程师","confidence":0.9}]
-  "我超喜欢拿铁" → facts: [{"key":"preference_like","value":"拿铁","confidence":0.9}]
+  "我每天早上六点起床跑步" → [{"key":"habit_morning","value":"6点起床跑步","confidence":0.9,"importance":0.6}]
+  "我妈妈是医生" → [{"key":"relationship_with_mom","value":"医生","confidence":0.9,"importance":0.8}]
+  "我超喜欢拿铁" → [{"key":"preference_like","value":"拿铁","confidence":0.9,"importance":0.4}]
+  "我有糖尿病" → [{"key":"health_condition","value":"糖尿病","confidence":0.95,"importance":0.95}]
 反例（不抽）：
   "嗯" → facts: []
   "他喜欢打篮球" → facts: []  (主语不是用户)
   "我不喜欢咖啡其实" → facts: [] (有否定/反复)
+
+⚠️ 角色称谓硬规则（务必遵守）：
+- 当 fact 涉及对话另一方（即角色本身）时，**必须使用具体角色名 "__CHARACTER_NAME__"**
+- **绝对禁止**在 fact_value 里出现 "AI" / "助手" / "assistant" / "bot" / "我" 这类代称
+- 示例（角色名为"金宵"时）：
+  "你还记得我握着你的手吗" →
+    [{"key":"shared_moment_with_user","value":"用户握过金宵的手","confidence":0.85,"importance":0.6}]
+  ❌ 错误："用户握过 AI 的手" / "用户握过我的手"
+  ✅ 正确："用户握过金宵的手"
 
 消息：「__CONTENT__」`;
 
@@ -130,26 +149,54 @@ function sanitizeFactValue(v) {
   return cleaned.slice(0, 50);
 }
 
-function parseFactsArray(raw) {
+/**
+ * Post-process safety net：把 fact_value 里的 "AI" / "助手" / "assistant" / "bot" 等
+ * 通用代称替换成具体角色名。即使 LLM 没听话，事实也能落到正确人称。
+ *
+ * 策略：词边界尽量友好，中文上下文里 "AI" 直接替换；"助手" 单独出现时替换；
+ * 原句里如果用户自己写了 "AI 推荐..." 这种正向陈述，不动（不在 fact_value 中替换）。
+ * 这里只针对 fact_value（已经是 LLM 输出的"事实摘要"，正常不该出现这些词）。
+ */
+function replaceGenericPersona(text, characterName) {
+  if (!text || !characterName) return text;
+  return text
+    .replace(/\bAI\b/g, characterName)
+    .replace(/\bassistant\b/gi, characterName)
+    .replace(/\bbot\b/gi, characterName)
+    .replace(/助手/g, characterName);
+}
+
+function parseFactsArray(raw, characterName = null) {
   if (!Array.isArray(raw)) return [];
   const out = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const key = sanitizeFactKey(item.key);
-    const value = sanitizeFactValue(item.value);
+    let value = sanitizeFactValue(item.value);
     if (!key || !value) continue;
+    if (characterName) value = replaceGenericPersona(value, characterName);
     const confidence = clamp01(typeof item.confidence === "number" ? item.confidence : 0.7);
-    out.push({ key, value, confidence });
+    const importance = clamp01(typeof item.importance === "number" ? item.importance : 0.5);
+    out.push({ key, value, confidence, importance });
     if (out.length >= 5) break; // 单条 turn 最多 5 个 fact，防止 LLM 灌水
   }
   return out;
 }
 
-async function classifyWithLLM(content) {
+/**
+ * @param {string} content
+ * @param {object} [opts]
+ * @param {string} [opts.characterName] 角色名，用于 prompt 注入 + post-process 替换 AI/助手
+ */
+async function classifyWithLLM(content, opts = {}) {
   const text = (content || "").trim();
   if (!text) return { category: "chitchat", quality: "E", confidence: 0.95, facts: [] };
 
-  const prompt = LLM_PROMPT_TEMPLATE.replace("__CONTENT__", text.slice(0, 500));
+  const characterName = (opts.characterName || "").trim();
+  const promptCharacter = characterName || "（未指定角色名）";
+  const prompt = LLM_PROMPT_TEMPLATE
+    .replace(/__CHARACTER_NAME__/g, promptCharacter)
+    .replace("__CONTENT__", text.slice(0, 500));
   const { content: raw } = await getProvider().complete({
     messages: [{ role: "user", content: prompt }],
     responseFormat: "json",
@@ -167,7 +214,9 @@ async function classifyWithLLM(content) {
   const quality  = VALID_GRADES.has(parsed?.quality) ? parsed.quality : null;
   if (!category || !quality) return null;
 
-  const facts = FACT_BEARING_CATEGORIES.has(category) ? parseFactsArray(parsed?.facts) : [];
+  const facts = FACT_BEARING_CATEGORIES.has(category)
+    ? parseFactsArray(parsed?.facts, characterName)
+    : [];
 
   return {
     category,
@@ -191,18 +240,21 @@ const updateStmt = db.prepare(
 
 const insertFactStmt = db.prepare(
   `INSERT INTO memory_facts
-     (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, importance, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 
 /**
  * 把 facts 写入 memory_facts。需要 memory_item 的 assistant_id / session_id。
  * 同 memory_item + 同 fact_key 时去重（保留 confidence 高的那条）。
+ *
+ * fact.created_at 用 **源 memory_item 的 created_at**（事件原始时间），
+ * 不用 Date.now()——后者只是 LLM 抽取时刻，对检索/排序无意义。
  */
 function persistFactsForMemory(memoryId, facts) {
   if (!facts || facts.length === 0) return 0;
   const memRow = db
-    .prepare("SELECT assistant_id, session_id FROM memory_items WHERE id = ?")
+    .prepare("SELECT assistant_id, session_id, created_at FROM memory_items WHERE id = ?")
     .get(memoryId);
   if (!memRow) return 0;
 
@@ -211,7 +263,7 @@ function persistFactsForMemory(memoryId, facts) {
     .all(memoryId);
   const existingMap = new Map(existing.map((r) => [r.fact_key, r.confidence]));
 
-  const now = Date.now();
+  const eventTime = memRow.created_at || Date.now();
   let written = 0;
   const tx = db.transaction(() => {
     for (const f of facts) {
@@ -230,7 +282,8 @@ function persistFactsForMemory(memoryId, facts) {
         f.key,
         f.value,
         f.confidence,
-        now
+        typeof f.importance === "number" ? clamp01(f.importance) : 0.5,
+        eventTime
       );
       written += 1;
     }
@@ -247,18 +300,24 @@ function persistFactsForMemory(memoryId, facts) {
  */
 async function classifyAndPersist(memoryId, content, { force = false } = {}) {
   const row = db.prepare(
-    `SELECT memory_type, memory_category FROM memory_items WHERE id = ?`
+    `SELECT memory_type, memory_category, assistant_id FROM memory_items WHERE id = ?`
   ).get(memoryId);
   if (!row) return { skipped: "not_found" };
   if (row.memory_type !== "user_turn") return { skipped: "non_user_turn" };
   if (row.memory_category && !force) return { skipped: "already_classified" };
+
+  // 拉角色名给 LLM prompt + post-process 用，让 fact_value 不再出现 "AI"/"助手" 代称
+  const profileRow = row.assistant_id
+    ? db.prepare("SELECT character_name FROM assistant_profile WHERE assistant_id = ?").get(row.assistant_id)
+    : null;
+  const characterName = profileRow?.character_name || null;
 
   let result = classifyHeuristic(content);
   let method = "heuristic";
 
   if (!result) {
     try {
-      result = await classifyWithLLM(content);
+      result = await classifyWithLLM(content, { characterName });
       method = "llm";
     } catch {
       result = null;
@@ -270,7 +329,7 @@ async function classifyAndPersist(memoryId, content, { force = false } = {}) {
     (content || "").trim().length >= 15
   ) {
     try {
-      const llmAux = await classifyWithLLM(content);
+      const llmAux = await classifyWithLLM(content, { characterName });
       if (llmAux && Array.isArray(llmAux.facts) && llmAux.facts.length > 0) {
         result.facts = llmAux.facts;
         method = "heuristic+llm_facts";
@@ -350,8 +409,9 @@ async function backfillMissingFacts({ limit = 20 } = {}) {
   const placeholders = factTypes.map(() => "?").join(",");
   const rows = db
     .prepare(
-      `SELECT m.id, m.content
+      `SELECT m.id, m.content, m.assistant_id, p.character_name
          FROM memory_items m
+         LEFT JOIN assistant_profile p ON p.assistant_id = m.assistant_id
         WHERE m.memory_type = 'user_turn'
           AND m.memory_category IN (${placeholders})
           AND m.category_method = 'llm'
@@ -369,7 +429,7 @@ async function backfillMissingFacts({ limit = 20 } = {}) {
   for (const r of rows) {
     let llmResult;
     try {
-      llmResult = await classifyWithLLM(r.content);
+      llmResult = await classifyWithLLM(r.content, { characterName: r.character_name || null });
       llmCalls += 1;
     } catch {
       continue;

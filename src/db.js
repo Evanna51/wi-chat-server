@@ -18,6 +18,27 @@ db.pragma("cache_size = -65536");
 db.pragma("wal_autocheckpoint = 1000");
 runMigrations(db, path.join(__dirname, "db", "migrations"));
 
+// 启动时校验 config.vectorDim 与 DB 已存数据一致。
+// 若 memory_vectors 为空，跳过（首次启动）；否则不一致直接退出，避免 reembed/检索全错算。
+(function assertVectorDim() {
+  try {
+    const row = db
+      .prepare("SELECT vector_dim FROM memory_vectors WHERE vector_dim IS NOT NULL LIMIT 1")
+      .get();
+    if (!row) return;
+    if (row.vector_dim !== config.vectorDim) {
+      console.error(
+        `[db] FATAL: VECTOR_DIM mismatch. config=${config.vectorDim}, db=${row.vector_dim}. ` +
+          `请检查 .env 的 VECTOR_DIM 是否与 embed 模型实际输出维度一致。`
+      );
+      process.exit(1);
+    }
+  } catch (err) {
+    // 表还没建出来（极早期 migration 失败）走不到这；如果是其它读错误，宁可让后续逻辑暴露。
+    console.warn("[db] vector_dim assertion skipped:", err.message);
+  }
+})();
+
 function upsertCharacterState(assistantId, patch = {}) {
   const now = Date.now();
   const row = db
@@ -91,6 +112,34 @@ function insertConversationTurn({
   return turnId;
 }
 
+/**
+ * 更新单条 conversation_turn 的 content（WS message_update 用）。
+ * 同步把派生的 memory_item.content 一起改 + 标 vector_status='pending' 让 indexer 重 embed。
+ * memory_facts 不改（旧 facts 是从旧 content 抽的，留给 AI 后续 memory-correct 再修）。
+ *
+ * 返回 { found, updated, memoryUpdated }。
+ */
+function updateConversationTurnContent({ id, newContent, assistantId = null }) {
+  if (!id || typeof newContent !== "string" || !newContent.length) {
+    return { found: false, updated: false, reason: "missing_required_field" };
+  }
+  const row = db
+    .prepare("SELECT id, assistant_id FROM conversation_turns WHERE id = ?")
+    .get(id);
+  if (!row) return { found: false, updated: false, reason: "turn_not_found" };
+  if (assistantId && row.assistant_id !== assistantId) {
+    return { found: false, updated: false, reason: "assistant_mismatch" };
+  }
+  const now = Date.now();
+  db.prepare("UPDATE conversation_turns SET content = ? WHERE id = ?").run(newContent, id);
+  const memUpd = db.prepare(
+    `UPDATE memory_items
+        SET content = ?, vector_status = 'pending', updated_at = ?
+      WHERE source_turn_id = ?`
+  ).run(newContent, now, id);
+  return { found: true, updated: true, memoryUpdated: memUpd.changes || 0 };
+}
+
 function findConversationTurnById(id) {
   if (!id) return undefined;
   return db
@@ -127,16 +176,32 @@ function findMemoryItemBySourceTurnId(sourceTurnId) {
     .get(sourceTurnId);
 }
 
+// 合法 memory_type 集合 — 凡是写入 memory_items 表的 type 必须在这里。
+// assistant 回复 / tool_call / tool_result / system 都不进 memory_items，
+// 仅写 conversation_turns（由 memoryIngestService 上游 short-circuit）；这里再做一道防线。
+const ALLOWED_MEMORY_TYPES = new Set([
+  "user_turn",
+  "life_event",
+  "work_event",
+  "knowledge",
+]);
+
 function insertMemoryItem({
   assistantId,
   sessionId,
   sourceTurnId,
   content,
-  memoryType = "turn",
+  memoryType,
   salience = 0.5,
   confidence = 0.7,
   createdAt = null,  // 真实事件时间（即对应 turn 的 createdAt）；不传则用 now
 }) {
+  if (!ALLOWED_MEMORY_TYPES.has(memoryType)) {
+    throw new Error(
+      `insertMemoryItem: invalid memory_type='${memoryType}'. ` +
+        `Allowed: ${[...ALLOWED_MEMORY_TYPES].join(", ")}`
+    );
+  }
   const ingestNow = Date.now();
   const eventTime = createdAt != null ? createdAt : ingestNow;
   const id = uuidv7();
@@ -284,7 +349,7 @@ function getRecentTurnsAcrossSessions({ assistantId, limit = 8 }) {
 function getConfidentFactsForAssistant({ assistantId, minConfidence = 0.5, limit = 30 }) {
   return db
     .prepare(
-      `SELECT id, fact_key, fact_value, confidence, memory_item_id, session_id, created_at
+      `SELECT id, fact_key, fact_value, confidence, importance, memory_item_id, session_id, created_at
        FROM memory_facts
        WHERE assistant_id = ? AND confidence > ?
        ORDER BY confidence DESC, created_at DESC
@@ -488,34 +553,23 @@ function escapeFtsQuery(q) {
   return `"${trimmed.replace(/"/g, '""')}"`;
 }
 
+// conversation_turns_fts 已于 migration 020 移除（trigram FTS 7x 膨胀且仅被调试接口用）。
+// 此函数现在统一用 LIKE 全表扫 —— turns 量级 <10k 时延迟在毫秒级，且 created_at DESC 走索引即可。
 function searchConversation({ assistantId, q, limit = 20 }) {
   if (!q || !assistantId) return [];
   const normalized = String(q).trim();
   if (normalized.length === 0) return [];
-  if (normalized.length < 3) {
-    const like = `%${normalized.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-    return db
-      .prepare(
-        `SELECT id, role, content, session_id, created_at,
-                0 AS score
-         FROM conversation_turns
-         WHERE assistant_id = ? AND content LIKE ? ESCAPE '\\'
-         ORDER BY created_at DESC
-         LIMIT ?`
-      )
-      .all(assistantId, like, limit);
-  }
+  const like = `%${normalized.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   return db
     .prepare(
-      `SELECT t.id, t.role, t.content, t.session_id, t.created_at,
-              bm25(conversation_turns_fts) AS score
-       FROM conversation_turns_fts f
-       JOIN conversation_turns t ON t.rowid = f.rowid
-       WHERE f.content MATCH ? AND f.assistant_id = ?
-       ORDER BY score ASC
+      `SELECT id, role, content, session_id, created_at,
+              0 AS score
+       FROM conversation_turns
+       WHERE assistant_id = ? AND content LIKE ? ESCAPE '\\'
+       ORDER BY created_at DESC
        LIMIT ?`
     )
-    .all(escapeFtsQuery(normalized), assistantId, limit);
+    .all(assistantId, like, limit);
 }
 
 function searchMemory({ assistantId, q, limit = 20 }) {
@@ -550,6 +604,7 @@ function searchMemory({ assistantId, q, limit = 20 }) {
 
 module.exports = {
   db,
+  ALLOWED_MEMORY_TYPES,
   upsertCharacterState,
   insertConversationTurn,
   insertMemoryItem,
@@ -577,4 +632,5 @@ module.exports = {
   findConversationTurnById,
   findConversationTurnByLogicalKey,
   findMemoryItemBySourceTurnId,
+  updateConversationTurnContent,
 };

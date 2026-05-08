@@ -1,0 +1,21 @@
+{
+  "name": "14-cite-popularity",
+  "description": "高 cite_count 表示巩固的记忆，相同语义下应排在新记忆之前",
+  "assistantId": "eval-fix-14",
+  "sessionId": "eval-fix-14-s",
+  "seed": [
+    { "role": "user", "content": "我是设计师，主要做 UI 和品牌方向。", "createdAtOffsetMs": -2592000000 },
+    { "role": "user", "content": "今天和团队同步了一下设计 review。", "createdAtOffsetMs": -86400000 }
+  ],
+  "postSeedActions": [
+    { "type": "setCiteCount", "matchHints": ["UI 和品牌方向"], "citeCount": 20 }
+  ],
+  "query": "我是做什么职业的？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["设计师"], "minRank": 1, "maxRank": 2 }
+    ]
+  }
+}

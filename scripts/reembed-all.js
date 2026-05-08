@@ -13,7 +13,7 @@
  *
  * 工作流：
  *   1. DELETE 全表 memory_vectors（旧维度的伪向量没用）
- *   2. UPDATE memory_items SET vector_status='pending' WHERE memory_type IN ('user_turn','assistant_turn','life_event','work_event')
+ *   2. UPDATE memory_items SET vector_status='pending'（所有合法 memory_type 都重 embed）
  *   3. 分批读 pending 的 memory_items，调 embedText() 写入 memory_vectors
  *      每批之间 sleep 一小段，避免 LLM endpoint 过载
  *

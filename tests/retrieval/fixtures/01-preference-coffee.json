@@ -1,0 +1,23 @@
+{
+  "name": "01-preference-coffee",
+  "description": "用户提到喜欢拿铁，后续相关 query 应 top-1 召回该 turn",
+  "assistantId": "eval-fix-01",
+  "sessionId": "eval-fix-01-s",
+  "seed": [
+    { "role": "user", "content": "我最近爱喝拿铁，每天早上都要一杯。", "createdAtOffsetMs": -172800000 },
+    { "role": "assistant", "content": "听起来你很享受这种早晨仪式感。", "createdAtOffsetMs": -172700000 },
+    { "role": "user", "content": "今天工作有点累。", "createdAtOffsetMs": -3600000 },
+    { "role": "user", "content": "外面下雨了。", "createdAtOffsetMs": -1800000 }
+  ],
+  "query": "我最爱喝什么咖啡？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["拿铁"], "minRank": 1, "maxRank": 1 }
+    ],
+    "topKExcludes": [
+      { "matchHints": ["下雨"] }
+    ]
+  }
+}

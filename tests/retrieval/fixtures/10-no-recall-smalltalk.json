@@ -1,0 +1,16 @@
+{
+  "name": "10-no-recall-smalltalk",
+  "description": "纯闲聊 query + minScore 阈值应过滤掉低分结果，避免噪声召回",
+  "assistantId": "eval-fix-10",
+  "sessionId": "eval-fix-10-s",
+  "seed": [
+    { "role": "user", "content": "晚上吃了麻辣烫还挺辣的。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "周末打算去爬山。", "createdAtOffsetMs": -172800000 }
+  ],
+  "query": "嗯",
+  "topK": 5,
+  "retrievalOptions": { "source": "user", "minScore": 0.4 },
+  "expected": {
+    "maxResults": 0
+  }
+}

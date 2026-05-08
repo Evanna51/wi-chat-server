@@ -22,7 +22,9 @@ const config = {
   vectorMetaPath:
     process.env.VECTOR_META_PATH ||
     path.join(__dirname, "..", "data", "vector-meta.json"),
-  vectorDim: Number(process.env.VECTOR_DIM || 256),
+  // 默认 1024 = bge-m3 / qwen-embedding 当前生产 embedding 维度。
+  // 启动时会从 memory_vectors.vector_dim 反查确认；不一致直接 fatal exit。
+  vectorDim: Number(process.env.VECTOR_DIM || 1024),
   vectorProvider: process.env.VECTOR_PROVIDER || "hnswlib",
   vectorK: Number(process.env.VECTOR_K || 20),
   embedBaseUrl: process.env.EMBED_BASE_URL || "",
@@ -33,7 +35,6 @@ const config = {
   qwenTemperature: Number(process.env.QWEN_TEMPERATURE || 0.7),
   qwenMaxTokens: Number(process.env.QWEN_MAX_TOKENS || 200),
   memoryRetrievalEnabled: (process.env.MEMORY_RETRIEVAL_ENABLED || "1") === "1",
-  retrievalStrategy: process.env.RETRIEVAL_STRATEGY || "v1",
   retrievalTopK: Number(process.env.RETRIEVAL_TOP_K || 8),
   retrievalWindowDays: Number(process.env.RETRIEVAL_WINDOW_DAYS || 30),
   indexerBatchSize: Number(process.env.INDEXER_BATCH_SIZE || 20),
@@ -41,11 +42,7 @@ const config = {
   indexerPollMs: Number(process.env.INDEXER_POLL_MS || 2000),
   indexerMaxIdlePollMs: Number(process.env.INDEXER_MAX_IDLE_POLL_MS || 30000),
   infoLogEnabled: (process.env.INFO_LOG_ENABLED || "0") === "1",
-  schedulerLeaderId: process.env.SCHEDULER_LEADER_ID || "local-1",
-  schedulerLockTtlMs: Number(process.env.SCHEDULER_LOCK_TTL_MS || 60000),
   planGenerationCron: process.env.PLAN_GENERATION_CRON || "0 6 * * *",
-  planGenerationLockName:
-    process.env.PLAN_GENERATION_LOCK_NAME || "plan_generation_tick",
   planExecutorIntervalMs: Number(process.env.PLAN_EXECUTOR_INTERVAL_MS || 60000),
   autonomousAssistantIds: parseAssistantIds(process.env.AUTONOMOUS_ASSISTANT_IDS || ""),
   autonomousDryRun: (process.env.AUTONOMOUS_DRY_RUN || "1") === "1",
@@ -80,11 +77,11 @@ const config = {
   ),
   localPullRepullGapMs: Number(process.env.LOCAL_PULL_REPULL_GAP_MS || 15 * 1000),
   retentionSweepCron: process.env.RETENTION_SWEEP_CRON || "30 3 * * *",
-  retentionSweepLockName:
-    process.env.RETENTION_SWEEP_LOCK_NAME || "retention_sweep_tick",
   retentionRetrievalLogDays: Number(process.env.RETENTION_RETRIEVAL_LOG_DAYS || 30),
   retentionOutboxConsumedDays: Number(process.env.RETENTION_OUTBOX_CONSUMED_DAYS || 7),
   retentionLocalAckedDays: Number(process.env.RETENTION_LOCAL_ACKED_DAYS || 30),
+  retentionProviderCallLogDays: Number(process.env.RETENTION_PROVIDER_CALL_LOG_DAYS || 14),
+  retentionAuditLogDays: Number(process.env.RETENTION_AUDIT_LOG_DAYS || 90),
   behaviorJournalPruneDays: Number(process.env.BEHAVIOR_JOURNAL_PRUNE_DAYS || 90),
   fcmProjectId: process.env.FCM_PROJECT_ID || "",
   fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || "",
@@ -95,13 +92,11 @@ const config = {
   llmProvider: process.env.LLM_PROVIDER || "qwen",
   llmEmbedProvider: process.env.LLM_EMBED_PROVIDER || "",
   backupDailyCron: process.env.BACKUP_DAILY_CRON || "0 3 * * *",
-  backupDailyLockName: process.env.BACKUP_DAILY_LOCK_NAME || "backup_daily_tick",
   backupWeeklyCron: process.env.BACKUP_WEEKLY_CRON || "30 2 * * 0",
-  backupWeeklyLockName: process.env.BACKUP_WEEKLY_LOCK_NAME || "backup_weekly_tick",
   backupIncrKeepDays: Number(process.env.BACKUP_INCR_KEEP_DAYS || 8),
   backupFullKeepWeeks: Number(process.env.BACKUP_FULL_KEEP_WEEKS || 4),
   memoryClassifyCron: process.env.MEMORY_CLASSIFY_CRON || "*/10 * * * *",
-  memoryClassifyLockName: process.env.MEMORY_CLASSIFY_LOCK_NAME || "memory_classify_tick",
+  deadLetterMonitorCron: process.env.DEAD_LETTER_MONITOR_CRON || "0 9 * * *",   // 每天 09:00 扫一次
 };
 
 module.exports = config;

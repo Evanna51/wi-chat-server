@@ -1,0 +1,19 @@
+{
+  "name": "03-recency-vs-salience",
+  "description": "30 天前的强偏好 vs 1 天前的闲聊，相关 query 应优先返回偏好",
+  "assistantId": "eval-fix-03",
+  "sessionId": "eval-fix-03-s",
+  "seed": [
+    { "role": "user", "content": "我对花生过敏，吃到会休克，所以餐厅一定要确认。", "createdAtOffsetMs": -2592000000 },
+    { "role": "user", "content": "今天天气有点冷。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "刚刚听了一首歌很好听。", "createdAtOffsetMs": -3600000 }
+  ],
+  "query": "我有什么食物过敏？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["花生", "过敏"], "minRank": 1, "maxRank": 2 }
+    ]
+  }
+}

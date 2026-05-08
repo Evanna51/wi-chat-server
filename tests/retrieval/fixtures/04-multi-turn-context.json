@@ -1,0 +1,22 @@
+{
+  "name": "04-multi-turn-context",
+  "description": "多轮对话里多次提到学吉他，相关 query 应召回多条",
+  "assistantId": "eval-fix-04",
+  "sessionId": "eval-fix-04-s",
+  "seed": [
+    { "role": "user", "content": "我开始学吉他了，觉得手指很疼。", "createdAtOffsetMs": -2592000000 },
+    { "role": "assistant", "content": "前两周确实最难熬。", "createdAtOffsetMs": -2591900000 },
+    { "role": "user", "content": "今天练了一小时民谣指弹。", "createdAtOffsetMs": -1296000000 },
+    { "role": "user", "content": "我觉得吉他应该买更好的，原来这把太低端了。", "createdAtOffsetMs": -432000000 },
+    { "role": "user", "content": "外面在下雪。", "createdAtOffsetMs": -7200000 }
+  ],
+  "query": "我最近在练什么乐器？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["吉他"], "minRank": 1, "maxRank": 3 }
+    ],
+    "minRecallAt5": 0.6
+  }
+}

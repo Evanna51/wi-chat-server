@@ -152,7 +152,7 @@
 | `delete_batch` | `memoryIds[]` (≤50) | 批量级联删；返回每个 id 的 found/reason |
 | `update` | `memoryId`, `newContent` | 就地改 content + 重 embed；**保留** conversation_turn |
 | `set_quality` | `memoryId`, `quality` (A-E) | 重打质量等级；标 D/E 等于"软删除"但保留行 |
-| `add_fact` | `memoryId`, `factKey`, `factValue`, `factConfidence?` | 给该 memory 加 fact triple；同 key 存在时按 confidence 决定覆盖 |
+| `add_fact` | `memoryId`, `factKey`, `factValue`, `factConfidence?`, `factImportance?` | 给该 memory 加 fact triple；同 key 存在时按 confidence 决定覆盖。`importance` 与 `confidence` 正交，详见 2.3.5 |
 | `remove_fact` | `memoryId`, `factKey?` | 删 fact；`factKey` 给定则只删该 key，省略则删该 memory 全部 facts |
 
 ### 2.2 通用字段（所有 action 共用）
@@ -265,10 +265,11 @@
   "assistantId": "...",
   "action": "add_fact",
   "memoryId": "019dca12-...",
-  "factKey": "preference_like",
-  "factValue": "拿铁",
-  "factConfidence": 0.9,
-  "reason": "AI 推断的稳定偏好"
+  "factKey": "health_condition",
+  "factValue": "糖尿病",
+  "factConfidence": 0.95,
+  "factImportance": 0.95,
+  "reason": "用户原话明确，且属于必须长期记得的健康信息"
 }
 ```
 
@@ -278,7 +279,7 @@
   "ok": true,
   "action": "add_fact",
   "memoryId": "...",
-  "factKey": "preference_like",
+  "factKey": "health_condition",
   "replacedExisting": false
 }
 ```
@@ -288,9 +289,18 @@
 - `habit_morning` / `habit_evening`
 - `relationship_with_mom` / `relationship_with_dad` / `relationship_with_<role>`
 - `goal_short_term` / `goal_long_term`
-- `skill` / `hobby` / `job` / `location`
+- `skill` / `hobby` / `job` / `location` / `health_condition`
 
 `factValue` ≤ 50 字。冲突规则：同 `(memoryId, factKey)` 已存在时，仅当新 confidence > 旧 confidence 才覆盖；否则返回 `existing_higher_confidence` 不写入。
+
+**`factConfidence` vs `factImportance`（两个维度正交）**：
+
+| 维度 | 含义 | 取值参考 |
+|------|------|----------|
+| `factConfidence` | 这个 fact 提取得准不准（默认 0.8） | 原句直白明确 → 0.9+；含糊推断 → 0.5-0.7 |
+| `factImportance` | 这个 fact 对角色行为影响多大（默认 0.5） | 健康/重大身份 0.9-1.0；长期关系/职业 0.7-0.9；习惯/技能 0.5-0.7；轻偏好 0.3-0.5；临时心情 <0.3 |
+
+bootstrap 的 `coreFacts` 按综合分 `importance*0.6 + confidence*0.4` 排序，所以 `factImportance` 决定了一条 fact 能不能挤进 system prompt 的"角色已知事实"段。AI 自主 add_fact 时务必同时打两个分。
 
 #### 2.3.6 `remove_fact` — 删事实
 
@@ -346,7 +356,8 @@
         "quality": {"type": "string", "enum": ["A","B","C","D","E"], "description": "set_quality 用"},
         "factKey": {"type": "string", "description": "add_fact / remove_fact 用，snake_case"},
         "factValue": {"type": "string", "description": "add_fact 用，≤50 字"},
-        "factConfidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.8},
+        "factConfidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.8, "description": "fact 提取得准不准"},
+        "factImportance": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5, "description": "fact 对角色行为影响多大；健康/重大身份 0.9+，长期关系/职业 0.7-0.9，习惯/技能 0.5-0.7，轻偏好 0.3-0.5"},
         "reason": {"type": "string", "description": "强烈建议总是带，写进审计日志"}
       }
     }
@@ -390,7 +401,7 @@ LLM 注意到矛盾
     ↓
 5. tool_call: correct_memory({"action":"remove_fact","memoryId":"019dca...","factKey":"preference_like"})
     ↓
-6. tool_call: correct_memory({"action":"add_fact","memoryId":"019dca...","factKey":"preference_like","factValue":"美式","factConfidence":0.95,"reason":"用户原话纠错"})
+6. tool_call: correct_memory({"action":"add_fact","memoryId":"019dca...","factKey":"preference_like","factValue":"美式","factConfidence":0.95,"factImportance":0.4,"reason":"用户原话纠错；轻偏好"})
     ↓
 7. LLM 回复用户："好，记下了，你喜欢美式不是拿铁"
 ```
@@ -422,10 +433,10 @@ correct_memory({"action":"set_quality","memoryId":"...","quality":"E","reason":"
 LLM 看到 `"我妈妈是医生，每天值夜班"` 这样的 user_turn 自动分类为 relationship_info，但事实没抽出来：
 
 ```
-correct_memory({"action":"add_fact","memoryId":"...","factKey":"relationship_with_mom","factValue":"医生，常值夜班","factConfidence":0.9})
+correct_memory({"action":"add_fact","memoryId":"...","factKey":"relationship_with_mom","factValue":"医生，常值夜班","factConfidence":0.9,"factImportance":0.8})
 ```
 
-下次问"我妈做什么的"，server 端 LLM 就能命中这条 fact。
+下次问"我妈做什么的"，server 端 LLM 就能命中这条 fact；同时 `factImportance=0.8` 让它进 bootstrap 的 `coreFacts`，session 启动就被注入 system prompt，不需要等检索。
 
 ---
 
@@ -474,7 +485,7 @@ curl -sS -X POST "$API/api/tool/memory-recall" \
 # 2. add_fact
 curl -sS -X POST "$API/api/tool/memory-correct" \
   -H "x-api-key: $KEY" -H "content-type: application/json" \
-  -d "{\"assistantId\":\"$AID\",\"action\":\"add_fact\",\"memoryId\":\"<MID>\",\"factKey\":\"preference_like\",\"factValue\":\"拿铁\",\"factConfidence\":0.9,\"reason\":\"用户原话\"}"
+  -d "{\"assistantId\":\"$AID\",\"action\":\"add_fact\",\"memoryId\":\"<MID>\",\"factKey\":\"preference_like\",\"factValue\":\"拿铁\",\"factConfidence\":0.9,\"factImportance\":0.4,\"reason\":\"用户原话；轻偏好\"}"
 
 # 3. delete_batch
 curl -sS -X POST "$API/api/tool/memory-correct" \
@@ -546,6 +557,9 @@ curl -sS -X POST "$API/api/tool/memory-correct" \
 也支持 `unpin` 取消。
 
 ### 自动注入到 system prompt
+
+> 💡 session 启动 / 每日固定刷新只想拿 `coreMemories + coreFacts + relationshipState + profile`、不想触发语义检索时，调
+> `GET /api/character/bootstrap?assistantId=<id>` 一次拿齐（详见 README §18）。`coreMemories` 是 pinned 的整段叙事；`coreFacts` 是按 `importance*0.6 + confidence*0.4` 综合分排序的高分 key-value 事实，密度高、塞 prompt 几乎不占 token。`memory-context` 仍然每轮对话会捎带 `coreMemories` 和 `relationshipState`，但 `coreFacts` 仅 bootstrap 返回，不在每轮里重复推。
 
 `memory-context` response 现在带 `coreMemories[]` 字段（无论 shouldRetrieve 是否为
 true 都返回，按 salience DESC 排序，上限 8 条）：

@@ -1,0 +1,19 @@
+{
+  "name": "02-relationship-family",
+  "description": "用户提到妹妹生日 → 关于家人的 query 应召回此条",
+  "assistantId": "eval-fix-02",
+  "sessionId": "eval-fix-02-s",
+  "seed": [
+    { "role": "user", "content": "周末是我妹妹的生日，要给她准备礼物。", "createdAtOffsetMs": -604800000 },
+    { "role": "user", "content": "公司这个季度的 KPI 压力很大。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "今天晚饭吃什么呢？", "createdAtOffsetMs": -3600000 }
+  ],
+  "query": "我家里有什么人？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["妹妹"], "minRank": 1, "maxRank": 3 }
+    ]
+  }
+}

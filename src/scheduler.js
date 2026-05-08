@@ -15,15 +15,24 @@
 
 const cron = require("node-cron");
 const config = require("./config");
-const { db, enqueueLocalOutboxMessage } = require("./db");
-const { tryAcquireSchedulerLock } = require("./services/schedulerLockService");
+const {
+  db,
+  enqueueLocalOutboxMessage,
+  insertConversationTurn,
+  insertMemoryItem,
+  insertOutboxEvent,
+  findMemoryItemBySourceTurnId,
+} = require("./db");
 const { runRetentionSweepOnce } = require("./workers/retentionSweeper");
 const { runDaily: runIncrBackup } = require("../scripts/backup");
 const { runFullBackup } = require("../scripts/full-backup");
+const { ingestInteraction } = require("./services/memoryIngestService");
 const {
   generatePlans,
   fetchDuePendingPlans,
   markPlanSent,
+  scheduleNextPushPlan,
+  NEXT_PUSH_TRIGGER_REASON,
 } = require("./services/proactivePlanService");
 const {
   broadcastToUser,
@@ -60,10 +69,6 @@ function scheduleIfEnabled(cronExpr, label, runner) {
 }
 
 async function runDailyBackupTick() {
-  if (!tryAcquireSchedulerLock(config.backupDailyLockName)) {
-    infoLog("[scheduler] skip daily backup tick (leader lock not acquired)");
-    return { skippedByLock: true };
-  }
   try {
     const result = await runIncrBackup();
     infoLog("[scheduler] daily backup done:", result.outPath, `${result.totalRows} rows`);
@@ -75,10 +80,6 @@ async function runDailyBackupTick() {
 }
 
 async function runWeeklyBackupTick() {
-  if (!tryAcquireSchedulerLock(config.backupWeeklyLockName)) {
-    infoLog("[scheduler] skip weekly backup tick (leader lock not acquired)");
-    return { skippedByLock: true };
-  }
   try {
     const result = runFullBackup();
     infoLog(
@@ -94,10 +95,6 @@ async function runWeeklyBackupTick() {
 }
 
 async function runRetentionSweepTick() {
-  if (!tryAcquireSchedulerLock(config.retentionSweepLockName)) {
-    infoLog("[scheduler] skip retention sweep tick (leader lock not acquired)");
-    return { skippedByLock: true };
-  }
   try {
     const result = await runRetentionSweepOnce();
     infoLog("[scheduler] retention sweep done:", JSON.stringify(result));
@@ -109,10 +106,6 @@ async function runRetentionSweepTick() {
 }
 
 async function runMemoryClassifyBackfillTick() {
-  if (!tryAcquireSchedulerLock(config.memoryClassifyLockName)) {
-    infoLog("[scheduler] skip memory-classify tick (leader lock not acquired)");
-    return { skippedByLock: true };
-  }
   try {
     const {
       backfillUnclassified,
@@ -138,11 +131,53 @@ async function runMemoryClassifyBackfillTick() {
   }
 }
 
-async function runPlanGenerationTick() {
-  if (!tryAcquireSchedulerLock(config.planGenerationLockName)) {
-    infoLog("[scheduler] skip plan-generation tick (leader lock not acquired)");
-    return { skippedByLock: true };
+/**
+ * T-14：dead-letter 巡检。
+ *
+ * 每天扫一次过去 24h 入死信的事件数；> 0 就写一条 character_behavior_journal
+ * 警告条目（`run_type='dead_letter_alert'`），便于后续 admin / monitoring 看到。
+ *
+ * 不自动重放——重放需要确认底层依赖修好，由人决定（用 scripts/dead-letter-replay.js）。
+ */
+async function runDeadLetterMonitorTick() {
+  try {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    const recent = db
+      .prepare("SELECT COUNT(*) AS n FROM dead_letter_events WHERE created_at >= ?")
+      .get(since);
+    const total = db.prepare("SELECT COUNT(*) AS n FROM dead_letter_events").get();
+    const result = { recent24h: recent?.n || 0, total: total?.n || 0 };
+
+    if (result.recent24h > 0) {
+      console.warn(
+        `[scheduler] dead-letter monitor: ${result.recent24h} new in last 24h, ${result.total} total. ` +
+          `运行 'node scripts/dead-letter-replay.js' 查看 / 重放。`
+      );
+      try {
+        const { insertBehaviorJournalEntry } = require("./db");
+        insertBehaviorJournalEntry({
+          runType: "dead_letter_alert",
+          assistantId: "_system",
+          sessionId: null,
+          shouldPushMessage: false,
+          status: "alert",
+          reason: `${result.recent24h} dead-letter events in last 24h`,
+          input: {},
+          result,
+          createdAt: Date.now(),
+        });
+      } catch {
+        /* journal 写失败不阻塞监控 */
+      }
+    }
+    return result;
+  } catch (error) {
+    console.error("[scheduler] dead-letter monitor failed:", error.message);
+    return { error: error.message };
   }
+}
+
+async function runPlanGenerationTick() {
   try {
     const result = await generatePlans({});
     infoLog("[scheduler] plan generation done:", JSON.stringify(result));
@@ -163,6 +198,39 @@ function resolveSessionIdForPlan(plan) {
   return `${plan.assistant_id}:proactive`;
 }
 
+/**
+ * 派发成功后，把 AI 这条主动消息也写进 conversation_turns + memory_items，
+ * 让 server 端对话流"看得见"自己说过的话。turnId 直接复用 plan.id（UUID v7，
+ * 全局唯一）保证幂等：客户端如果之后再 message_create 同 id 会被 INSERT OR IGNORE 跳过。
+ *
+ * 不管 WS 派发成功还是只入 outbox，都写——这条 AI 消息已经"决定要说"，next_push
+ * 后续 prompt 里"你最近发过的话"必须看得到，避免 LLM 重复同一角度。
+ *
+ * 不抛错：单条 ingest 失败不应该影响 plan 派发主流程。
+ */
+function recordProactiveAsTurn(plan, sessionId, now) {
+  if (!plan?.draft_body) return null;
+  try {
+    const result = ingestInteraction({
+      db,
+      assistantId: plan.assistant_id,
+      sessionId,
+      role: "assistant",
+      content: plan.draft_body,
+      now,
+      turnId: plan.id, // 用 plan.id 当 turn id 保幂等
+      insertConversationTurn,
+      insertMemoryItem,
+      insertOutboxEvent,
+      findMemoryItemBySourceTurnId,
+    });
+    return result;
+  } catch (e) {
+    console.error("[scheduler] recordProactiveAsTurn failed:", plan.id, e.message);
+    return null;
+  }
+}
+
 let planExecutorTimer = null;
 async function runPlanExecutorOnce() {
   const now = Date.now();
@@ -177,6 +245,8 @@ async function runPlanExecutorOnce() {
   let dispatched = 0;
   let viaWs = 0;
   let viaOutbox = 0;
+  // 派发完成后哪些 assistant 是 next_push 型，需要立刻 reschedule（option A）
+  const nextPushAssistants = new Set();
   for (const plan of due) {
     try {
       const sessionId = resolveSessionIdForPlan(plan);
@@ -200,8 +270,12 @@ async function runPlanExecutorOnce() {
         });
         if (sent > 0) {
           markPlanSent(plan.id, now);
+          recordProactiveAsTurn(plan, sessionId, now);
           dispatched += 1;
           viaWs += 1;
+          if (plan.trigger_reason === NEXT_PUSH_TRIGGER_REASON) {
+            nextPushAssistants.add(plan.assistant_id);
+          }
           continue;
         }
       }
@@ -225,11 +299,24 @@ async function runPlanExecutorOnce() {
         expiresAt: now + config.localPullMessageTtlMs,
       });
       markPlanSent(plan.id, now);
+      recordProactiveAsTurn(plan, sessionId, now);
       dispatched += 1;
       viaOutbox += 1;
+      if (plan.trigger_reason === NEXT_PUSH_TRIGGER_REASON) {
+        nextPushAssistants.add(plan.assistant_id);
+      }
     } catch (error) {
       console.error("[scheduler] plan executor dispatch failed:", error.message, plan.id);
     }
+  }
+  // Option A：next_push 派发完后，立刻给同一 assistant 排下一条。
+  // AI 自己决定 delayMs，可能 30 min、几小时，也可能直接 skip（"用户在忙"）。
+  for (const aid of nextPushAssistants) {
+    setImmediate(() => {
+      scheduleNextPushPlan({ assistantId: aid }).catch((e) => {
+        console.error("[scheduler] post-send scheduleNextPush failed:", aid, e.message);
+      });
+    });
   }
   return { dispatched, viaWs, viaOutbox };
 }
@@ -252,6 +339,7 @@ function startScheduler() {
   scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick);
   scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick);
   scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick);
+  scheduleIfEnabled(config.deadLetterMonitorCron, "dead-letter-monitor", runDeadLetterMonitorTick);
   startPlanExecutorLoop();
 }
 
@@ -263,4 +351,5 @@ module.exports = {
   runDailyBackupTick,
   runWeeklyBackupTick,
   runMemoryClassifyBackfillTick,
+  runDeadLetterMonitorTick,
 };

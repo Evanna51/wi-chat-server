@@ -1,0 +1,18 @@
+{
+  "name": "09-echo-exclusion",
+  "description": "60s 内同 session 的 user_turn 应被默认排除（防 sync-push echo）",
+  "assistantId": "eval-fix-09",
+  "sessionId": "eval-fix-09-s",
+  "seed": [
+    { "role": "user", "content": "我刚才提到的那个项目要 deadline 了。", "createdAtOffsetMs": -10000 },
+    { "role": "user", "content": "我之前说过我喜欢徒步登山，每月至少一次。", "createdAtOffsetMs": -2592000000 }
+  ],
+  "query": "我刚才提到的那个项目要 deadline 了。",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKExcludes": [
+      { "matchHints": ["刚才提到的那个项目"] }
+    ]
+  }
+}

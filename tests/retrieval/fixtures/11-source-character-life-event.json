@@ -1,0 +1,24 @@
+{
+  "name": "11-source-character-life-event",
+  "description": "source='character' 应只召回 life_event/work_event/assistant_turn，不应混 user_turn",
+  "assistantId": "eval-fix-11",
+  "sessionId": "eval-fix-11-s",
+  "seed": [
+    { "role": "user", "content": "我今天又熬夜了，凌晨 3 点才睡。", "createdAtOffsetMs": -86400000 }
+  ],
+  "lifeEventSeed": [
+    { "content": "今天去咖啡馆写了下午稿子，认识了一只店猫。", "createdAtOffsetMs": -172800000 },
+    { "content": "周末和朋友打球，手腕扭了一下不严重。", "createdAtOffsetMs": -432000000 }
+  ],
+  "query": "你最近做了什么？",
+  "topK": 5,
+  "retrievalOptions": { "source": "character" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["咖啡馆"], "maxRank": 5 }
+    ],
+    "topKExcludes": [
+      { "matchHints": ["熬夜"] }
+    ]
+  }
+}

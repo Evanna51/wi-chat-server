@@ -312,7 +312,7 @@ router.get("/facts", (req, res) => {
   const { assistantId, limit } = parsed.data;
   const rows = db
     .prepare(
-      `SELECT id, fact_key, fact_value, confidence, memory_item_id, session_id, created_at
+      `SELECT id, fact_key, fact_value, confidence, importance, memory_item_id, session_id, created_at
        FROM memory_facts
        WHERE assistant_id = ?
        ORDER BY created_at DESC
@@ -324,6 +324,7 @@ router.get("/facts", (req, res) => {
     factKey: r.fact_key,
     factValue: r.fact_value,
     confidence: r.confidence,
+    importance: r.importance,
     memoryItemId: r.memory_item_id,
     sessionId: r.session_id,
     createdAt: r.created_at,
@@ -367,16 +368,6 @@ router.get("/stats", (_req, res) => {
     lastIndexerAt: null,
     lastRetentionAt: null,
   };
-  try {
-    const lock = db
-      .prepare("SELECT lock_name, updated_at FROM scheduler_locks")
-      .all();
-    for (const row of lock) {
-      if (row.lock_name === config.retentionSweepLockName) {
-        recent.lastRetentionAt = row.updated_at;
-      }
-    }
-  } catch {}
   const wsActiveSockets = {};
   try {
     for (const uid of getActiveUserIds()) {

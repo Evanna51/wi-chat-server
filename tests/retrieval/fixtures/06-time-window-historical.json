@@ -1,0 +1,19 @@
+{
+  "name": "06-time-window-historical",
+  "description": "无时间窗（开放查询），90 天前的偏好类记忆仍应召回（recency floor 防止归零）",
+  "assistantId": "eval-fix-06",
+  "sessionId": "eval-fix-06-s",
+  "seed": [
+    { "role": "user", "content": "我大学专业是机械工程，毕业后转行做产品。", "createdAtOffsetMs": -7776000000 },
+    { "role": "user", "content": "今天下班晚了。", "createdAtOffsetMs": -86400000 },
+    { "role": "user", "content": "刚买了杯奶茶。", "createdAtOffsetMs": -3600000 }
+  ],
+  "query": "我学的是什么专业？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user" },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["机械工程"], "minRank": 1, "maxRank": 3 }
+    ]
+  }
+}

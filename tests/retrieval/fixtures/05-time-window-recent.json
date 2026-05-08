@@ -1,0 +1,22 @@
+{
+  "name": "05-time-window-recent",
+  "description": "withinDays=3 应只返回 3 天内的记忆，更老的偏好不召回",
+  "assistantId": "eval-fix-05",
+  "sessionId": "eval-fix-05-s",
+  "seed": [
+    { "role": "user", "content": "我喜欢看科幻电影，尤其是星际穿越。", "createdAtOffsetMs": -2592000000 },
+    { "role": "user", "content": "我准备订下周三的机票去东京。", "createdAtOffsetMs": -172800000 },
+    { "role": "user", "content": "刚才会议讨论了新功能。", "createdAtOffsetMs": -3600000 }
+  ],
+  "query": "最近有什么计划？",
+  "topK": 5,
+  "retrievalOptions": { "source": "user", "withinDays": 3 },
+  "expected": {
+    "topKContains": [
+      { "matchHints": ["机票"], "minRank": 1, "maxRank": 3 }
+    ],
+    "topKExcludes": [
+      { "matchHints": ["星际穿越"] }
+    ]
+  }
+}

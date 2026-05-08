@@ -3,7 +3,7 @@ const config = require("../config");
 const { db } = require("../db");
 const { embedText } = require("./embeddingService");
 const { vectorStore } = require("./vectorStore");
-const { cosineSimilarity } = require("./vectorProviders/sqliteVectorStore");
+const { cosineSimilarity, blobToVector } = require("./vectorProviders/sqliteVectorStore");
 
 /**
  * 给一组 memoryId 拉取它们的 vector 并计算与 queryVector 的余弦相似度。
@@ -17,12 +17,16 @@ function computeSemanticScoresForIds(memoryIds, queryVector) {
     .all(...memoryIds);
   const out = new Map();
   for (const r of rows) {
-    if (!r.vector_blob || !r.vector_blob.byteLength) continue;
-    const f32 = new Float32Array(r.vector_blob.buffer, r.vector_blob.byteOffset, r.vector_blob.byteLength / 4);
-    out.set(r.memory_item_id, cosineSimilarity(queryVector, Array.from(f32)));
+    const vec = blobToVector(r.vector_blob);
+    if (!vec) continue;
+    out.set(r.memory_item_id, cosineSimilarity(queryVector, vec));
   }
   return out;
 }
+
+// 评分公式版本号，写入 memory_retrieval_log.strategy 作为评估切片用。
+// 改任一权重 / 半衰期 / 公式形态 → 必须 bump 此版本号，回归脚本据此分组对比。
+const RETRIEVAL_STRATEGY_VERSION = "v1";
 
 const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
 
@@ -46,10 +50,13 @@ const RECENCY_FLOOR = 0.15;
 // source 参数 → memory_type IN (...) 映射
 const SOURCE_TYPES = {
   user:      ["user_turn"],
-  character: ["life_event", "work_event", "assistant_turn"],
-  knowledge: ["knowledge"],     // 知识库条目
-  all:       null,              // 不过滤（含 knowledge）
+  character: ["life_event", "work_event"],   // T-08 后 assistant_turn 不再存在
+  knowledge: ["knowledge"],                   // 知识库条目
+  all:       null,                            // 不过滤（仅调试/导出用）
 };
+
+// 调用方不传 source 时的默认候选池。
+const DEFAULT_TYPES = ["user_turn", "life_event", "work_event", "knowledge"];
 
 function normalize(value, min, max) {
   if (max <= min) return 0;
@@ -91,15 +98,27 @@ function scoreCitePopularity(citeCount) {
   return Math.min(1, Math.log1p(citeCount || 0) / Math.log(50));
 }
 
-function graphBoost(assistantId, memoryId) {
-  const row = db
+// 批量算 graph boost：旧版本是每条命中 1 个 SQL（N+1），改成 1 个 SQL 一次性聚合。
+// 把 source_memory_id / target_memory_id 两边的 weight 合到同一个 memory_id 上 SUM。
+function batchGraphBoost(assistantId, memoryIds) {
+  if (!memoryIds.length) return new Map();
+  const ph = memoryIds.map(() => "?").join(",");
+  const rows = db
     .prepare(
-      `SELECT COALESCE(SUM(weight), 0) AS total_weight
-       FROM memory_edges
-       WHERE assistant_id = ? AND (source_memory_id = ? OR target_memory_id = ?)`
+      `SELECT memory_id, SUM(weight) AS total_weight FROM (
+         SELECT source_memory_id AS memory_id, weight FROM memory_edges
+          WHERE assistant_id = ? AND source_memory_id IN (${ph})
+         UNION ALL
+         SELECT target_memory_id AS memory_id, weight FROM memory_edges
+          WHERE assistant_id = ? AND target_memory_id IN (${ph})
+       ) GROUP BY memory_id`
     )
-    .get(assistantId, memoryId, memoryId);
-  return Math.min(1, normalize(row.total_weight || 0, 0, 5));
+    .all(assistantId, ...memoryIds, assistantId, ...memoryIds);
+  const out = new Map();
+  for (const r of rows) {
+    out.set(r.memory_id, Math.min(1, normalize(r.total_weight || 0, 0, 5)));
+  }
+  return out;
 }
 
 // 当窄时间窗 (≤31 天) 给定时，走 SQL-first 检索：先按时间窗过滤拉所有行，
@@ -115,7 +134,6 @@ async function retrieveMemory({
   sessionId = "",
   query,
   topK = config.retrievalTopK,
-  strategy = config.retrievalStrategy,
   category = null,
   source = null,        // "user" | "character" | "all" | null（不过滤）
   minQuality = null,    // "A"|"B"|"C"|"D"|"E"，A 最严
@@ -170,7 +188,10 @@ async function retrieveMemory({
       whereClauses.push("memory_type = ?");
       params.push(memoryType);
     } else {
-      const sourceTypes = source ? SOURCE_TYPES[source] : null;
+      // source 显式指定 → 用对应映射；否则用 DEFAULT_TYPES
+      const sourceTypes = source
+        ? SOURCE_TYPES[source]
+        : DEFAULT_TYPES;
       if (sourceTypes && sourceTypes.length > 0) {
         const tp = sourceTypes.map(() => "?").join(",");
         whereClauses.push(`memory_type IN (${tp})`);
@@ -242,7 +263,9 @@ async function retrieveMemory({
       whereClauses.push("memory_type = ?");
       params.push(memoryType);
     } else {
-      const sourceTypes = source ? SOURCE_TYPES[source] : null;
+      const sourceTypes = source
+        ? SOURCE_TYPES[source]
+        : DEFAULT_TYPES;
       if (sourceTypes && sourceTypes.length > 0) {
         const typePlaceholders = sourceTypes.map(() => "?").join(",");
         whereClauses.push(`memory_type IN (${typePlaceholders})`);
@@ -279,6 +302,8 @@ async function retrieveMemory({
   const matchScoreMap = useSqlFirst
     ? computeSemanticScoresForIds(memoryIds, queryVector)
     : new Map(vectorMatches.map((item) => [item.memoryId, item.score]));
+  // 一次性批量算 graph boost，避免 rows 中每行都跑一次 SQL 的 N+1
+  const edgeBoostMap = batchGraphBoost(assistantId, rows.map((r) => r.id));
   const ranked = rows
     .map((row) => {
       const rawSemantic    = matchScoreMap.get(row.id);
@@ -289,7 +314,7 @@ async function retrieveMemory({
       const qualityScore   = scoreQuality(row.quality_grade);
       const citePopularity = scoreCitePopularity(row.cite_count);
       const sessionBoost   = sessionId && row.session_id === sessionId ? 0.02 : 0;
-      const edgeBoost      = graphBoost(assistantId, row.id);
+      const edgeBoost      = edgeBoostMap.get(row.id) || 0;
 
       const finalScore =
         semantic        * 0.42
@@ -330,16 +355,21 @@ async function retrieveMemory({
     const ph = ids.map(() => "?").join(",");
     const factRows = db
       .prepare(
-        `SELECT memory_item_id, fact_key, fact_value, confidence
+        `SELECT memory_item_id, fact_key, fact_value, confidence, importance
            FROM memory_facts
           WHERE memory_item_id IN (${ph})
-          ORDER BY confidence DESC`
+          ORDER BY importance DESC, confidence DESC`
       )
       .all(...ids);
     const factsByMem = new Map();
     for (const fr of factRows) {
       const arr = factsByMem.get(fr.memory_item_id) || [];
-      arr.push({ key: fr.fact_key, value: fr.fact_value, confidence: fr.confidence });
+      arr.push({
+        key: fr.fact_key,
+        value: fr.fact_value,
+        confidence: fr.confidence,
+        importance: fr.importance,
+      });
       factsByMem.set(fr.memory_item_id, arr);
     }
     for (const item of sliced) {
@@ -372,7 +402,7 @@ async function retrieveMemory({
     query,
     JSON.stringify(rankedFinal.map((item) => item.id)),
     JSON.stringify(rankedFinal.map((item) => ({ id: item.id, ...item.breakdown, score: item.score }))),
-    strategy,
+    RETRIEVAL_STRATEGY_VERSION,
     now
   );
 
