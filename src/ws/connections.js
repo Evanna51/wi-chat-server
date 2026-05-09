@@ -20,12 +20,13 @@ function unregister(userId, ws) {
   if (set.size === 0) userIdToSockets.delete(userId);
 }
 
-function broadcastToUser(userId, frame) {
+function broadcastToUser(userId, frame, { exclude = null } = {}) {
   const set = userIdToSockets.get(userId);
   if (!set || !set.size) return 0;
   const data = JSON.stringify(frame);
   let n = 0;
   for (const ws of set) {
+    if (exclude && ws === exclude) continue;
     try {
       if (ws.readyState === 1) {
         ws.send(data);

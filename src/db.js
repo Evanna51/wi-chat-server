@@ -468,7 +468,13 @@ function listProactiveAssistantProfiles() {
 // upsertLocalSubscriber / listLocalSubscriberIds 已于 2026-05-06 随 HTTP 轮询通道一并移除
 // （local_subscribers 表见 migration 015 drop）
 
+// 调用方可显式传 `id` —— proactive 派发时传 `plan.id`，让 outbox row 与
+// `conversation_turns.id` 共享同一个 UUID v7。这是跨端 turnId 一致性的关键：
+// 客户端无论从 WS-broadcast 还是 outbox-pull 收到这条消息，frame.id 都等于
+// server 端 conversation_turns.id；后续 message_delete 可定位到同一行。
+// INSERT OR IGNORE 让重复 enqueue（同 id）变成幂等 noop。
 function enqueueLocalOutboxMessage({
+  id: providedId,
   userId,
   assistantId,
   sessionId,
@@ -480,9 +486,9 @@ function enqueueLocalOutboxMessage({
   expiresAt = null,
 }) {
   const now = Date.now();
-  const id = uuidv7();
+  const id = providedId || uuidv7();
   db.prepare(
-    `INSERT INTO local_outbox_messages
+    `INSERT OR IGNORE INTO local_outbox_messages
       (id, user_id, assistant_id, session_id, message_type, title, body, payload_json, status, available_at, expires_at, pull_count, pulled_at, acked_at, ack_status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0, NULL, NULL, NULL, ?)`
   ).run(

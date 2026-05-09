@@ -319,7 +319,11 @@ async function runPlanExecutorOnce() {
           continue;
         }
       }
+      // outbox row id 复用 plan.id —— 与 WS-broadcast 路径保持同一个 frame.id,
+      // 与 recordProactiveAsTurn 写入的 conversation_turns.id 也保持一致,
+      // 让客户端 turnId == server turnId, message_delete 才能定位到对应 turn.
       enqueueLocalOutboxMessage({
+        id: plan.id,
         userId: plan.user_id,
         assistantId: plan.assistant_id,
         sessionId,

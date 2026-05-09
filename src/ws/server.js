@@ -4,6 +4,7 @@ const {
   register,
   unregister,
   startHeartbeatLoop,
+  broadcastToUser,
 } = require("./connections");
 const {
   pullPendingMessagesForUser,
@@ -11,6 +12,7 @@ const {
   updateConversationTurnContent,
 } = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
+const { deleteConversationTurnCascade } = require("../services/memoryEditService");
 const { turnEvents } = require("../events/turnEvents");
 
 function safeParse(data) {
@@ -104,6 +106,12 @@ function handleClientFrame(ws, raw) {
       handleMessageUpdate(ws, frame);
       return;
     }
+    case "message_delete": {
+      // 级联删 turn + memory_items / facts / edges / vectors / outbox_events。
+      // 删完跨端广播 message_deleted（排除发起端）让其它设备清本地 DB。
+      handleMessageDelete(ws, frame);
+      return;
+    }
     default:
       return;
   }
@@ -170,6 +178,35 @@ function handleMessageCreate(ws, frame) {
         },
       });
     }
+  }
+}
+
+function handleMessageDelete(ws, frame) {
+  const id = String(frame.id || frame.messageId || "");
+  if (!id) return ackErr(ws, "message_deleted", "missing_id", { id: null });
+  let result;
+  try {
+    result = deleteConversationTurnCascade(id, {
+      actor: "user",
+      reason: "ws.message_delete",
+    });
+  } catch (e) {
+    return ackErr(ws, "message_deleted", e.message || String(e), { id });
+  }
+  if (!result.found) {
+    return ackErr(ws, "message_deleted", "turn_not_found", { id });
+  }
+  ackOk(ws, "message_deleted", { id, deleted: result.deleted });
+
+  // 跨端同步：广播给同账号其它在线 socket（排除发起端，发起端已经本地删过了）。
+  try {
+    broadcastToUser(
+      ws.userId,
+      { op: "message_deleted", id, ts: Date.now() },
+      { exclude: ws }
+    );
+  } catch (e) {
+    console.error("[ws] message_deleted fanout failed:", e.message);
   }
 }
 
