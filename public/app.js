@@ -1982,17 +1982,17 @@ async function renderCognitionTab(body, a) {
   }
   body.appendChild(topicArticle);
 
-  // 5) Prompt 预览（CC-5.C）—— 让 admin 看到 LLM 实际拿到的 system + userPrefix
+  // 5) Prompt 预览（V_NEW_LEAN）—— 让 admin 看到 server 渲染好的 8 段 slots + assistantPrefill
   // 含一个简易 salient phrase 调试器：输入用户消息 → 看哪个 wound 被勾住
   renderPromptPreview(body, a, ctx);
 }
 
-// CC-5.C: Prompt 预览组件 —— 显示 system + userPrefix 双段 + 选择性注意调试。
+// V_NEW_LEAN Prompt 预览组件 —— 显示 mergedSystem + assistantPrefill + 选择性注意调试。
 function renderPromptPreview(parent, a, initialCtx) {
   const article = el("article", {});
   article.appendChild(el("header", {}, [
-    el("strong", {}, "Prompt 预览（CC-5.C）"),
-    el("small", { class: "muted" }, "  这是 LLM 实际拿到的 system + userPrefix。可输入测试消息看 salient phrase 触发。"),
+    el("strong", {}, "Prompt 预览（V_NEW_LEAN）"),
+    el("small", { class: "muted" }, "  server 渲染好的 8 段 slots + assistantPrefill。输入测试消息看 salient phrase 触发。"),
   ]));
 
   // 调试输入框：用户消息 → 触发 salient phrase
@@ -2010,8 +2010,8 @@ function renderPromptPreview(parent, a, initialCtx) {
   const metricsBlock = el("p", { class: "muted small" }, "");
 
   function fillFromCtx(ctx) {
-    sysBlock.textContent = ctx.system || "(无 system 段)";
-    userBlock.textContent = ctx.userPrefix || "(独白段为空 —— 当前角色无显著情绪/关系异常)";
+    sysBlock.textContent = ctx.mergedSystem || "(无 mergedSystem 段)";
+    userBlock.textContent = ctx.assistantPrefill || "(独白段为空 —— 当前角色无显著情绪/关系异常)";
     if (ctx.salientPhrase) {
       const sp = ctx.salientPhrase;
       salientBlock.innerHTML = "";
@@ -2022,10 +2022,9 @@ function renderPromptPreview(parent, a, initialCtx) {
     } else {
       salientBlock.textContent = "选择性注意：未触发（输入测试消息可调试）";
     }
-    const sysLen = (ctx.system || "").length;
-    const usrLen = (ctx.userPrefix || "").length;
-    // userPrefix 是 soft target（不切）；system 是 hard cap（切到 2500 内）
-    metricsBlock.textContent = `system ${sysLen}/2500 chars (hard) · userPrefix ${usrLen} chars (soft target 2000，不强切) · combined ${sysLen + usrLen}`;
+    const sysLen = (ctx.mergedSystem || "").length;
+    const usrLen = (ctx.assistantPrefill || "").length;
+    metricsBlock.textContent = `mergedSystem ${sysLen} chars · assistantPrefill ${usrLen} chars · combined ${sysLen + usrLen}`;
   }
 
   fillFromCtx(initialCtx);
@@ -2049,9 +2048,9 @@ function renderPromptPreview(parent, a, initialCtx) {
 
   article.appendChild(el("div", { class: "prompt-debug-row" }, [debugInput, debugBtn]));
   article.appendChild(salientBlock);
-  article.appendChild(el("h5", { class: "muted small" }, "<system> 段（稳定 / 可缓存）"));
+  article.appendChild(el("h5", { class: "muted small" }, "完整 system（mergedSystem，含 8 个 slot）"));
   article.appendChild(sysBlock);
-  article.appendChild(el("h5", { class: "muted small" }, "<userPrefix> 独白段（每条消息变）"));
+  article.appendChild(el("h5", { class: "muted small" }, "assistantPrefill（[此刻] 独白段，每条消息变）"));
   article.appendChild(userBlock);
   article.appendChild(metricsBlock);
 

@@ -16,11 +16,13 @@
 > - `docs/client-release-required.md` — 需客户端配合发版的事项
 > - `docs/known-issues.md` — 已知存在但暂不修的问题（鉴权 / 写回竞态等）
 
-> **⚠️ Phase 2 状态说明**（2026-05-10）：本文中描述的端点（`POST /api/sync/push` /
-> `POST /api/character/context` / `GET /api/character/bootstrap` /
-> `POST /api/tool/memory-context`）仍然工作，但 server 已加 `Deprecation: true`
-> response header。新客户端请走 `POST /api/chat/turn` / `POST /api/chat/context` /
-> `GET /api/character/{id}` —— 详见 [api-redesign-plan.md](./api-redesign-plan.md) §3 +
+> **⚠️ Phase 2 状态说明**（2026-05-10）：本文中描述的旧端点已**全部删除或语义重命名**：
+> `POST /api/sync/push` → 改名 [POST /api/chat/turn](./api-redesign-plan.md)；
+> `GET /api/character/bootstrap` → 删除，新建 `GET /api/character/{id}`；
+> `POST /api/tool/memory-context` → 删除，客户端走 `POST /api/chat/context`；
+> `POST /api/character/context` → 保留作 admin / debug / boot cache 端点（cleanup
+> 后字段简洁化：删 `system` / `userPrefix` / `promptFragment`，统一用 `slots` +
+> `mergedSystem` + `assistantPrefill`）。详见 [api-redesign-plan.md](./api-redesign-plan.md) §3 +
 > [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)。
 > - `docs/EXECUTION-PROGRESS.md` — 三阶段改造的"驾驶舱"，含 Phase A/B/C/D 与 Phase CC-1~4
 > - `docs/archive/` — 已交付或已归档的设计 / 路线图 / 阅读笔记

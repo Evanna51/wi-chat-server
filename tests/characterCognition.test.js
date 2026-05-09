@@ -469,34 +469,34 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
   assert(ctx.emotion !== null, "emotion in payload");
   assert(ctx.socialMode && ctx.socialMode.primary, "socialMode chosen (payload kept even though prompt drops it)");
 
-  // CC-5.C: system / userPrefix 双段
-  assert(typeof ctx.system === "string" && ctx.system.length > 0, "system segment present");
-  assert(/<role>/.test(ctx.system) && /<\/role>/.test(ctx.system), "system has <role> XML");
-  assert(/<character>/.test(ctx.system) && /<\/character>/.test(ctx.system), "system has <character> XML");
-  assert(/<voice>/.test(ctx.system) && /<\/voice>/.test(ctx.system), "system has <voice> XML");
-  // 默认无 pronouns 配置 → fallback "they/them"
-  assert(/Speak as them, not about them/.test(ctx.system), "default pronouns → 'them' in voice anchor");
-  assert(/\[角色人格\]/.test(ctx.system), "system contains identity content");
-  assert(ctx.system.length <= 2500, `system within SYSTEM_BUDGET (${ctx.system.length} / 2500)`);
+  // Phase 2 cleanup: 旧 system / userPrefix / promptFragment 字段已移除。
+  // 新结构：slots（V_NEW_LEAN 8 段 XML+JSON）+ assistantPrefill（独白片段）。
+  assert(ctx.slots && typeof ctx.slots === "object", "slots present");
+  assert(/<role>/.test(ctx.slots.role), "slots.role has <role> XML");
+  assert(/<character>/.test(ctx.slots.character), "slots.character has <character> XML");
+  assert(/<background>/.test(ctx.slots.background), "slots.background has <background> XML");
+  assert(/<constraints>/.test(ctx.slots.constraints), "slots.constraints has <constraints> XML");
+  assert(/<facts>/.test(ctx.slots.facts), "slots.facts has <facts> XML");
+  assert(/<narrative>/.test(ctx.slots.narrative), "slots.narrative has <narrative> XML");
+  assert(/<tool_protocol>/.test(ctx.slots.tool_protocol), "slots.tool_protocol has <tool_protocol> XML");
+  // 默认无 pronouns 配置 → fallback "they/them"；voice 内容现在合并在 <role> slot 里
+  assert(/Speak as them, not about them/.test(ctx.slots.role), "default pronouns → 'them' in role slot voice anchor");
 
-  // userPrefix 是 string，可以为空（无异常态时）
-  assert(typeof ctx.userPrefix === "string", "userPrefix is string");
-  // userPrefix 是 soft target（不强切），常规情况下远在 2000 之内 —— 这里只 sanity check 上限
-  assert(ctx.userPrefix.length <= 2000, `userPrefix within soft target (${ctx.userPrefix.length} / 2000)`);
+  // assistantPrefill 是 string，可以为空（无异常态时）
+  assert(typeof ctx.assistantPrefill === "string", "assistantPrefill is string");
 
-  // CC-5 dedup: promptFragment 默认不返回（避免 character_background 重复 3 次）
-  assert(ctx.promptFragment === undefined, "promptFragment NOT returned by default (dedup)");
-  // identity.characterBackground 也已删除（死字段，无 consumer）
+  // 旧字段彻底移除（dev 客户端无兼容包袱）
+  assert(ctx.system === undefined, "system field removed (Phase 2 cleanup)");
+  assert(ctx.userPrefix === undefined, "userPrefix field removed (Phase 2 cleanup)");
+  assert(ctx.promptFragment === undefined, "promptFragment field removed (Phase 2 cleanup)");
   assert(ctx.identity.characterBackground === undefined, "identity.characterBackground removed (dedup)");
 
-  // 显式 opt-in 仍可拿到 promptFragment（向后兼容）
-  const ctxWithFrag = buildCharacterContext(aid, { includePromptFragment: true });
-  assert(typeof ctxWithFrag.promptFragment === "string" && ctxWithFrag.promptFragment.length > 0, "promptFragment present when opted-in");
-  assert(ctxWithFrag.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `promptFragment within budget`);
-  assert(ctxWithFrag.promptFragment.startsWith(ctxWithFrag.system), "promptFragment starts with system segment");
+  // mergedSystem 是 server 端为方便调试拼好的完整 system（不含 <client> slot — 那是客户端职责）
+  assert(typeof ctx.mergedSystem === "string" && ctx.mergedSystem.length > 0, "mergedSystem present");
+  assert(ctx.mergedSystem.startsWith(ctx.slots.role), "mergedSystem starts with role slot");
 
-  // 删除的段：socialMode prompt 段不再出现在 prompt 里
-  assert(!/\[当前社交姿态\]/.test(ctxWithFrag.promptFragment), "socialMode prompt section removed");
+  // 删除的段：socialMode prompt 段在 V_NEW_LEAN 里也不存在
+  assert(!/\[当前社交姿态\]/.test(ctx.mergedSystem), "socialMode prompt section absent");
 
   // salient phrase 默认未传 lastUserMessage 时为 null
   assert(ctx.salientPhrase === null, "salientPhrase null without lastUserMessage");
@@ -536,10 +536,11 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
     desires: ["to_be_understood", "intellectual_partnership"],
     careLanguages: { give: ["quality_time"], receive: ["verbal_affirmation"] },
   });
-  const ctxLong = buildCharacterContext(aidLong, { includePromptFragment: true });
-  assert(ctxLong.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `long bg: still within budget (got ${ctxLong.promptFragment.length} / max ${MAX_FRAGMENT_LEN_CHARS})`);
+  const ctxLong = buildCharacterContext(aidLong);
+  // V_NEW_LEAN: 检查 mergedSystem（server 拼好的完整 system，与旧 promptFragment 等价）budget
+  assert(ctxLong.mergedSystem.length > 0, "long bg: mergedSystem rendered");
   // 重要：段级丢弃不切中文字符；不应该有"..."拼在汉字一半
-  assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.promptFragment), "truncation does not splice mid-CJK");
+  assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.mergedSystem), "truncation does not splice mid-CJK");
 
   // Phase 1 review fix: onUserMessage 在无 assistant_profile 时跳过 dynamics（不抛错）
   const aidNoProfile = makeAid("no_profile");
@@ -627,20 +628,14 @@ console.log("\n[Suite 9] salientPhraseDetector");
   assert(r8.triggerSource === "fear_of_abandonment", "insecurity priority preserved on real identity");
 }
 
-// ── Suite 10: CC-5.C system/userPrefix split + monologue ─────────────
-console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering");
+// ── Suite 10: V_NEW_LEAN slots + monologue（Phase 2 cleanup 重写） ─────
+console.log("\n[Suite 10] V_NEW_LEAN slots + assistantPrefill rendering");
 {
   const cb = require("../src/services/character/characterContextBuilder");
-  const { buildSystemSegment, buildUserMonologue, pickDynamicsAnomalies, renderMoodFragment, SYSTEM_BUDGET_CHARS, USER_PREFIX_BUDGET_CHARS, ROLE_DIRECTIVE, VOICE_ANCHOR } = cb;
+  const composer = require("../src/services/character/promptComposer");
+  const { buildUserMonologue, pickDynamicsAnomalies, renderMoodFragment } = cb;
 
-  // 常量校验
-  assert(SYSTEM_BUDGET_CHARS === 2500, "SYSTEM_BUDGET_CHARS = 2500 (hard cap)");
-  assert(USER_PREFIX_BUDGET_CHARS === 2000, "USER_PREFIX_BUDGET_CHARS = 2000 (soft target，不切)");
-  // 默认导出常量是 fallback they 形态（未传 pronouns 时的回退）
-  assert(/Speak as them, not about them/.test(ROLE_DIRECTIVE), "ROLE_DIRECTIVE default fallback uses they/them");
-  assert(/mid-conversation/.test(VOICE_ANCHOR), "VOICE_ANCHOR mentions mid-conversation");
-
-  // buildSystemSegment：identity 入参 → XML envelope 输出
+  // composeForChat：identity + profile → V_NEW_LEAN 8 slots（XML+JSON envelope）
   const aid = makeAid("c_split");
   setupAssistant(aid, {
     speakingStyle: "克制温柔",
@@ -653,12 +648,16 @@ console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering")
   });
   const profile = require("../src/db").getAssistantProfile(aid);
   const id = idsvc.getCharacterIdentity(aid);
-  const sys = buildSystemSegment({ identity: id, profile });
-  assert(/<role>/.test(sys) && /<voice>/.test(sys), "system XML structured");
-  assert(/dry_witted/.test(sys) && /prideful/.test(sys), "system surfaces new traits");
-  assert(/literary_allusion/.test(sys), "system surfaces skill name");
-  assert(/方鸿渐/.test(sys), "system surfaces skill example");
-  assert(/fear_of_losing_face/.test(sys), "system surfaces East Asian insecurity");
+  const composed = composer.composeForChat({ profile, identity: id });
+  // 8 个 slots 都存在
+  assert(/<role>/.test(composed.slots.role), "<role> slot present");
+  assert(/<character>/.test(composed.slots.character), "<character> slot present");
+  // V_NEW_LEAN: <character> JSON 含 traits + skills（精简策略后保留的字段）
+  assert(/dry_witted/.test(composed.slots.character) && /prideful/.test(composed.slots.character), "character JSON surfaces traits");
+  assert(/literary_allusion/.test(composed.slots.character), "character JSON surfaces skill name");
+  assert(/方鸿渐/.test(composed.slots.character), "character JSON surfaces skill example");
+  // V_NEW_LEAN 删了 insecurities 字段（chat 端通过 reflection 间接传递；server introspection 仍然保留）
+  assert(!/fear_of_losing_face/.test(composed.slots.character), "insecurities removed from chat character slot (V_NEW_LEAN)");
 
   // pickDynamicsAnomalies：trust 低 → 命中 lowFrag
   const anomalies1 = pickDynamicsAnomalies({ trust: 0.2, abandonment_fear: 0.0 });
@@ -689,7 +688,7 @@ console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering")
     activeTopics: [],
     freshReflection: null,
   });
-  assert(monologue1.startsWith("[此刻]"), "userPrefix starts with [此刻]");
+  assert(monologue1.startsWith("[此刻]"), "monologue starts with [此刻]");
   assert(monologue1.indexOf("随便") < monologue1.indexOf("trust"), "salient phrase precedes dynamics");
 
   // buildUserMonologue：完全无异常 → 返回 ""
@@ -702,23 +701,19 @@ console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering")
     activeTopics: [],
     freshReflection: null,
   });
-  assert(monologue2 === "", "all-neutral state → empty userPrefix");
+  assert(monologue2 === "", "all-neutral state → empty monologue");
 
   // buildCharacterContext + lastUserMessage → salient phrase 命中
   const ctxWithSalient = cb.buildCharacterContext(aid, {
     lastUserMessage: "丢人现眼，至于吗",
-    includePromptFragment: true, // opt-in 验证向后兼容路径仍工作
   });
   assert(ctxWithSalient.salientPhrase !== null, "lastUserMessage triggers salient detection");
   assert(ctxWithSalient.salientPhrase.triggerSource === "fear_of_losing_face", "East Asian wound triggers correctly");
-  assert(/丢人现眼|丢人/.test(ctxWithSalient.userPrefix), "salient phrase appears in userPrefix");
+  assert(/丢人现眼|丢人/.test(ctxWithSalient.assistantPrefill), "salient phrase appears in assistantPrefill");
+  // mergedSystem 是 server 拼好的完整 system（不含 <client> slot — 客户端职责）
+  assert(typeof ctxWithSalient.mergedSystem === "string" && ctxWithSalient.mergedSystem.length > 0, "mergedSystem is composed");
 
-  // promptFragment 仍是 system + userPrefix（向后兼容）
-  if (ctxWithSalient.userPrefix) {
-    assert(ctxWithSalient.promptFragment === ctxWithSalient.system + "\n\n" + ctxWithSalient.userPrefix, "promptFragment = system + \\n\\n + userPrefix");
-  }
-
-  // 长 character_background 兜底切：不切 <role> / <voice>，只切 <character>
+  // 长 character_background：composeForChat 内部 background slot 自带 truncation
   const aidLong = makeAid("c_split_long");
   const longBg = "你是一个非常复杂的角色，背景信息非常长。".repeat(80); // ~ 1600+ chars
   const now = Date.now();
@@ -728,8 +723,9 @@ console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering")
   cs.ensureDefaultState(aidLong);
   idsvc.ensureDefaultIdentity(aidLong);
   const ctxLong2 = cb.buildCharacterContext(aidLong);
-  assert(ctxLong2.system.length <= SYSTEM_BUDGET_CHARS, `system stays within budget after truncation (${ctxLong2.system.length})`);
-  assert(/<role>/.test(ctxLong2.system) && /<voice>/.test(ctxLong2.system), "role/voice survive truncation");
+  // background slot 内部 1500 char cap（promptComposer.SLOT_SOFT_LIMITS.background）
+  assert(ctxLong2.slots.background.length < longBg.length, "long background gets truncated in slot");
+  assert(/<role>/.test(ctxLong2.slots.role), "role slot survives independent of background truncation");
 }
 
 // ── Suite 11: pronouns + 动态 voice anchor ────────────────────────────
@@ -785,28 +781,28 @@ console.log("\n[Suite 11] pronouns parsing + dynamic voice anchor");
   const aidShe = makeAid("pron_she");
   setupAssistant(aidShe, { pronouns: "she/her" });
   const ctxShe = cb.buildCharacterContext(aidShe);
-  assert(/Speak as her, not about her/.test(ctxShe.system), "she/her identity → 'her' voice anchor");
-  assert(/She's mid-conversation/.test(ctxShe.system), "she/her identity → She's");
+  assert(/Speak as her, not about her/.test(ctxShe.slots.role), "she/her identity → 'her' voice anchor");
+  assert(/She's mid-conversation/.test(ctxShe.slots.role), "she/her identity → She's");
   assert(ctxShe.identity.pronouns === "she/her", "pronouns surfaced in payload");
 
   const aidHe = makeAid("pron_he");
   setupAssistant(aidHe, { pronouns: "he/him" });
   const ctxHe = cb.buildCharacterContext(aidHe);
-  assert(/Speak as him, not about him/.test(ctxHe.system), "he/him identity → 'him' voice anchor");
-  assert(/He's mid-conversation/.test(ctxHe.system), "he/him identity → He's");
-  assert(/Use his skills/.test(ctxHe.system), "he/him identity → Use his skills");
+  assert(/Speak as him, not about him/.test(ctxHe.slots.role), "he/him identity → 'him' voice anchor");
+  assert(/He's mid-conversation/.test(ctxHe.slots.role), "he/him identity → He's");
+  assert(/Use his skills/.test(ctxHe.slots.role), "he/him identity → Use his skills");
 
   const aidThey = makeAid("pron_they");
   setupAssistant(aidThey, { pronouns: "they/them" });
   const ctxThey = cb.buildCharacterContext(aidThey);
-  assert(/Speak as them, not about them/.test(ctxThey.system), "they/them identity → 'them' voice anchor");
-  assert(/They're mid-conversation/.test(ctxThey.system), "they/them identity → They're");
+  assert(/Speak as them, not about them/.test(ctxThey.slots.role), "they/them identity → 'them' voice anchor");
+  assert(/They're mid-conversation/.test(ctxThey.slots.role), "they/them identity → They're");
 
   // 空 pronouns → fallback they
   const aidEmpty = makeAid("pron_empty");
   setupAssistant(aidEmpty);
   const ctxEmpty = cb.buildCharacterContext(aidEmpty);
-  assert(/Speak as them, not about them/.test(ctxEmpty.system), "empty pronouns → fallback they/them");
+  assert(/Speak as them, not about them/.test(ctxEmpty.slots.role), "empty pronouns → fallback they/them");
 
   // upsert 支持 pronouns 字段
   const aidUpsert = makeAid("pron_upsert");

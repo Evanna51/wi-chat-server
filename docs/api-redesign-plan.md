@@ -471,31 +471,41 @@ stripSystemHints=false 与原实现等价）。
 现在共享 `clipText` 这个底层工具 + `<background>` 渲染逻辑（chat 走
 stripSystemHints=true，introspection 走 false，可单独切换）。
 
-### Phase 2: 端点合并 + 命名规范化 ✅ 已完成
+### Phase 2: 端点合并 + 命名规范化 ✅ 已完成（含 cleanup）
 
-**已落地**（[src/routes/chat.js](src/routes/chat.js)）：
+**第一轮：新增 + 旧端点 Deprecation**（commit dbd06db）：
 1. ✅ 新建 `POST /api/chat/context`（内部 `buildCharacterContext` + `shouldRetrieveMemory` +
    `retrieveMemory` + `composeForChat` 组装，返回 facts / narrative / prefill / etag）
 2. ✅ 新建 `GET /api/character/{id}` 取代 `/character/bootstrap`，返回 etag-able 静态 slots
-3. ✅ 新建 `POST /api/chat/turn` 取代 `/api/sync/push`（行为完全等价，内部调同一
-   `ingestTurnsBatch` + emit `turn.user.batch` 触发同样 subscribers）
+3. ✅ 新建 `POST /api/chat/turn` 取代 `/api/sync/push`（行为完全等价）
 4. ✅ 新建 `DELETE /api/chat/turn/{turnId}`（cascade 衍生数据清理）
-5. ✅ **删除 `POST /chat-with-memory`**（决策点 6 — 无客户端调用，server 内部不依赖）
-6. ✅ 4 个旧端点加 `Deprecation: true` + `Link: <successor>; rel="successor-version"` header：
-   - `POST /api/character/context` → `/api/chat/context`
-   - `GET /api/character/bootstrap` → `/api/character/{id}`
-   - `POST /api/tool/memory-context` → `/api/chat/context`
-   - `POST /api/sync/push` → `/api/chat/turn`
-7. ✅ 测试 546/546 passed；smoke test 验证 4 新端点 + 旧端点 deprecation header 正常
+5. ✅ 删除 `POST /chat-with-memory`（决策点 6 — 无客户端调用）
+
+**第二轮：cleanup（dev 客户端无兼容包袱）**：
+6. ✅ 删除 `GET /api/character/bootstrap`（Android caller 已切到 `getCharacter`）
+7. ✅ 删除 `POST /api/tool/memory-context`（Android `CharacterMemoryService` 切到 `chatContext`）
+8. ✅ 删除 `POST /api/sync/push`（Android `SyncQueueDrainer` 切到 `chatTurn`）
+9. ✅ `POST /api/character/context` 保留作 admin / debug / boot cache 端点；移除
+   `system` / `userPrefix` / `promptFragment` 字段，输出统一为 `slots` + `mergedSystem` +
+   `assistantPrefill`
+10. ✅ `buildCharacterContext` result schema cleanup：删旧字段，加 `assistantPrefill`
+11. ✅ admin UI prompt 预览组件改用 `mergedSystem` + `assistantPrefill`
+12. ✅ 客户端 chatbox-Android 完整迁移：
+    - `SyncQueueDrainer` syncPush → chatTurn（字段映射 ingested/deduped/rejected）
+    - `CharacterBootstrapStore` 缓存 schema `promptFragment` → `mergedSystem`，doRefresh
+      只走 `/api/character/context`（fallback 路径删除）
+    - `CharacterMemoryService.getMemoryContext` 改用 `/api/chat/context` 端点（保持
+      MemoryContextResponse schema 给 caller，内部解析 `memoryDecision.shouldRetrieve`）
+    - `CharacterMemoryApi.kt` 删 `MemoryContextRequest` + `PATH_MEMORY_CONTEXT` 常量
+    - `ChatServerApi.kt` 删 `syncPush` / `characterBootstrap` 方法；保留 `characterContext`
+      （admin/debug/boot cache）+ `snapshotPush` + `syncState`
+13. ✅ 测试 545/545 passed（之前 546，合并 1 个旧字段 assert 后微减）
 
 **`GET /api/sync/since` 推迟**：当前 `/api/sync/state` 是 counters（不是 events stream），
 `outbox_events` 表的 cursor-based 拉取设计较复杂；现有 WS 通道 + sync/state 已能满足需求，
 since 端点视后续真实需求再做。
 
-**完成标准** ✅：新客户端能完全不调旧端点。客户端 chatbox-Android 已添加新方法
-（[ChatServerApi.kt](../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatServerApi.kt)
-+ [ChatDtos.kt](../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatDtos.kt)），
-旧方法标 @Deprecated 但保留兼容。
+**完成标准** ✅：dev 客户端完整切到新 API，无兼容包袱；server 端 prompt schema 简洁。
 
 ### Phase 3: 客户端 SDK 与协议文档
 1. 写 `docs/client-prompt-merge-protocol.md` — canonical merge order + `<client>` slot 用法 + tool-loop 伪代码
@@ -534,15 +544,15 @@ since 端点视后续真实需求再做。
 
 | 当前 | 新 | 状态 |
 |---|---|---|
-| `GET /character/bootstrap` | `GET /api/character/{id}` | ✅ 新建 + 旧加 Deprecation |
+| `GET /character/bootstrap` | `GET /api/character/{id}` | ✅ **已删除**，新建已上线 |
 | `GET /character/identity` | `GET /api/character/{id}` 含 identity 字段 | 旧仍可用（admin UI 用） |
-| `POST /character/context` | `POST /api/chat/context` | ✅ 新建 + 旧加 Deprecation |
-| `POST /tool/memory-context` | `POST /api/chat/context` 内部组合 | ✅ 客户端不再单独调；旧加 Deprecation |
+| `POST /character/context` | `POST /api/chat/context` (chat hot path) / 保留作 admin / debug / boot cache | ✅ 新建已上线；旧端点保留但 schema cleanup（删 system/userPrefix/promptFragment 字段） |
+| `POST /tool/memory-context` | `POST /api/chat/context` 内部组合 | ✅ **已删除**，客户端走 chat/context |
 | `POST /tool/memory-recall` | `POST /api/tool/memory-recall` | 不变（agentic tool） |
 | `POST /tool/memory-correct` | `POST /api/tool/memory-correct` | 不变（agentic tool） |
 | `POST /tool/knowledge-add` | `POST /api/tool/knowledge-add` | 不变 |
 | `POST /chat-with-memory` | — | ✅ **已删除**（决策点 6） |
-| `POST /api/sync/push` | `POST /api/chat/turn` | ✅ 新建 + 旧加 Deprecation |
+| `POST /api/sync/push` | `POST /api/chat/turn` | ✅ **已删除**，新建已上线 |
 | `POST /api/sync/snapshot` | `POST /api/sync/snapshot` | 不变（assistants + turns 一次性同步，与 chat/turn 语义不同） |
 | `GET /api/sync/state` | `GET /api/sync/state` | 不变（简单 counters）；`/api/sync/since` 推迟，见 §6 Phase 2 |
 | — | `DELETE /api/chat/turn/{id}` | ✅ 新增 |

@@ -168,85 +168,8 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
 // /api/chat-with-memory 已于 Phase 2 删除（无客户端调用，server 内部也不依赖）。
 // 客户端走 /api/chat/context（获取 system prompt 数据）+ 自己调 LLM + /api/chat/turn 上传。
 
-router.post("/tool/memory-context", authMiddleware, async (req, res) => {
-  // Phase 2: 标 deprecated。新客户端走 POST /api/chat/context（合并 character/context + memory-context）
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Link", '</api/chat/context>; rel="successor-version"');
-
-  const schema = z.object({
-    assistantId: z.string().min(1),
-    sessionId: z.string().min(1),
-    userInput: z.string().min(1),
-    topK: z.number().int().positive().max(20).optional(),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-
-  const { assistantId, sessionId, userInput, topK } = parsed.data;
-  const decision = await shouldRetrieveMemory({ userInput, assistantId });
-  // 在所有 return 路径都附带 relationshipState 和 coreMemories：
-  //   relationshipState — 关系/情绪/精力实时快照
-  //   coreMemories      — 始终注入的关键记忆（is_pinned=1），跟 query 无关
-  // 客户端把这两个塞进 system prompt 就有"持久人设记忆"，不用每次靠语义检索碰运气。
-  const relationshipState = safeBuildRelationshipState(assistantId);
-  const coreMemories = safeGetCoreMemories(assistantId);
-
-  if (!config.memoryRetrievalEnabled) {
-    return res.json({
-      ok: true,
-      shouldRetrieve: false,
-      intent: "small_talk",
-      reason: "memory_retrieval_disabled",
-      decisionSource: "system",
-      memoryLines: [],
-      relationshipState,
-      coreMemories,
-    });
-  }
-
-  if (!decision.shouldRetrieve) {
-    return res.json({
-      ok: true,
-      shouldRetrieve: false,
-      intent: decision.intent || "small_talk",
-      reason: decision.reason,
-      decisionSource: decision.source,
-      memoryLines: [],
-      relationshipState,
-      coreMemories,
-    });
-  }
-
-  try {
-    const memories = await retrieveMemory({
-      assistantId,
-      sessionId,
-      query: decision.query || userInput,
-      topK: topK || config.retrievalTopK,
-    });
-    const memoryLines = formatMemoryLines(memories);
-    const memoryGuidance = buildMemoryGuidance(memoryLines);
-    return res.json({
-      ok: true,
-      shouldRetrieve: true,
-      intent: decision.intent || "fact_query",
-      reason: decision.reason,
-      decisionSource: decision.source,
-      retrievalQuery: decision.query || userInput,
-      memoryLines,
-      memoryGuidance,
-      memories: memories.map((item) => ({
-        id: item.id,
-        content: item.content,
-        score: item.score,
-      })),
-      relationshipState,
-      coreMemories,
-    });
-  } catch (error) {
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
+// /api/tool/memory-context 已于 Phase 2 cleanup 删除（决策点：仅 dev 客户端，无兼容包袱）。
+// 客户端走 POST /api/chat/context — 内部合并了 memory decision + retrieval。
 
 function safeGetCoreMemories(assistantId) {
   try {
@@ -529,30 +452,30 @@ router.get("/character/identity/vocab", authMiddleware, (_req, res) => {
   });
 });
 
+/**
+ * POST /api/character/context — 角色认知层 inspect 端点（admin / debug 用）。
+ *
+ * 客户端 chat hot path 不再使用此端点 —— 走 /api/chat/context（含 facts /
+ * narrative / prefill / tool_protocol slots）。本端点保留给 admin UI 和 debug
+ * 工具看 7 层认知态全貌（identity / characterState / dynamics / emotion /
+ * socialMode / activeTopics / recentEpisodes / latestReflection / salientPhrase）
+ * + 渲染好的 V_NEW_LEAN slots + assistantPrefill。
+ *
+ * Phase 2 cleanup：移除旧字段 system / userPrefix / promptFragment，外部统一用
+ * slots（结构化）+ assistantPrefill（独白片段）。
+ */
 router.post("/character/context", authMiddleware, (req, res) => {
-  // Phase 2: 标 deprecated。新客户端走 POST /api/chat/context（同时拼好 facts +
-  // narrative + tool_protocol，省掉客户端单独调 memory-context）
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Link", '</api/chat/context>; rel="successor-version"');
-
   const schema = z.object({
     assistantId: z.string().trim().min(1),
-    sessionId: z.string().trim().optional(),
-    includePromptFragment: z.boolean().optional(),
-    // CC-5.D：可选传 last user message，server 跑 salient phrase detection 并
-    // 在 userPrefix 独白开篇插一行"X 这两个字我盯了一下"。
     lastUserMessage: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
-  // CC-5 dedup: includePromptFragment 默认 false（旧 client 显式传 true 兼容）。
-  // 默认响应去掉 promptFragment + identity.characterBackground，避免 character_background
-  // 在 system / promptFragment / identity 三处重复出现。
-  const { assistantId, includePromptFragment = false, lastUserMessage } = parsed.data;
+  const { assistantId, lastUserMessage } = parsed.data;
   try {
-    const ctx = buildCharacterContext(assistantId, { includePromptFragment, lastUserMessage });
+    const ctx = buildCharacterContext(assistantId, { lastUserMessage });
     if (!ctx) {
       return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
     }
@@ -562,56 +485,8 @@ router.post("/character/context", authMiddleware, (req, res) => {
   }
 });
 
-/**
- * GET /api/character/bootstrap?assistantId=xxx
- *
- * 客户端 session 启动 / 每日固定 调一次，一把拿齐拼 system prompt 的所有静态/会话级信息：
- *   - profile           对照本地缓存（客户端权威，server 返回仅用于对比；server 无记录则为 null）
- *   - relationshipState 关系/情绪/精力实时快照（无 row 时 ensureDefaultState 兜底初始化）
- *   - coreMemories      pinned=1 的关键记忆，跟 query 无关，始终注入
- *
- * 与 /api/tool/memory-context 区分：bootstrap 只取静态/会话级，不做语义检索；
- * memory-context 才是每轮对话的查询入口。
- */
-router.get("/character/bootstrap", authMiddleware, (req, res) => {
-  // Phase 2: 标 deprecated。新客户端走 GET /api/character/{id}（合并 profile + identity +
-  // 静态 slots + etag）。
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Link", '</api/character/{assistantId}>; rel="successor-version"');
-
-  const schema = z.object({ assistantId: z.string().trim().min(1) });
-  const parsed = schema.safeParse(req.query || {});
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: parsed.error.message });
-  }
-  const { assistantId } = parsed.data;
-  try {
-    ensureDefaultState(assistantId);
-    const row = getAssistantProfile(assistantId);
-    const profile = row
-      ? {
-          assistantId: row.assistant_id,
-          characterName: row.character_name,
-          characterBackground: row.character_background,
-          assistantType: row.assistant_type || "",
-        }
-      : null;
-    const relationshipState = safeBuildRelationshipState(assistantId);
-    const coreMemories = safeGetCoreMemories(assistantId);
-    const coreFacts = safeGetCoreFacts(assistantId);
-    return res.json({
-      ok: true,
-      assistantId,
-      profile,
-      relationshipState,
-      coreMemories,
-      coreFacts,
-      ts: Date.now(),
-    });
-  } catch (error) {
-    return res.status(500).json({ ok: false, error: error.message || String(error) });
-  }
-});
+// /api/character/bootstrap 已于 Phase 2 cleanup 删除（决策点：仅 dev 客户端，无兼容包袱）。
+// 客户端走 GET /api/character/{id}（合并 profile + identity + 静态 slots + etag）。
 
 /**
  * Agentic RAG 搜索端点：给 app 端 LLM 的 search_memory tool 直接调用。

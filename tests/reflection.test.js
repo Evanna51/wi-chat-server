@@ -196,7 +196,7 @@ console.log("\n[Suite 3] characterContextBuilder reflection injection");
   // 初始 ctx 没 reflection
   let ctx = buildCharacterContext(aid);
   assert(!ctx.latestReflection, "no reflection initially");
-  assert(!/最近觉得/.test(ctx.userPrefix || ""), "no reflection line in userPrefix initially");
+  assert(!/最近觉得/.test(ctx.assistantPrefill || ""), "no reflection line in assistantPrefill initially");
 
   // 插一条 fresh reflection
   ref.insertReflection({
@@ -215,9 +215,9 @@ console.log("\n[Suite 3] characterContextBuilder reflection injection");
   });
   ctx = buildCharacterContext(aid);
   assert(ctx.latestReflection && ctx.latestReflection.summary.includes("fresh"), "latestReflection in payload");
-  // CC-5.C: reflection 不再有结构化 prompt 段，改成 userPrefix 独白里一行 "最近觉得：..."
-  assert(/最近觉得/.test(ctx.userPrefix), "userPrefix has reflection monologue line");
-  assert(/fresh reflection/.test(ctx.userPrefix), "reflection summary surfaced in userPrefix");
+  // CC-5.C: reflection 不再有结构化 prompt 段，改成 assistantPrefill 独白里一行 "最近觉得：..."
+  assert(/最近觉得/.test(ctx.assistantPrefill), "assistantPrefill has reflection monologue line");
+  assert(/fresh reflection/.test(ctx.assistantPrefill), "reflection summary surfaced in assistantPrefill");
 
   // 老 reflection (15d 前) 不应被注入
   db.prepare("DELETE FROM relationship_reflection WHERE assistant_id = ?").run(aid);
@@ -237,7 +237,7 @@ console.log("\n[Suite 3] characterContextBuilder reflection injection");
   });
   const ctxStale = buildCharacterContext(aid);
   assert(!ctxStale.latestReflection, "stale reflection (>14d) excluded from payload");
-  assert(!/最近觉得/.test(ctxStale.userPrefix || ""), "stale reflection excluded from userPrefix");
+  assert(!/最近觉得/.test(ctxStale.assistantPrefill || ""), "stale reflection excluded from assistantPrefill");
 }
 
 // ── Suite 4: text clipping ─────────────────────────────────────

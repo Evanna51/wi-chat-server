@@ -68,32 +68,9 @@ function emitUserBatchEvents(perAssistantStats, { cause, userId = null } = {}) {
   }
 }
 
-router.post("/push", authMiddleware, (req, res) => {
-  // Phase 2: 标 deprecated（语义重命名）。新客户端走 POST /api/chat/turn
-  // —— 行为完全一致（内部都调 ingestTurnsBatch），只是命名按"客户端在做什么"。
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Link", '</api/chat/turn>; rel="successor-version"');
-
-  const parsed = pushSchema.safeParse(req.body || {});
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: parsed.error.message });
-  }
-  const { deviceId, turns } = parsed.data;
-  try {
-    const result = ingestTurnsBatch({ deviceId, turns });
-    emitUserBatchEvents(result.perAssistantStats, { cause: "sync.push" });
-    return res.json({
-      ok: true,
-      deviceId,
-      accepted: result.accepted,
-      skipped: result.skipped,
-      rejected: result.rejected,
-      details: result.details,
-    });
-  } catch (error) {
-    return res.status(500).json({ ok: false, error: error.message || String(error) });
-  }
-});
+// /api/sync/push 已于 Phase 2 cleanup 删除（决策点：仅 dev 客户端，无兼容包袱）。
+// 客户端走 POST /api/chat/turn — 行为完全等价，命名按"客户端在做什么"。
+// /api/sync/snapshot 保留（assistants + turns 一次性同步，不同语义，未被 chat/turn 取代）。
 
 /**
  * 一次性同步 assistants + turns 的"快照式" endpoint。

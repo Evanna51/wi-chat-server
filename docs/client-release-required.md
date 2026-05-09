@@ -198,9 +198,17 @@
 
 ### 状态
 
-- ✅ 服务端落地（Phase 1a / 1b / 2 共 5 个 commit on dev branch）
+- ✅ 服务端落地（Phase 1a / 1b / 2 + cleanup 共 7 个 commit on dev branch）
 - ✅ Android API 客户端方法 + DTO 已加
-- ⏳ Android 现有 caller（SyncQueueDrainer / CharacterBootstrapStore）迁移待 mobile 团队下次迭代
+- ✅ **Android 现有 caller 完整迁移**：
+  - `SyncQueueDrainer.kt` syncPush → chatTurn（字段映射 ingested/deduped/rejected）
+  - `CharacterBootstrapStore.kt` 缓存 schema `promptFragment` → `mergedSystem`，doRefresh
+    fallback 路径删除（仅走 `/api/character/context`）
+  - `CharacterMemoryService.kt` getMemoryContext 改用 `/api/chat/context`
+  - `CharacterMemoryApi.kt` 删 PATH_MEMORY_CONTEXT + MemoryContextRequest
+  - `ChatServerApi.kt` 删 syncPush / characterBootstrap 旧方法；保留 characterContext 作
+    admin/debug/boot cache 用
+  - `ChatViewModel.kt` buildBootstrapPrefixIfAny 改用 cache.mergedSystem
 
 ---
 

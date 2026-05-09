@@ -123,18 +123,19 @@ const DYNAMICS_FRAGMENT_TEMPLATES = Object.freeze([
 ]);
 
 /**
- * 主入口：返回完整 payload + system/userPrefix 双段。
+ * 主入口：返回 7 层认知态 payload + V_NEW_LEAN slots + assistantPrefill。
+ *
+ * Phase 2 cleanup：移除旧 `system` / `userPrefix` / `promptFragment` 字段（V_NEW_LEAN
+ * 落地后 chat path 走 slots；旧字段无 caller，无 dev 客户端兼容包袱）。
  *
  * @param {string} assistantId
  * @param {object} [opts]
  * @param {number}  [opts.now]
- * @param {boolean} [opts.includePromptFragment]    默认 false（deprecated 字段，opt-in）
  * @param {string}  [opts.lastUserMessage]          可选；传了就跑 salient phrase detection
- *                                                  并在 userPrefix 独白开篇插一行
+ *                                                  并在 prefill 独白开篇插一行
  */
 function buildCharacterContext(assistantId, {
   now = Date.now(),
-  includePromptFragment = false,
   lastUserMessage,
 } = {}) {
   const profile = getAssistantProfile(assistantId);
@@ -195,31 +196,23 @@ function buildCharacterContext(assistantId, {
     salientPhrase,
   };
 
-  // system / userPrefix 总是返回 —— 这是 LLM 的实际输入（旧客户端用）。
-  // 只有 promptFragment（= system + userPrefix 简单拼接）是 opt-in，
-  // 因为它和 system+userPrefix 内容完全冗余、纯属向后兼容用。
-  const segs = buildPromptSegments({
-    identity,
-    profile,
+  // 角色独白片段（mood + dynamics 异常 + salient phrase + reflection 等 7 项压缩）。
+  // 客户端把它放到 system prompt 末尾作 [此刻] 段，给 LLM 锚定"角色当下视角"。
+  const assistantPrefill = buildUserMonologue({
     characterState,
     dynamicsState,
     now,
     salientPhrase,
-    activeTopics,
     recentEpisodes,
+    activeTopics,
     freshReflection,
   });
-  result.system = segs.system;
-  result.userPrefix = segs.userPrefix;
-  if (includePromptFragment) {
-    result.promptFragment = segs.combined;
-  }
+  result.assistantPrefill = assistantPrefill;
 
-  // Phase 1a — V_NEW_LEAN slots（新客户端用，向后兼容并存）
-  // 见 docs/api-redesign-plan.md §2.5 / §6 Phase 1a
-  // 注意：本次 Phase 1a 端点入参不带 coreFacts / retrievedMemories（那是 Phase 2
-  // /api/chat/context 端点的事）。slots.facts 会显示 "(no facts retrieved)" 占位 —
-  // 客户端按 canonical 顺序拼接时直接把 slots 喂进 system 即可，自己再插 <client>。
+  // V_NEW_LEAN 8 段 slots（chat path 客户端按 canonical 顺序拼）
+  // 见 docs/api-redesign-plan.md §2.5 + docs/client-prompt-merge-protocol.md
+  // /api/chat/context 端点会再补 facts + retrievedMemories；这里 buildCharacterContext
+  // 主要给 admin / debug 用，先用空 facts/retrieved 占位渲染。
   const composed = composeForChat({
     profile,
     identity,
@@ -229,7 +222,7 @@ function buildCharacterContext(assistantId, {
     activeEpisodes: recentEpisodes,
     activeTopics,
     salientPhrase,
-    prefill: segs.userPrefix,
+    prefill: assistantPrefill,
   });
   result.slots = composed.slots;
   result.mergedSystem = composed.mergedSystem;
