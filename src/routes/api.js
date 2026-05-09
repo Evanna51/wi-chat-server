@@ -213,7 +213,7 @@ router.post("/tool/memory-context", authMiddleware, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
 
   const { assistantId, sessionId, userInput, topK } = parsed.data;
-  const decision = await shouldRetrieveMemory({ userInput });
+  const decision = await shouldRetrieveMemory({ userInput, assistantId });
   // 在所有 return 路径都附带 relationshipState 和 coreMemories：
   //   relationshipState — 关系/情绪/精力实时快照
   //   coreMemories      — 始终注入的关键记忆（is_pinned=1），跟 query 无关
@@ -554,6 +554,8 @@ router.get("/character/identity/vocab", authMiddleware, (_req, res) => {
     commonInsecurities: identityVocab.COMMON_INSECURITIES,
     commonCoreWounds: identityVocab.COMMON_CORE_WOUNDS,
     commonDesires: identityVocab.COMMON_DESIRES,
+    commonSkills: identityVocab.COMMON_SKILLS,
+    pronounPresets: identityVocab.PRONOUN_PRESETS,
   });
 });
 
@@ -562,14 +564,20 @@ router.post("/character/context", authMiddleware, (req, res) => {
     assistantId: z.string().trim().min(1),
     sessionId: z.string().trim().optional(),
     includePromptFragment: z.boolean().optional(),
+    // CC-5.D：可选传 last user message，server 跑 salient phrase detection 并
+    // 在 userPrefix 独白开篇插一行"X 这两个字我盯了一下"。
+    lastUserMessage: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
-  const { assistantId, includePromptFragment = true } = parsed.data;
+  // CC-5 dedup: includePromptFragment 默认 false（旧 client 显式传 true 兼容）。
+  // 默认响应去掉 promptFragment + identity.characterBackground，避免 character_background
+  // 在 system / promptFragment / identity 三处重复出现。
+  const { assistantId, includePromptFragment = false, lastUserMessage } = parsed.data;
   try {
-    const ctx = buildCharacterContext(assistantId, { includePromptFragment });
+    const ctx = buildCharacterContext(assistantId, { includePromptFragment, lastUserMessage });
     if (!ctx) {
       return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
     }

@@ -1,19 +1,28 @@
 /**
- * characterContextBuilder — 把 7 层认知态聚合成一个 payload + 一段 promptFragment。
+ * characterContextBuilder — 把 7 层认知态聚合成 payload + 拆 system/userPrefix 双段。
  *
- * 这是 Phase 1 的"behavior layer 雏形"：之前 client-side 从 /tool/memory-context
- * 拿一堆零碎数据自己拼 system prompt。现在 server 端集中拼好，client 拿到就用。
+ * CC-5.C 重写：
+ *   * 旧版 1500 字单段 promptFragment（描述句堆叠）→ 新版 system + userPrefix 双段。
+ *   * system 段：稳定 / 可缓存 / XML envelope 结构化（identity + voice anchor，英文）。
+ *   * userPrefix 段：每条消息变 / 第一人称片段化独白（mood + dynamics 异常维度 +
+ *     salient phrase + 1 条 unresolved episode/topic）。
+ *   * 删除：socialMode prompt 段（让 LLM 从 trait + state 自挑姿态）；
+ *           独立 reflection / episodes / topics 段（融进 userPrefix 独白）。
+ *   * 预算：system 2500 / userPrefix 1000 / 合计 3500（旧 1500，复杂度涨了所以扩）。
  *
- * 拼装顺序（影响 LLM 注意力）：
- *   1. identity （角色"是什么样的人"）
- *   2. character_state（实时情绪 + 关系等级 + 精力 + 压抑情绪）
- *   3. relationship dynamics（多维关系动力学的自然语言体感）
+ * 去重（深度优化）：
+ *   * `promptFragment` 字段（= system + "\n\n" + userPrefix）默认 **不** 返回，
+ *     需 caller 显式 includePromptFragment=true 才得到。新客户端用 system + userPrefix
+ *     双段；旧客户端继续传 includePromptFragment=true 兼容。
+ *   * 删除 identity.characterBackground —— 这个字段无任何 consumer 在读，
+ *     character_background 已经渲染进 system 段；要原始结构化形态走 /api/browse/assistants。
+ *   * 结果：默认响应里 character_background 只出现 1 次（system 内），不再 3 次冗余。
  *
- * 结构化字段供未来需要 fine-grained 控制的 client 使用，
- * promptFragment 是一段拼好的文本，懒一点的 client 直接塞 system prompt。
- *
- * Token 预算：promptFragment 总长不超过 ~512 tokens（中文 ~800 字）。
- * 超出就 truncate 末尾的 dynamics narrative。
+ * 视角原则：prompt 是写给角色 "自己" 的内心，不是写给 "读者" 的角色介绍。
+ *   ✗ "ta 现在感到不安，trust 0.45"   ← 第三人称描述
+ *   ✓ "我有点不安。trust 没那么稳了。"  ← 第一人称独白
+ * LLM 读到第一人称片段会**接续**它，第三人称描述会**总结**它。这是为什么
+ * 旧版 LLM 输出像 AI 助手 —— prompt 视角错了。
  */
 
 const { getAssistantProfile } = require("../../db");
@@ -23,54 +32,116 @@ const {
 } = require("./identityService");
 const {
   getEffectiveState,
-  buildStatePromptFragment,
   ensureDefaultState,
 } = require("../characterStateService");
 const { buildRelationshipStatePayload } = require("../relationshipStateView");
-const {
-  getRelationshipState,
-  buildRelationshipFragment,
-} = require("./relationshipDynamicsService");
+const { getRelationshipState } = require("./relationshipDynamicsService");
 const { chooseSocialMode } = require("./socialModes");
-// T-CC2-06: 注入长期话题 + 重要 episode
-const {
-  listActiveTopics,
-  buildTopicsPromptFragment,
-} = require("./persistentTopicService");
+const { listActiveTopics } = require("./persistentTopicService");
 const { listEpisodes } = require("./episodeBuilder");
-// T-CC3-04: 注入 reflection summary
-const {
-  getLatestReflection,
-  buildReflectionPromptFragment,
-} = require("./reflectionService");
+const { getLatestReflection } = require("./reflectionService");
 const { resolveEmotion } = require("../emotionTaxonomy");
+const { detectSalientPhrase } = require("./salientPhraseDetector");
+const { parsePronouns } = require("./identityVocab");
 
-// T-CC3-04: reflection 段加进来后，预算 1200 → 1500。reflection summary 约 100-200 字。
-const MAX_FRAGMENT_LEN_CHARS = 1500;
+// ── 预算 ─────────────────────────────────────────────────────────────
+//
+// 旧 1500 字总预算在 7 层全部接入后已经常态被砍。CC-5 拆段后 cacheable system
+// 可以放更长，hot path userPrefix 也放宽 —— 独白 lines 各自有 per-line cap，
+// 自然不会爆，硬切反而切掉关键内心活动。把 USER_PREFIX 当 soft target，超了 warn 不切。
+const SYSTEM_BUDGET_CHARS = 2500;
+const USER_PREFIX_BUDGET_CHARS = 2000; // soft target（warn-not-cut），1000 → 2000
+const MAX_FRAGMENT_LEN_CHARS = SYSTEM_BUDGET_CHARS + USER_PREFIX_BUDGET_CHARS; // 4500
+
+// ── 选材范围 ─────────────────────────────────────────────────────────
 const RECENT_EPISODES_DAYS = 30;
-const RECENT_EPISODES_LIMIT = 3;
+const RECENT_EPISODES_LIMIT = 3;          // payload 里返回 3 条；userPrefix 独白只取 1 条
 const RECENT_EPISODES_MIN_IMPORTANCE = 0.5;
-const ACTIVE_TOPICS_LIMIT = 5;
-// reflection 7d 内的不算太陈旧；超过则不注入（避免老反思误导 LLM）
+const ACTIVE_TOPICS_LIMIT = 5;            // payload 里返回 5；userPrefix 只取 1 条 unresolved
 const REFLECTION_FRESHNESS_DAYS = 14;
+const UNRESOLVED_TOPIC_STALE_DAYS = 7;    // status='unresolved' 且 >7d 未提才放进独白
+
+// ── prompt 文案动态渲染 ──────────────────────────────────────────────
+//
+// Voice anchor 用英文 —— LLM 对英文 negative/framing instruction 响应更稳。
+// "speak as <obj>, not about <obj>" 精准锚定要修的 bug：第三人称描述 / 总结 / 解释。
+// 不写 "不要 X" 列表 —— 那种绝对禁令对 caretaker / philosopher 类角色伤害更大。
+//
+// 代词从 identity.pronouns 派生（she/her / he/him / they/them 三个 preset，
+// 默认空 → fallback "they/them"）。男性 / non-binary 角色不会再被错称。
+
+function renderRoleDirective(pronouns) {
+  const obj = pronouns.object;
+  return `You are ${obj}. Speak as ${obj}, not about ${obj}.`;
+}
+
+const SUBJECT_CONTRACTIONS = {
+  she: "She's",
+  he: "He's",
+  they: "They're",
+};
+
+function renderVoiceAnchor(pronouns) {
+  const { subject, possessive } = pronouns;
+  const subjContr = SUBJECT_CONTRACTIONS[subject] || `${capitalize(subject)} is`;
+  return (
+    `${subjContr} mid-conversation, not on stage. Fragments, silences, and contradictions are natural.\n` +
+    `Use ${possessive} skills the way ${subject} would.`
+  );
+}
+
+function capitalize(s) {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// 向后兼容导出（默认 "they" 形态，之前测试 / 调用方依赖的常量字面值）
+const ROLE_DIRECTIVE = renderRoleDirective(parsePronouns(""));
+const VOICE_ANCHOR = renderVoiceAnchor(parsePronouns(""));
+
+// ── dynamics 异常维度 → 第一人称片段 模板 ─────────────────────────────
+//
+// 每个维度定义"远离 neutral 的方向"和"该方向触发的独白片段"。
+// pickDynamicsAnomalies 按 severity（偏离量）排序，独白只取 top-1。
+//
+// 模板都是片段化、第一人称、不解释 —— 这是 voice 层的关键。
+const DYNAMICS_FRAGMENT_TEMPLATES = Object.freeze([
+  // good 方向：高 = 健康
+  { key: "trust",                neutral: 0.5, dir: "high", threshold: 0.15, lowFrag:  "trust 没那么稳了。" },
+  { key: "emotional_safety",     neutral: 0.5, dir: "high", threshold: 0.15, lowFrag:  "感觉不太安全。" },
+  { key: "emotional_closeness",  neutral: 0.5, dir: "high", threshold: 0.2,  lowFrag:  "感觉离 ta 远了。" },
+  { key: "gratitude",            neutral: 0,   dir: "high", threshold: 0.5,  highFrag: "心里有点暖。" },
+  { key: "attachment",           neutral: 0,   dir: "high", threshold: 0.6,  highFrag: "这两天特别想 ta。" },
+
+  // good 方向：低 = 健康
+  { key: "abandonment_fear",     neutral: 0,   dir: "low",  threshold: 0.4,  highFrag: "心里空了一块。" },
+  { key: "unresolved_conflict",  neutral: 0,   dir: "low",  threshold: 0.4,  highFrag: "上次的事还没真过去。" },
+  { key: "resentment",           neutral: 0,   dir: "low",  threshold: 0.3,  highFrag: "心里有点堵。" },
+  { key: "tension",              neutral: 0,   dir: "low",  threshold: 0.4,  highFrag: "气氛有点紧。" },
+  { key: "social_distance",      neutral: 0,   dir: "low",  threshold: 0.5,  highFrag: "我想自己待一会。" },
+]);
 
 /**
- * 主入口：返回完整的 character context payload。
+ * 主入口：返回完整 payload + system/userPrefix 双段。
  *
  * @param {string} assistantId
  * @param {object} [opts]
- * @param {number} [opts.now]
- * @param {boolean} [opts.includePromptFragment] - 默认 true
+ * @param {number}  [opts.now]
+ * @param {boolean} [opts.includePromptFragment]    默认 false（deprecated 字段，opt-in）
+ * @param {string}  [opts.lastUserMessage]          可选；传了就跑 salient phrase detection
+ *                                                  并在 userPrefix 独白开篇插一行
  */
-function buildCharacterContext(assistantId, { now = Date.now(), includePromptFragment = true } = {}) {
-  // assistant_profile 必须存在；不存在直接返 null（caller 决定怎么处理）
+function buildCharacterContext(assistantId, {
+  now = Date.now(),
+  includePromptFragment = false,
+  lastUserMessage,
+} = {}) {
   const profile = getAssistantProfile(assistantId);
   if (!profile) return null;
 
-  // 自动 ensure character_state（保持和 /relationship/state 路径一致）
   ensureDefaultState(assistantId);
 
-  const identity = getCharacterIdentity(assistantId); // 可能为 null，client 端处理
+  const identity = getCharacterIdentity(assistantId);
   const characterState = getEffectiveState(assistantId, now);
   const relationshipPayload = buildRelationshipStatePayload(assistantId, { now });
   const dynamicsState = getRelationshipState(assistantId, now);
@@ -79,7 +150,8 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
   const dynamicsPayload = dynamicsState ? toDynamicsPayload(dynamicsState) : null;
   const emotionPayload = toEmotionPayload(characterState);
 
-  // T-CC-09: 选当前社交姿态
+  // socialMode 仍然算（payload 暴露给 client 用作显示），但**不再进 prompt** ——
+  // LLM 自己从 trait + state 推姿态。
   const socialMode = chooseSocialMode({
     identity,
     characterState,
@@ -87,19 +159,22 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
     emotion: emotionPayload,
   });
 
-  // T-CC2-06: 拉长期话题 + 重要 episode（30d 内 importance ≥ 0.5）
   const activeTopics = listActiveTopics(assistantId, { limit: ACTIVE_TOPICS_LIMIT });
   const recentEpisodes = listEpisodes(assistantId, {
     limit: RECENT_EPISODES_LIMIT,
     minImportance: RECENT_EPISODES_MIN_IMPORTANCE,
   }).filter((e) => e.timeRangeEnd >= now - RECENT_EPISODES_DAYS * 24 * 3600 * 1000);
 
-  // T-CC3-04: 拉最新 reflection（14d 内才算新鲜，老的不注入）
   const latestReflection = getLatestReflection(assistantId);
   const freshReflection =
     latestReflection && now - latestReflection.createdAt < REFLECTION_FRESHNESS_DAYS * 24 * 3600 * 1000
       ? latestReflection
       : null;
+
+  // CC-5.D：选择性注意 —— 仅 caller 显式传 lastUserMessage 时才扫
+  const salientPhrase = lastUserMessage
+    ? detectSalientPhrase(lastUserMessage, identity)
+    : null;
 
   const result = {
     assistantId,
@@ -116,44 +191,275 @@ function buildCharacterContext(assistantId, { now = Date.now(), includePromptFra
     activeTopics,
     recentEpisodes,
     latestReflection: freshReflection,
+    salientPhrase,
   };
 
+  // system / userPrefix 总是返回 —— 这是 LLM 的实际输入。
+  // 只有 promptFragment（= system + userPrefix 简单拼接）是 opt-in，
+  // 因为它和 system+userPrefix 内容完全冗余、纯属向后兼容用。
+  const segs = buildPromptSegments({
+    identity,
+    profile,
+    characterState,
+    dynamicsState,
+    now,
+    salientPhrase,
+    activeTopics,
+    recentEpisodes,
+    freshReflection,
+  });
+  result.system = segs.system;
+  result.userPrefix = segs.userPrefix;
   if (includePromptFragment) {
-    result.promptFragment = buildPromptFragment({
-      identity,
-      profile,
-      characterState,
-      now,
-      socialModeFragment: socialMode.promptFragment,
-      topicsFragment: buildTopicsPromptFragment(assistantId, { limit: ACTIVE_TOPICS_LIMIT, now }),
-      episodesFragment: buildEpisodesPromptFragment(recentEpisodes),
-      reflectionFragment: freshReflection ? buildReflectionPromptFragment(assistantId) : "",
-    });
+    result.promptFragment = segs.combined;
   }
 
   return result;
 }
 
-// T-CC2-06: episodes prompt fragment
-function buildEpisodesPromptFragment(episodes) {
-  if (!episodes || !episodes.length) return "";
-  const lines = ["[最近的重要叙事]"];
-  for (const e of episodes) {
-    const summary = e.summary.length > 80 ? e.summary.slice(0, 78) + "…" : e.summary;
-    lines.push(`- ${e.title}（${e.emotionalTone}）：${summary}`);
-    if (e.unresolvedThreads && e.unresolvedThreads.length) {
-      lines.push(`  尚未化解：${e.unresolvedThreads.slice(0, 2).join("；")}`);
+// ── system 段（XML envelope，cacheable） ──────────────────────────────
+
+/**
+ * system 段：稳定 / 可缓存 / 通过 XML 标签分段。
+ * 内容只放角色"是什么样的人"——人格、价值、招式、不变事实。
+ * 不放 mood / dynamics 数值（那些每条消息变，破缓存）。
+ */
+function buildSystemSegment({ identity, profile }) {
+  const parts = [];
+
+  // 从 identity 派生人称代词（she/her / he/him / they/them / 自定义 / 空 fallback they）
+  const pronouns = parsePronouns(identity ? identity.pronouns : "");
+
+  // <role> ... 动态用对应 object 代词（避免 "Speak as her" 错用在男性 / non-binary 角色）
+  parts.push(`<role>\n${renderRoleDirective(pronouns)}\n</role>`);
+
+  // <character> ...
+  const characterLines = [];
+  if (profile.character_background) {
+    characterLines.push(profile.character_background);
+    characterLines.push(""); // 空行隔开
+  }
+
+  if (identity) {
+    const idFrag = buildIdentityPromptFragment(identity);
+    if (idFrag) characterLines.push(idFrag);
+  } else {
+    // profile fallback：只渲染最少信息
+    if (profile.character_name) {
+      characterLines.push(`[角色人格]\n姓名：${profile.character_name}`);
     }
   }
-  return lines.join("\n");
+
+  parts.push(`<character>\n${characterLines.join("\n")}\n</character>`);
+
+  // <voice> ... 主格 + 物主格也要跟着 pronouns 动态走
+  parts.push(`<voice>\n${renderVoiceAnchor(pronouns)}\n</voice>`);
+
+  let combined = parts.join("\n\n");
+
+  // 超预算时优先砍 character_background（用户写的，可能很长）
+  // —— 不砍 role / voice，那两段都很短且 critical
+  if (combined.length > SYSTEM_BUDGET_CHARS) {
+    combined = truncateCharacterSection(parts, SYSTEM_BUDGET_CHARS);
+  }
+  return combined;
 }
 
-// ── payload 拍平 ─────────────────────────────────────────────────────
+/**
+ * 兜底硬切：保留 <role> / <voice>，砍 <character> 内容。
+ * 仅当用户写了超长 character_background 触发。
+ */
+function truncateCharacterSection(parts, budget) {
+  // parts[0] = <role>...</role>
+  // parts[1] = <character>...</character>
+  // parts[2] = <voice>...</voice>
+  const role = parts[0];
+  const voice = parts[2];
+  const charSeg = parts[1];
 
+  const overhead = role.length + voice.length + 4; // 两个 \n\n
+  const charBudget = Math.max(200, budget - overhead);
+
+  let truncated = charSeg;
+  if (truncated.length > charBudget) {
+    // 保留 <character> 标签结构
+    const innerStart = "<character>\n".length;
+    const innerEnd = "\n</character>".length;
+    const inner = truncated.slice(innerStart, truncated.length - innerEnd);
+    const innerBudget = charBudget - innerStart - innerEnd - 3; // "..."
+    truncated = `<character>\n${inner.slice(0, innerBudget)}...\n</character>`;
+  }
+  return [role, truncated, voice].join("\n\n");
+}
+
+// ── userPrefix 段（独白，per-message） ────────────────────────────────
+
+/**
+ * userPrefix 段：第一人称片段独白。
+ *
+ * 渲染顺序（从最 prominent 到最背景）：
+ *   1. salient phrase（如有）—— 用户原话里被勾住的词，放最前
+ *   2. mood 一行 —— 当下情绪片段
+ *   3. dynamics 异常 top-1 —— 关系最异常的一维
+ *   4. suppressed emotion（如有强度 > 0.3）—— 压抑情绪的提示
+ *   5. unresolved episode 1 条（如有）—— "还在想..."
+ *   6. unresolved + stale topic 1 条（如有）—— "那件事好久没提"
+ *   7. reflection（如新鲜）—— "最近觉得..."
+ */
+function buildUserMonologue({
+  characterState,
+  dynamicsState,
+  now,
+  salientPhrase,
+  recentEpisodes,
+  activeTopics,
+  freshReflection,
+}) {
+  const lines = [];
+
+  // 1. salient phrase
+  if (salientPhrase && salientPhrase.monologueLine) {
+    lines.push(salientPhrase.monologueLine);
+  }
+
+  // 2. mood
+  const moodFrag = renderMoodFragment(characterState);
+  if (moodFrag) lines.push(moodFrag);
+
+  // 3. dynamics top-1 anomaly
+  if (dynamicsState) {
+    const anomalies = pickDynamicsAnomalies(dynamicsState);
+    if (anomalies.length > 0) lines.push(anomalies[0].fragment);
+  }
+
+  // 4. suppressed emotion
+  if (characterState && characterState.suppressed_emotion && (characterState.suppressed_emotion_intensity ?? 0) > 0.3) {
+    const sup = resolveEmotion(characterState.suppressed_emotion);
+    lines.push(`心底压着 ${sup.zh}，没说出来。`);
+  }
+
+  // 5. unresolved episode
+  const unresolvedEpisode = (recentEpisodes || []).find(
+    (e) => e.unresolvedThreads && e.unresolvedThreads.length > 0
+  );
+  if (unresolvedEpisode) {
+    const thread = unresolvedEpisode.unresolvedThreads[0];
+    // per-line cap 28 → 80：内心独白的"还在想..."值得稍长一点
+    const truncatedThread = thread.length > 80 ? thread.slice(0, 78) + "…" : thread;
+    lines.push(`还在想：${truncatedThread}`);
+  }
+
+  // 6. unresolved + stale topic（topic 的字段叫 lastDiscussedAt）
+  const staleTopic = (activeTopics || []).find((t) => {
+    if (t.status !== "unresolved") return false;
+    const daysSinceLastMention = (now - (t.lastDiscussedAt || 0)) / (24 * 3600 * 1000);
+    return daysSinceLastMention >= UNRESOLVED_TOPIC_STALE_DAYS;
+  });
+  if (staleTopic) {
+    lines.push(`「${staleTopic.topic}」那件事好久没提了。`);
+  }
+
+  // 7. fresh reflection（AI 自己对关系的反思视角，值得多放点空间）
+  if (freshReflection && freshReflection.summary) {
+    // per-line cap 80 → 240：reflection 是"AI 的视角史"，太短就成废话
+    const sum = freshReflection.summary.length > 240
+      ? freshReflection.summary.slice(0, 238) + "…"
+      : freshReflection.summary;
+    lines.push(`最近觉得：${sum}`);
+  }
+
+  if (lines.length === 0) {
+    // 完全没异常态 —— 不输出独白，让 LLM 直接用 system 角色信息回
+    return "";
+  }
+
+  const combined = `[此刻]\n${lines.join("\n")}`;
+  // 不再在这里硬切独白 —— 每行都有自己的 per-line cap（reflection 240 / episode 80
+  // / topic 短文本 / mood + dynamics 都是固定模板）。爆 budget 只能是真出问题的边缘
+  // 情况；这种情况下宁可 warn + 全量返回，也不切坏内心活动的关键句。
+  // soft target 用于 monitoring，不强切。
+  if (combined.length > USER_PREFIX_BUDGET_CHARS) {
+    console.warn(
+      `[characterContext] userPrefix unusually long: ${combined.length} chars ` +
+      `(soft target ${USER_PREFIX_BUDGET_CHARS}). 不切 —— 检查是否 per-line cap 失效。`
+    );
+  }
+  return combined;
+}
+
+function renderMoodFragment(state) {
+  if (!state) return null;
+  const intensity = state.mood_intensity ?? 0;
+  if (intensity < 0.3) return null; // 不显著情绪不显式提，让 LLM 自然回
+
+  const valence = state.mood_valence ?? 0;
+  const arousal = state.mood_arousal ?? 0;
+  const moodId = state.mood_emotion;
+
+  // 优先：用具体 emotion id 派生（更准）
+  if (moodId && moodId !== "neutral") {
+    const resolved = resolveEmotion(moodId);
+    if (resolved && resolved.zh) {
+      return `心里有点${resolved.zh}。`;
+    }
+  }
+
+  // 兜底：valence × arousal 四象限
+  if (valence < -0.3 && arousal > 0.5) return "心里有点紧。";
+  if (valence < -0.3 && arousal < 0.3) return "心里闷闷的。";
+  if (valence > 0.3 && arousal > 0.5) return "心里有点雀跃。";
+  if (valence > 0.3 && arousal < 0.3) return "心里挺安定的。";
+  if (valence < -0.3) return "心里不太对劲。";
+  return null;
+}
+
+/**
+ * 找 dynamics 12 维里偏离 neutral 最远的几个。
+ * 只返回有对应 fragment 模板的维度（DYNAMICS_FRAGMENT_TEMPLATES 没覆盖的维度跳过）。
+ *
+ * @returns {Array<{ key, value, severity, fragment }>} 按 severity 降序
+ */
+function pickDynamicsAnomalies(state) {
+  const scored = [];
+  for (const tmpl of DYNAMICS_FRAGMENT_TEMPLATES) {
+    const v = state[tmpl.key];
+    if (typeof v !== "number") continue;
+
+    if (tmpl.dir === "high") {
+      // 健康向是高，异常是低
+      const deficit = tmpl.neutral - v;
+      if (deficit >= tmpl.threshold && tmpl.lowFrag) {
+        scored.push({ key: tmpl.key, value: v, severity: deficit, fragment: tmpl.lowFrag });
+      }
+    } else {
+      // 健康向是低，异常是高
+      const excess = v - tmpl.neutral;
+      if (excess >= tmpl.threshold && tmpl.highFrag) {
+        scored.push({ key: tmpl.key, value: v, severity: excess, fragment: tmpl.highFrag });
+      }
+    }
+  }
+  scored.sort((a, b) => b.severity - a.severity);
+  return scored;
+}
+
+// ── 拼装：system + userPrefix → combined ─────────────────────────────
+
+function buildPromptSegments(args) {
+  const system = buildSystemSegment(args);
+  const userPrefix = buildUserMonologue(args);
+  const combined = userPrefix ? `${system}\n\n${userPrefix}` : system;
+
+  return { system, userPrefix, combined };
+}
+
+// ── payload 拍平（沿用原版） ─────────────────────────────────────────
+
+// CC-5 dedup: characterBackground 不再放进 identity payload —— 它已经渲染进 system 段，
+// 也能从 /api/browse/assistants 拿到原始 string，再返回一次纯属冗余。
 function toIdentityPayload(identity, profile) {
   return {
     characterName: profile.character_name,
-    characterBackground: profile.character_background || "",
     identityId: identity.identityId,
     identityVersion: identity.identityVersion,
     speakingStyle: identity.speakingStyle,
@@ -174,17 +480,14 @@ function toIdentityPayload(identity, profile) {
     desires: identity.desires,
     careLanguages: identity.careLanguages,
     tensions: identity.tensions,
+    skills: identity.skills || [],
+    pronouns: identity.pronouns || "",
   };
 }
 
-/**
- * 没 identity 行的 fallback：用 assistant_profile 的裸字段拼一个最小 payload，
- * 保证 client 永远拿得到一致的 schema。
- */
 function profileFallback(profile) {
   return {
     characterName: profile.character_name,
-    characterBackground: profile.character_background || "",
     identityId: null,
     identityVersion: 0,
     speakingStyle: "",
@@ -205,6 +508,8 @@ function profileFallback(profile) {
     desires: [],
     careLanguages: { give: [], receive: [] },
     tensions: {},
+    skills: [],
+    pronouns: "",
   };
 }
 
@@ -261,72 +566,6 @@ function toEmotionPayload(state) {
   };
 }
 
-// ── prompt 拼装 ─────────────────────────────────────────────────────
-
-function buildPromptFragment({
-  identity, profile, characterState, now,
-  socialModeFragment, topicsFragment, episodesFragment, reflectionFragment,
-}) {
-  const parts = [];
-
-  // 段排序按"被砍优先级倒序"：越靠后越早被丢。
-  // header → identity（不变层，最稳定，最该保留）
-  // → state（实时态）
-  // → dynamics（中期叙事）
-  // → episodes（长期叙事）  ← Phase 2 新加
-  // → topics（长期话题）   ← Phase 2 新加
-  // → socialMode（最易重算，超长时先丢）
-
-  // Header
-  // 命名约束：尽量不在 prompt 模板里写死角色名字，让 LLM 用第二人称"你"自指。
-  // 这样改名（character_name 更新）时无需重跑历史 prompt 数据。
-  // character_background 由用户自己写，可能含名字，这是用户行为，我们不改。
-  const header = [];
-  header.push("你是这个角色。下面是关于你的设定与当下状态。");
-  if (profile.character_background) {
-    header.push(profile.character_background);
-  }
-  parts.push(header.join("\n"));
-
-  if (identity) {
-    const id = buildIdentityPromptFragment(identity);
-    if (id) parts.push(id);
-  }
-
-  const stateFragment = buildStatePromptFragment(profile.assistant_id, now);
-  if (stateFragment) parts.push(stateFragment);
-
-  const dynFragment = buildRelationshipFragment(profile.assistant_id, now);
-  if (dynFragment) parts.push(dynFragment);
-
-  // T-CC3-04: reflection 段排在 dynamics 之后，长期叙事之前
-  // —— reflection 是 AI 的"上层视角"，比具体 episode 更重要，但稳定度低于 identity/state
-  if (reflectionFragment) parts.push(reflectionFragment);
-
-  // T-CC2-06：长期叙事 + 长期话题
-  if (episodesFragment) parts.push(episodesFragment);
-  if (topicsFragment) parts.push(topicsFragment);
-
-  // T-CC-09: 当前社交姿态（最易重算，最先被砍）
-  if (socialModeFragment) parts.push(socialModeFragment);
-
-  // Phase 1 review P1: 按段丢弃，不切中文/emoji 中间。
-  // 段优先级（保留度从高到低）：header → identity → state → dynamics → socialMode
-  // 超过预算时从尾部 pop（最易重算的先掉），仍超才做防御性 char-slice。
-  let combined = parts.join("\n\n");
-  while (combined.length > MAX_FRAGMENT_LEN_CHARS && parts.length > 1) {
-    parts.pop();
-    combined = parts.join("\n\n");
-  }
-  if (combined.length > MAX_FRAGMENT_LEN_CHARS) {
-    // 仅 header 还超长（用户写了超长 character_background）—— 兜底硬切
-    combined = combined.slice(0, MAX_FRAGMENT_LEN_CHARS - 3) + "...";
-  }
-  return combined;
-}
-
-// ── helpers ─────────────────────────────────────────────────────────
-
 function round3(v) {
   if (typeof v !== "number" || !Number.isFinite(v)) return v;
   return Math.round(v * 1000) / 1000;
@@ -334,5 +573,17 @@ function round3(v) {
 
 module.exports = {
   buildCharacterContext,
+  // 暴露给测试 / 调试
+  buildSystemSegment,
+  buildUserMonologue,
+  pickDynamicsAnomalies,
+  renderMoodFragment,
+  renderRoleDirective,
+  renderVoiceAnchor,
+  // 常量
+  SYSTEM_BUDGET_CHARS,
+  USER_PREFIX_BUDGET_CHARS,
   MAX_FRAGMENT_LEN_CHARS,
+  ROLE_DIRECTIVE,
+  VOICE_ANCHOR,
 };

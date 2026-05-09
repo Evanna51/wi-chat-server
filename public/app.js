@@ -161,6 +161,11 @@ const ZH = {
     avoidant: "回避型",
     disorganized: "混乱型",
   },
+  pronoun: {
+    "she/her": "她（she/her）",
+    "he/him": "他（he/him）",
+    "they/them": "ta（they/them，gender-neutral）",
+  },
   socialStrategy: {
     casual: "日常闲聊",
     defensive: "自我保护",
@@ -180,19 +185,24 @@ const ZH = {
     avoidant_attachment: "回避依恋", disorganized_attachment: "混乱依恋",
     rational_suppressive: "理性压抑情绪", emotionally_expressive: "情绪外放",
     melancholic: "易陷低落", even_keeled: "情绪平稳", volatile: "起伏剧烈",
+    stoic: "坚忍内敛",
     high_sensitivity: "高度敏感", low_sensitivity: "低敏感",
     thin_skinned: "易受伤", thick_skinned: "不易受伤",
     people_pleasing: "讨好倾向", defensive_aloof: "防御性疏离",
     controlling: "控制欲", submissive: "顺从",
     playful_teasing: "嬉戏调侃", withdrawn: "退缩",
+    blunt: "直率", dry_witted: "反讽倾向",
     high_empathy: "高共情", low_empathy: "低共情",
     selective_empathy: "选择性共情",
     easily_jealous: "易嫉妒", possessive: "占有欲", non_possessive: "不占有",
+    vindictive: "记仇",
     perfectionist: "完美主义", self_critical: "自我批判",
     self_accepting: "自我接纳", self_aggrandizing: "自我膨胀",
+    prideful: "高自尊", shame_prone: "羞耻倾向", brooding: "反复反刍",
     romantic_idealist: "浪漫理想化", cynical_realist: "愤世现实",
     intellectually_romantic: "智性浪漫",
     verbose: "话多", taciturn: "寡言", eloquent: "善表达",
+    theatrical: "戏剧化",
   },
   careLanguage: {
     verbal_affirmation: "言语肯定",
@@ -212,6 +222,7 @@ const ZH = {
     vulnerability_vs_pride: "示弱 vs 自尊",
   },
   insecurity: {
+    // 西方个体化
     fear_of_abandonment: "害怕被抛弃",
     fear_of_being_boring: "害怕无趣",
     fear_of_being_replaced: "害怕被取代",
@@ -232,8 +243,18 @@ const ZH = {
     fear_of_vulnerability: "害怕脆弱",
     fear_of_disappointing_others: "害怕让人失望",
     fear_of_aging: "害怕衰老",
+    // 东亚 / 中文文化语境
+    fear_of_losing_face: "怕丢面子",
+    fear_of_burdening_others: "怕给人添麻烦",
+    fear_of_disappointing_family: "怕让家人失望",
+    fear_of_being_compared_unfavorably: "怕'别人家的孩子'",
+    fear_of_standing_out: "怕出头",
+    fear_of_being_unfilial: "怕被说不孝",
+    fear_of_being_left_behind_socially: "怕掉队",
+    fear_of_emotional_exposure: "怕情绪外露",
   },
   wound: {
+    // 西方个体化
     childhood_neglect: "童年忽视",
     betrayal_trauma: "背叛创伤",
     performance_conditional_love: "表现换爱",
@@ -251,6 +272,40 @@ const ZH = {
     emotional_incest: "情感越界",
     public_humiliation: "公开羞辱",
     religious_or_cultural_trauma: "宗教 / 文化创伤",
+    // 东亚 / 中文文化语境
+    academic_pressure_trauma: "升学 / 成绩压力创伤",
+    chronic_comparison_to_peers: "长期被比较",
+    emotional_suppression_household: "家中情绪压抑",
+    only_child_loneliness: "独生子女孤独",
+    left_behind_child: "留守儿童",
+    patriarchal_devaluation: "重男轻女",
+    discipline_through_shame: "羞辱式管教",
+    parents_loveless_marriage_witnessing: "见证父母无爱婚姻",
+  },
+  skill: {
+    // 智性表达
+    literary_allusion: "文学引用",
+    philosophical_volley: "哲思辩驳",
+    code_switching: "中英 / 方言切换",
+    scientific_reference: "科学 / 数据引用",
+    // 玩闹
+    meme_literacy: "玩梗",
+    verbal_sparring: "怼人 / 嘴硬",
+    dark_humor: "黑色幽默",
+    self_deprecation_as_art: "自嘲艺术化",
+    // 情感
+    coquettish_baby_talk: "撒娇",
+    wordless_affection: "无言示意（嗯 / 表情 / 小动作）",
+    indirect_love_letter: "借物喻情",
+    // 防御
+    topic_pivot: "主动转移话题",
+    playing_dumb: "装糊涂",
+    selective_silence: "战略性沉默",
+    // 节奏
+    fragmented_speech: "片段化表达",
+    ritual_phrases: "仪式感套话（早 / 晚安）",
+    netspeak: "网络用语",
+    particles_register: "语气词体系（嘛 / 哟 / 鸭）",
   },
   dynamicDim: {
     trust: "信任",
@@ -848,14 +903,14 @@ async function viewSearch() {
 
 const TABS = [
   { id: "overview", label: "概览" },
+  { id: "manage", label: "角色设定" },
   { id: "conversation", label: "对话" },
-  { id: "memory", label: "记忆" },
-  { id: "journal", label: "行为日志" },
-  { id: "facts", label: "事实" },
   { id: "identity", label: "Identity" },
   { id: "cognition", label: "认知" },
   { id: "intent", label: "意图" },
-  { id: "manage", label: "管理" },
+  { id: "memory", label: "记忆" },
+  { id: "facts", label: "事实" },
+  { id: "journal", label: "行为日志" },
 ];
 
 async function viewCharacter(assistantId, tabId = "overview") {
@@ -1539,8 +1594,23 @@ async function renderIdentityTab(body, a) {
   // 基本属性
   row("ageYears", "年龄（岁）",
     el("input", { id: "id-age", type: "number", value: id.ageYears ?? "", style: "width: 100px" }));
-  row("genderExpression", "性别表达",
+  row("genderExpression", "性别表达（自由文本，如 feminine / masculine / androgynous）",
     el("input", { id: "id-gender", value: id.genderExpression || "" }));
+
+  // pronouns: input + datalist（3 preset 自动补全 + 允许自定义如 xe/xem）
+  // 这是 system <role> "Speak as <obj>" 的代词来源 —— 留空会默认 they/them
+  const pronounsList = el("datalist", { id: "pronoun-presets" });
+  for (const p of vocab.pronounPresets || ["she/her", "he/him", "they/them"]) {
+    pronounsList.appendChild(el("option", { value: p }));
+  }
+  const pronounsInput = el("input", {
+    id: "id-pronouns",
+    list: "pronoun-presets",
+    value: id.pronouns || "",
+    placeholder: "she/her | he/him | they/them（留空 → they/them）",
+  });
+  row("pronouns", "英文人称代词（驱动 voice anchor 渲染，避免错称）",
+    el("div", {}, [pronounsInput, pronounsList]));
   row("speakingStyle", "说话风格",
     el("textarea", { id: "id-speaking", rows: 3 }, id.speakingStyle || ""));
   row("worldview", "世界观 / 人生观",
@@ -1601,7 +1671,7 @@ async function renderIdentityTab(body, a) {
     const tname = e.target?.dataset?.tension;
     if (tname) document.getElementById(`tv-${tname}`).textContent = e.target.value;
   });
-  row(`tensions`, `内在张力（${vocab.tensions.length} 个维度，值靠近 1 偏向左项）`, tensionsBox);
+  row(`tensions`, `内在张力（${vocab.tensions.length} 个维度）`, tensionsBox);
 
   // careLanguages: give / receive 各 5 个 checkbox — 带中文
   const careGive = new Set((id.careLanguages?.give) || []);
@@ -1641,6 +1711,20 @@ async function renderIdentityTab(body, a) {
   tagField("coreWounds", "核心创伤", id.coreWounds, vocab.commonCoreWounds, ZH.wound);
   tagField("desires", "深层渴望", id.desires, vocab.commonDesires, ZH.desire);
 
+  // CC-5.B: skills 字段。后端支持 string | { name, examples } 两种格式。
+  // UI 用 tags 编辑名字（多选 / 自定义），保存时智能 merge：
+  //   - 名字仍在新 tag 列表 → 保留原 object（不丢 examples）
+  //   - 名字被删 → 整条丢
+  //   - 新名字 → string 形式加进去（暂无 examples，需要 examples 走 API）
+  const originalSkills = id.skills || [];
+  const skillNamesNow = originalSkills.map((s) => (typeof s === "string" ? s : s.name));
+  const skillsHasExamples = originalSkills.some((s) => typeof s === "object" && Array.isArray(s.examples) && s.examples.length);
+  tagField("skills", "表达招式", skillNamesNow, vocab.commonSkills || [], ZH.skill);
+  if (skillsHasExamples) {
+    // 提示有现存 examples，删除某 skill 名时 examples 也会丢
+    grid.lastChild.appendChild(el("p", { class: "muted small" }, "（部分招式带角色专属 example，删除该招式名会一并丢失）"));
+  }
+
   form.appendChild(grid);
 
   const saveBtn = el("button", {
@@ -1657,6 +1741,7 @@ async function renderIdentityTab(body, a) {
       const fields = {
         ageYears: parseInt(document.getElementById("id-age").value, 10) || null,
         genderExpression: document.getElementById("id-gender").value,
+        pronouns: document.getElementById("id-pronouns").value.trim(),
         speakingStyle: document.getElementById("id-speaking").value,
         worldview: document.getElementById("id-worldview").value,
         personalityTraits: collectChecked("traits"),
@@ -1675,6 +1760,19 @@ async function renderIdentityTab(body, a) {
         desires: tagInputs.desires.getValues(),
         careLanguages: { give: collectChecked("care-give"), receive: collectChecked("care-recv") },
         tensions,
+        // skills: 把 tag input 的字符串名字映射回原始 object（保留 examples）
+        skills: (() => {
+          const editedNames = tagInputs.skills.getValues();
+          return editedNames.map((name) => {
+            const orig = originalSkills.find((s) =>
+              typeof s === "string" ? s === name : s.name === name
+            );
+            // 原本是 object 形态（带 examples）→ 保留整个 object
+            if (orig && typeof orig === "object") return orig;
+            // 原本是 string，或 UI 新加的 → 用 string 形态
+            return name;
+          });
+        })(),
       };
       try {
         const resp = await api.post("/api/character/identity/upsert", { assistantId: a.assistantId, ...fields });
@@ -1883,6 +1981,81 @@ async function renderCognitionTab(body, a) {
     }
   }
   body.appendChild(topicArticle);
+
+  // 5) Prompt 预览（CC-5.C）—— 让 admin 看到 LLM 实际拿到的 system + userPrefix
+  // 含一个简易 salient phrase 调试器：输入用户消息 → 看哪个 wound 被勾住
+  renderPromptPreview(body, a, ctx);
+}
+
+// CC-5.C: Prompt 预览组件 —— 显示 system + userPrefix 双段 + 选择性注意调试。
+function renderPromptPreview(parent, a, initialCtx) {
+  const article = el("article", {});
+  article.appendChild(el("header", {}, [
+    el("strong", {}, "Prompt 预览（CC-5.C）"),
+    el("small", { class: "muted" }, "  这是 LLM 实际拿到的 system + userPrefix。可输入测试消息看 salient phrase 触发。"),
+  ]));
+
+  // 调试输入框：用户消息 → 触发 salient phrase
+  const debugInput = el("input", {
+    type: "text",
+    placeholder: "输入一条用户消息试一下（如：算了，随便吧）",
+    style: "margin-bottom: 0.5rem",
+  });
+  const debugBtn = el("button", { class: "outline secondary" }, "刷新预览");
+
+  // 三个段落容器
+  const sysBlock = el("pre", { class: "wrap-pre prompt-block" }, "");
+  const userBlock = el("pre", { class: "wrap-pre prompt-block" }, "");
+  const salientBlock = el("div", { class: "muted small" }, "");
+  const metricsBlock = el("p", { class: "muted small" }, "");
+
+  function fillFromCtx(ctx) {
+    sysBlock.textContent = ctx.system || "(无 system 段)";
+    userBlock.textContent = ctx.userPrefix || "(独白段为空 —— 当前角色无显著情绪/关系异常)";
+    if (ctx.salientPhrase) {
+      const sp = ctx.salientPhrase;
+      salientBlock.innerHTML = "";
+      salientBlock.appendChild(el("strong", {}, "选择性注意命中："));
+      salientBlock.appendChild(document.createTextNode(` "${sp.phrase}" `));
+      salientBlock.appendChild(el("span", { class: "badge badge--neutral" }, sp.triggerSource));
+      salientBlock.appendChild(document.createTextNode(` → ${zhOf("insecurity", sp.triggerSource) || zhOf("wound", sp.triggerSource) || ""}`));
+    } else {
+      salientBlock.textContent = "选择性注意：未触发（输入测试消息可调试）";
+    }
+    const sysLen = (ctx.system || "").length;
+    const usrLen = (ctx.userPrefix || "").length;
+    // userPrefix 是 soft target（不切）；system 是 hard cap（切到 2500 内）
+    metricsBlock.textContent = `system ${sysLen}/2500 chars (hard) · userPrefix ${usrLen} chars (soft target 2000，不强切) · combined ${sysLen + usrLen}`;
+  }
+
+  fillFromCtx(initialCtx);
+
+  debugBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    debugBtn.setAttribute("aria-busy", "true");
+    try {
+      const lastUserMessage = debugInput.value.trim() || undefined;
+      const newCtx = await api.post("/api/character/context", {
+        assistantId: a.assistantId,
+        lastUserMessage,
+      });
+      fillFromCtx(newCtx);
+    } catch (err) {
+      showToast(`预览失败: ${err.message}`, "error");
+    } finally {
+      debugBtn.removeAttribute("aria-busy");
+    }
+  });
+
+  article.appendChild(el("div", { class: "prompt-debug-row" }, [debugInput, debugBtn]));
+  article.appendChild(salientBlock);
+  article.appendChild(el("h5", { class: "muted small" }, "<system> 段（稳定 / 可缓存）"));
+  article.appendChild(sysBlock);
+  article.appendChild(el("h5", { class: "muted small" }, "<userPrefix> 独白段（每条消息变）"));
+  article.appendChild(userBlock);
+  article.appendChild(metricsBlock);
+
+  parent.appendChild(article);
 }
 
 // ─── Intent tab (Phase CC-4) ──────────────────────────────────────

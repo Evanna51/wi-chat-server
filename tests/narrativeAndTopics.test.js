@@ -291,15 +291,23 @@ console.log("\n[Suite 5] characterContextBuilder narrative + topics injection");
   assert(ctx.recentEpisodes.length === 1, `1 recent episode (low-importance excluded, got ${ctx.recentEpisodes.length})`);
   assert(ctx.recentEpisodes[0].title === "钢琴初期", "important episode picked");
 
-  assert(/\[最近的重要叙事\]/.test(ctx.promptFragment), "promptFragment has narrative section");
-  assert(/\[长期关注的话题\]/.test(ctx.promptFragment), "promptFragment has topics section");
-  assert(/钢琴初期/.test(ctx.promptFragment), "episode title in fragment");
-  assert(/钢琴学习/.test(ctx.promptFragment), "topic name in fragment");
+  // CC-5.C: 不再有 `[最近的重要叙事]` / `[长期关注的话题]` 段。
+  // 只在 unresolved 路径上把内容融进 userPrefix 独白：
+  //   - 有 unresolvedThreads 的 episode → "还在想：..."
+  //   - status='unresolved' 且久未提的 topic → "「X」那件事好久没提了。"
+  // 钢琴初期 unresolvedThreads=["左手协调"] → 入选
+  // 母亲关系 status='unresolved' 且 lastDiscussedAt=createdAt（也就是 0d 前）→ 不算 stale，不入选
+  // 钢琴学习 status='growing' → 不入选
+  assert(/还在想/.test(ctx.userPrefix || ""), "userPrefix has unresolved-thread monologue line");
+  assert(/左手协调/.test(ctx.userPrefix || ""), "unresolved thread content surfaced in userPrefix");
+  assert(!/钢琴学习/.test(ctx.userPrefix || ""), "growing topic NOT in userPrefix (only unresolved+stale)");
 
-  // 老的 importance < 0.5 episode 不在 fragment
-  assert(!/琐事/.test(ctx.promptFragment), "low-importance episode not in fragment");
-  // dormant topic 不在 fragment
-  assert(!/曾经的事/.test(ctx.promptFragment), "dormant topic not in fragment");
+  // 低重要性 episode 不在 payload + 不在 prompt
+  assert(!ctx.recentEpisodes.some((e) => e.title === "琐事"), "low-importance episode filtered from payload");
+  assert(!/琐事/.test(ctx.promptFragment), "low-importance episode not in promptFragment");
+  // dormant topic 不在 active 列表
+  assert(!ctx.activeTopics.some((t) => t.topic === "曾经的事"), "dormant topic filtered from activeTopics");
+  assert(!/曾经的事/.test(ctx.promptFragment), "dormant topic not in promptFragment");
 }
 
 // ── Suite 6: memoryRetrievalService episode-aware ────────────────

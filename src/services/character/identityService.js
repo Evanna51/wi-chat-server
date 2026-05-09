@@ -60,6 +60,8 @@ function getCharacterIdentity(assistantId) {
     desires: parseJson(row.desires_json, []),
     careLanguages: parseJson(row.care_languages_json, { give: [], receive: [] }),
     tensions: parseJson(row.tensions_json, {}),
+    skills: parseJson(row.skills_json, []),
+    pronouns: row.pronouns || "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -88,7 +90,7 @@ function ensureDefaultIdentity(assistantId) {
       values_json, hard_boundaries_json, soft_boundaries_json,
       avoidance_topics_json, triggering_topics_json,
       insecurities_json, core_wounds_json, desires_json,
-      care_languages_json, tensions_json,
+      care_languages_json, tensions_json, skills_json, pronouns,
       created_at, updated_at
     ) VALUES (
       @identity_id, @assistant_id, 1,
@@ -99,7 +101,7 @@ function ensureDefaultIdentity(assistantId) {
       '[]', '[]', '[]',
       '[]', '[]',
       '[]', '[]', '[]',
-      '{"give":[],"receive":[]}', '{}',
+      '{"give":[],"receive":[]}', '{}', '[]', '',
       @now, @now
     )`
   ).run({ identity_id: identityId, assistant_id: assistantId, now });
@@ -254,6 +256,10 @@ function buildIdentityPromptFragment(identity) {
   const insecurities = identity.insecurities || [];
   if (insecurities.length) lines.push(`内在不安：${insecurities.join("、")}`);
 
+  // CC-5.C audit: core_wounds 之前漏渲染。这是"为什么是这样"的根，比 insecurities 更深。
+  const coreWounds = identity.coreWounds || [];
+  if (coreWounds.length) lines.push(`核心创伤：${coreWounds.join("、")}`);
+
   const desires = identity.desires || [];
   if (desires.length) lines.push(`深层渴望：${desires.join("、")}`);
 
@@ -261,6 +267,26 @@ function buildIdentityPromptFragment(identity) {
   const receive = identity.careLanguages?.receive || [];
   if (give.length) lines.push(`习惯用以下方式表达关心：${give.join("、")}`);
   if (receive.length) lines.push(`容易被以下方式打动：${receive.join("、")}`);
+
+  // CC-5: 表达"招式" —— skill 名 + 角色专属 example（如有）。
+  // few-shot example 比抽象描述对 LLM voice 锚定强，所以 example 直接渲染原文。
+  const skills = identity.skills || [];
+  if (skills.length) {
+    const skillNames = [];
+    const skillExamples = [];
+    for (const s of skills) {
+      if (typeof s === "string") {
+        skillNames.push(s);
+      } else if (s && typeof s === "object" && s.name) {
+        skillNames.push(s.name);
+        if (Array.isArray(s.examples)) {
+          for (const ex of s.examples) skillExamples.push(`「${ex}」（${s.name}）`);
+        }
+      }
+    }
+    if (skillNames.length) lines.push(`会用的表达招式：${skillNames.join("、")}`);
+    if (skillExamples.length) lines.push(`例：${skillExamples.join("；")}`);
+  }
 
   return lines.length > 1 ? lines.join("\n") : "";
 }
@@ -282,6 +308,8 @@ const {
   validateTensions,
   validateUnitInterval,
   validateBoundaryStrings,
+  validateSkillsPayload,
+  validatePronouns,
 } = require("./identityVocab");
 
 function upsertIdentity(assistantId, fields = {}) {
@@ -306,6 +334,14 @@ function upsertIdentity(assistantId, fields = {}) {
   }
   if (fields.tensions !== undefined) {
     const r = validateTensions(fields.tensions);
+    if (!r.ok) throw new Error(`identity validation: ${r.error}`);
+  }
+  if (fields.skills !== undefined) {
+    const r = validateSkillsPayload(fields.skills);
+    if (!r.ok) throw new Error(`identity validation: ${r.error}`);
+  }
+  if (fields.pronouns !== undefined) {
+    const r = validatePronouns(fields.pronouns);
     if (!r.ok) throw new Error(`identity validation: ${r.error}`);
   }
   // Phase 1 review fix (P0): hardBoundaries / triggeringTopics / avoidanceTopics 字符串
@@ -355,6 +391,8 @@ function upsertIdentity(assistantId, fields = {}) {
     desires: "desires_json",
     careLanguages: "care_languages_json",
     tensions: "tensions_json",
+    skills: "skills_json",
+    pronouns: "pronouns",
   };
 
   const setEntries = [];

@@ -59,10 +59,19 @@ function cleanupAll() {
 // ── Suite 1: identityVocab ──────────────────────────────────────────
 console.log("\n[Suite 1] identityVocab");
 {
-  assert(vocab.PERSONALITY_TRAITS.length >= 30, `≥30 traits (got ${vocab.PERSONALITY_TRAITS.length})`);
+  // CC-5: trait 表从 35 扩到 43（+8: prideful/dry_witted/blunt/stoic/vindictive/
+  //   brooding/shame_prone/theatrical）
+  assert(vocab.PERSONALITY_TRAITS.length >= 43, `≥43 traits (got ${vocab.PERSONALITY_TRAITS.length})`);
   assert(vocab.SOCIAL_STRATEGIES.length >= 12, `≥12 social modes (got ${vocab.SOCIAL_STRATEGIES.length})`);
   assert(vocab.TENSIONS.length >= 8, `≥8 tensions`);
   assert(vocab.CARE_LANGUAGES.length === 5, `5 care languages`);
+  assert(vocab.COMMON_SKILLS.length >= 18, `≥18 common skills (got ${vocab.COMMON_SKILLS.length})`);
+
+  // CC-5 新加 trait 都在表里
+  for (const t of ["prideful", "dry_witted", "blunt", "stoic", "vindictive", "brooding", "shame_prone", "theatrical"]) {
+    assert(vocab.PERSONALITY_TRAITS.includes(t), `new trait "${t}" present`);
+  }
+  assert(vocab.validateTraits(["prideful", "dry_witted"]).ok, "new traits accept in validateTraits");
 
   assert(vocab.validateTraits(["high_sensitivity", "avoidant_attachment"]).ok, "valid traits accepted");
   assert(!vocab.validateTraits(["unknown_x"]).ok, "unknown trait rejected");
@@ -78,6 +87,17 @@ console.log("\n[Suite 1] identityVocab");
   assert(!vocab.validateBoundaryStrings([""]).ok, "empty boundary rejected");
   assert(vocab.validateBoundaryStrings(["不接受被命令"]).ok, "long boundary accepted");
   assert(vocab.validateBoundaryStrings([]).ok, "empty array accepted");
+
+  // CC-5: skills 校验 —— 字符串、object 带 examples、混用都行；非法形式拒绝
+  assert(vocab.validateSkillsPayload(["topic_pivot", "literary_allusion"]).ok, "string array skills accepted");
+  assert(vocab.validateSkillsPayload([{ name: "literary_allusion", examples: ["你这跟方鸿渐没区别"] }]).ok, "object form skills accepted");
+  assert(vocab.validateSkillsPayload(["topic_pivot", { name: "self_deprecation_as_art" }]).ok, "mixed form skills accepted");
+  assert(vocab.validateSkillsPayload([]).ok, "empty skills array accepted");
+  assert(!vocab.validateSkillsPayload("not an array").ok, "non-array skills rejected");
+  assert(!vocab.validateSkillsPayload([""]).ok, "empty skill name rejected");
+  assert(!vocab.validateSkillsPayload([{ examples: ["x"] }]).ok, "skill object without name rejected");
+  assert(!vocab.validateSkillsPayload([{ name: "x", examples: "not an array" }]).ok, "non-array examples rejected");
+  assert(!vocab.validateSkillsPayload([{ name: "x", examples: [123] }]).ok, "non-string example rejected");
 }
 
 // ── Suite 2: identityService ────────────────────────────────────────
@@ -128,6 +148,37 @@ console.log("\n[Suite 2] identityService upsert / ensureDefault / coefficients")
   assert(partial.speakingStyle === "原值", "partial update keeps untouched speakingStyle");
   assert(partial.personalityTraits.includes("secure_attachment"), "partial update keeps untouched traits");
   assert(partial.worldview === "新世界观", "partial update applies new worldview");
+
+  // CC-5: skills 持久化（字符串 + object 两种形式 + getCharacterIdentity 解析）
+  const aidSkills = makeAid("idsvc_skills");
+  setupAssistant(aidSkills);
+  idsvc.upsertIdentity(aidSkills, {
+    skills: [
+      "topic_pivot",
+      { name: "literary_allusion", examples: ["你这跟方鸿渐没区别"] },
+    ],
+  });
+  const idSkills = idsvc.getCharacterIdentity(aidSkills);
+  assert(Array.isArray(idSkills.skills) && idSkills.skills.length === 2, "skills persisted as array");
+  assert(idSkills.skills[0] === "topic_pivot", "string-form skill round-trips");
+  assert(idSkills.skills[1].name === "literary_allusion", "object-form skill round-trips name");
+  assert(idSkills.skills[1].examples[0] === "你这跟方鸿渐没区别", "object-form skill round-trips examples");
+
+  let skillThrew = false;
+  try { idsvc.upsertIdentity(aidSkills, { skills: [{ examples: ["x"] }] }); }
+  catch (e) { skillThrew = /skill object must have non-empty name/.test(e.message); }
+  assert(skillThrew, "upsert rejects skill object missing name");
+
+  // identity prompt fragment 渲染 skill 名 + example
+  const fragWithSkills = idsvc.buildIdentityPromptFragment(idSkills);
+  assert(/会用的表达招式/.test(fragWithSkills), "promptFragment surfaces skill names");
+  assert(/方鸿渐/.test(fragWithSkills), "promptFragment surfaces skill examples");
+
+  // 默认 ensureDefault 时 skills = []
+  const aidSkillsDefault = makeAid("idsvc_skills_default");
+  setupAssistant(aidSkillsDefault);
+  const idDefault = idsvc.getCharacterIdentity(aidSkillsDefault);
+  assert(Array.isArray(idDefault.skills) && idDefault.skills.length === 0, "default identity has empty skills");
 }
 
 // ── Suite 3: deriveBaselinesFromIdentity ────────────────────────────
@@ -416,11 +467,39 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
   assert(ctx.relationshipDynamics !== null, "dynamics in payload");
   assert(typeof ctx.relationshipDynamics.trust === "number", "12 dim numbers");
   assert(ctx.emotion !== null, "emotion in payload");
-  assert(ctx.socialMode && ctx.socialMode.primary, "socialMode chosen");
-  assert(typeof ctx.promptFragment === "string" && ctx.promptFragment.length > 0, "promptFragment present");
-  assert(ctx.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `promptFragment within budget (${ctx.promptFragment.length} chars / max ${MAX_FRAGMENT_LEN_CHARS})`);
-  assert(/\[角色人格\]/.test(ctx.promptFragment), "promptFragment has identity section");
-  assert(/\[关系动力学\]/.test(ctx.promptFragment) || /\[当前社交姿态\]/.test(ctx.promptFragment), "promptFragment has dynamics or social mode section");
+  assert(ctx.socialMode && ctx.socialMode.primary, "socialMode chosen (payload kept even though prompt drops it)");
+
+  // CC-5.C: system / userPrefix 双段
+  assert(typeof ctx.system === "string" && ctx.system.length > 0, "system segment present");
+  assert(/<role>/.test(ctx.system) && /<\/role>/.test(ctx.system), "system has <role> XML");
+  assert(/<character>/.test(ctx.system) && /<\/character>/.test(ctx.system), "system has <character> XML");
+  assert(/<voice>/.test(ctx.system) && /<\/voice>/.test(ctx.system), "system has <voice> XML");
+  // 默认无 pronouns 配置 → fallback "they/them"
+  assert(/Speak as them, not about them/.test(ctx.system), "default pronouns → 'them' in voice anchor");
+  assert(/\[角色人格\]/.test(ctx.system), "system contains identity content");
+  assert(ctx.system.length <= 2500, `system within SYSTEM_BUDGET (${ctx.system.length} / 2500)`);
+
+  // userPrefix 是 string，可以为空（无异常态时）
+  assert(typeof ctx.userPrefix === "string", "userPrefix is string");
+  // userPrefix 是 soft target（不强切），常规情况下远在 2000 之内 —— 这里只 sanity check 上限
+  assert(ctx.userPrefix.length <= 2000, `userPrefix within soft target (${ctx.userPrefix.length} / 2000)`);
+
+  // CC-5 dedup: promptFragment 默认不返回（避免 character_background 重复 3 次）
+  assert(ctx.promptFragment === undefined, "promptFragment NOT returned by default (dedup)");
+  // identity.characterBackground 也已删除（死字段，无 consumer）
+  assert(ctx.identity.characterBackground === undefined, "identity.characterBackground removed (dedup)");
+
+  // 显式 opt-in 仍可拿到 promptFragment（向后兼容）
+  const ctxWithFrag = buildCharacterContext(aid, { includePromptFragment: true });
+  assert(typeof ctxWithFrag.promptFragment === "string" && ctxWithFrag.promptFragment.length > 0, "promptFragment present when opted-in");
+  assert(ctxWithFrag.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `promptFragment within budget`);
+  assert(ctxWithFrag.promptFragment.startsWith(ctxWithFrag.system), "promptFragment starts with system segment");
+
+  // 删除的段：socialMode prompt 段不再出现在 prompt 里
+  assert(!/\[当前社交姿态\]/.test(ctxWithFrag.promptFragment), "socialMode prompt section removed");
+
+  // salient phrase 默认未传 lastUserMessage 时为 null
+  assert(ctx.salientPhrase === null, "salientPhrase null without lastUserMessage");
 
   // null assistant_profile → returns null
   assert(buildCharacterContext("nonexistent_aid_xyz") === null, "nonexistent assistantId → null");
@@ -457,7 +536,7 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
     desires: ["to_be_understood", "intellectual_partnership"],
     careLanguages: { give: ["quality_time"], receive: ["verbal_affirmation"] },
   });
-  const ctxLong = buildCharacterContext(aidLong);
+  const ctxLong = buildCharacterContext(aidLong, { includePromptFragment: true });
   assert(ctxLong.promptFragment.length <= MAX_FRAGMENT_LEN_CHARS, `long bg: still within budget (got ${ctxLong.promptFragment.length} / max ${MAX_FRAGMENT_LEN_CHARS})`);
   // 重要：段级丢弃不切中文字符；不应该有"..."拼在汉字一半
   assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.promptFragment), "truncation does not splice mid-CJK");
@@ -474,6 +553,271 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
     dynRanRow = "threw";
   }
   assert(!dynRanRow, "onUserMessage skips dynamics when assistant_profile missing");
+}
+
+// ── Suite 9: salientPhraseDetector (CC-5 / Plan D) ──────────────────
+console.log("\n[Suite 9] salientPhraseDetector");
+{
+  const { detectSalientPhrase, TRIGGER_DICT } = require("../src/services/character/salientPhraseDetector");
+
+  // 字典覆盖：常见 insecurity / wound 都有 trigger
+  for (const k of ["fear_of_abandonment", "betrayal_trauma", "emotional_invalidation", "fear_of_rejection"]) {
+    assert(Array.isArray(TRIGGER_DICT[k]) && TRIGGER_DICT[k].length > 0, `dict has triggers for ${k}`);
+  }
+  // 字典精度：所有关键词 ≥ 2 字（跟 boundary 校验一致）
+  for (const [src, kws] of Object.entries(TRIGGER_DICT)) {
+    for (const kw of kws) {
+      assert(kw.length >= 2, `${src} keyword "${kw}" should be ≥ 2 chars`);
+    }
+  }
+
+  // null 输入 → null
+  assert(detectSalientPhrase(null, { insecurities: ["fear_of_abandonment"] }) === null, "null message returns null");
+  assert(detectSalientPhrase("随便", null) === null, "null identity returns null");
+  assert(detectSalientPhrase("", { insecurities: ["fear_of_abandonment"] }) === null, "empty message returns null");
+
+  // 无对应 wound → null（即便消息含触发词，没 wound 不勾住）
+  const idNoWound = { insecurities: [], coreWounds: [] };
+  assert(detectSalientPhrase("算了，随便吧", idNoWound) === null, "no insecurity → no salient phrase");
+
+  // 有 wound + 命中关键词 → 命中
+  const idAbandon = { insecurities: ["fear_of_abandonment"], coreWounds: [] };
+  const r1 = detectSalientPhrase("算了，随便吧", idAbandon);
+  assert(r1 !== null, "abandonment + '算了' → match");
+  assert(r1.phrase === "算了" || r1.phrase === "随便", "matched phrase is one of the keywords");
+  assert(r1.triggerSource === "fear_of_abandonment", "triggerSource correctly identified");
+  assert(/咯噔/.test(r1.monologueLine), "monologueLine uses abandonment template");
+
+  // 取最早出现位置的关键词（不是字典顺序）
+  const r2 = detectSalientPhrase("随便，算了。", idAbandon);
+  assert(r2.phrase === "随便", `earliest-position keyword wins (got ${r2.phrase})`);
+
+  // insecurities 优先 core_wounds
+  const idMixed = { insecurities: ["fear_of_being_too_much"], coreWounds: ["betrayal_trauma"] };
+  const r3 = detectSalientPhrase("受够了，改天再说", idMixed);
+  assert(r3.triggerSource === "fear_of_being_too_much", `insecurity wins over wound (got ${r3.triggerSource})`);
+
+  // 不同 wound 用不同模板
+  const idBetrayal = { insecurities: [], coreWounds: ["betrayal_trauma"] };
+  const r4 = detectSalientPhrase("我们改天再说吧", idBetrayal);
+  assert(r4 !== null && /又来了/.test(r4.monologueLine), "betrayal template used");
+
+  const idInvalidate = { insecurities: [], coreWounds: ["emotional_invalidation"] };
+  const r5 = detectSalientPhrase("你想多了。", idInvalidate);
+  assert(r5 !== null && /闭了下嘴/.test(r5.monologueLine), "invalidation template used");
+
+  const idReject = { insecurities: ["fear_of_rejection"], coreWounds: [] };
+  const r6 = detectSalientPhrase("我有点讨厌这种人", idReject);
+  assert(r6 !== null && /缩回去/.test(r6.monologueLine), "rejection template used");
+
+  // 中性消息 → null（精度优先）
+  const r7 = detectSalientPhrase("今天天气真好，一起出去走走？", { insecurities: ["fear_of_abandonment"] });
+  assert(r7 === null, "neutral message with no trigger keyword → null");
+
+  // 与现有 trait/wound vocab 集成：identity 来自真实 upsert 路径
+  const aidSp = makeAid("salient");
+  setupAssistant(aidSp, {
+    insecurities: ["fear_of_abandonment"],
+    coreWounds: ["betrayal_trauma"],
+  });
+  const idReal = idsvc.getCharacterIdentity(aidSp);
+  const r8 = detectSalientPhrase("算了，我之后再说吧", idReal);
+  assert(r8 !== null, "works on identity from real upsert path");
+  // 因为 insecurity 优先，"算了" 在前会胜出
+  assert(r8.triggerSource === "fear_of_abandonment", "insecurity priority preserved on real identity");
+}
+
+// ── Suite 10: CC-5.C system/userPrefix split + monologue ─────────────
+console.log("\n[Suite 10] CC-5.C system/userPrefix split + monologue rendering");
+{
+  const cb = require("../src/services/character/characterContextBuilder");
+  const { buildSystemSegment, buildUserMonologue, pickDynamicsAnomalies, renderMoodFragment, SYSTEM_BUDGET_CHARS, USER_PREFIX_BUDGET_CHARS, ROLE_DIRECTIVE, VOICE_ANCHOR } = cb;
+
+  // 常量校验
+  assert(SYSTEM_BUDGET_CHARS === 2500, "SYSTEM_BUDGET_CHARS = 2500 (hard cap)");
+  assert(USER_PREFIX_BUDGET_CHARS === 2000, "USER_PREFIX_BUDGET_CHARS = 2000 (soft target，不切)");
+  // 默认导出常量是 fallback they 形态（未传 pronouns 时的回退）
+  assert(/Speak as them, not about them/.test(ROLE_DIRECTIVE), "ROLE_DIRECTIVE default fallback uses they/them");
+  assert(/mid-conversation/.test(VOICE_ANCHOR), "VOICE_ANCHOR mentions mid-conversation");
+
+  // buildSystemSegment：identity 入参 → XML envelope 输出
+  const aid = makeAid("c_split");
+  setupAssistant(aid, {
+    speakingStyle: "克制温柔",
+    personalityTraits: ["prideful", "dry_witted"],
+    skills: [
+      "topic_pivot",
+      { name: "literary_allusion", examples: ["你这跟方鸿渐没区别"] },
+    ],
+    insecurities: ["fear_of_losing_face"],
+  });
+  const profile = require("../src/db").getAssistantProfile(aid);
+  const id = idsvc.getCharacterIdentity(aid);
+  const sys = buildSystemSegment({ identity: id, profile });
+  assert(/<role>/.test(sys) && /<voice>/.test(sys), "system XML structured");
+  assert(/dry_witted/.test(sys) && /prideful/.test(sys), "system surfaces new traits");
+  assert(/literary_allusion/.test(sys), "system surfaces skill name");
+  assert(/方鸿渐/.test(sys), "system surfaces skill example");
+  assert(/fear_of_losing_face/.test(sys), "system surfaces East Asian insecurity");
+
+  // pickDynamicsAnomalies：trust 低 → 命中 lowFrag
+  const anomalies1 = pickDynamicsAnomalies({ trust: 0.2, abandonment_fear: 0.0 });
+  assert(anomalies1.length > 0 && anomalies1[0].key === "trust", "trust=0.2 → trust anomaly");
+  assert(/trust 没那么稳/.test(anomalies1[0].fragment), "trust low fragment used");
+
+  // pickDynamicsAnomalies：abandonment_fear 高 → highFrag
+  const anomalies2 = pickDynamicsAnomalies({ trust: 0.5, abandonment_fear: 0.7 });
+  assert(anomalies2.length > 0 && anomalies2[0].key === "abandonment_fear", "abandonment_fear=0.7 → anomaly");
+  assert(/心里空了一块/.test(anomalies2[0].fragment), "abandonment fragment used");
+
+  // pickDynamicsAnomalies：偏离严重的优先
+  const anomalies3 = pickDynamicsAnomalies({ trust: 0.45, unresolved_conflict: 0.8 });
+  assert(anomalies3[0].key === "unresolved_conflict", "more anomalous wins");
+
+  // renderMoodFragment：低 intensity 不输出
+  assert(renderMoodFragment({ mood_intensity: 0.1, mood_valence: -0.5 }) === null, "low intensity → no mood frag");
+  // valence + arousal 兜底
+  assert(renderMoodFragment({ mood_intensity: 0.6, mood_valence: -0.5, mood_arousal: 0.7, mood_emotion: "neutral" }) !== null, "high arousal + neg valence → mood frag");
+
+  // buildUserMonologue：salient phrase 在第一行
+  const monologue1 = buildUserMonologue({
+    characterState: { mood_intensity: 0.7, mood_valence: -0.5, mood_arousal: 0.7, mood_emotion: "neutral" },
+    dynamicsState: { trust: 0.2 },
+    now: Date.now(),
+    salientPhrase: { phrase: "随便", triggerSource: "fear_of_abandonment", monologueLine: '"随便"。这两个字我心里咯噔一下。' },
+    recentEpisodes: [],
+    activeTopics: [],
+    freshReflection: null,
+  });
+  assert(monologue1.startsWith("[此刻]"), "userPrefix starts with [此刻]");
+  assert(monologue1.indexOf("随便") < monologue1.indexOf("trust"), "salient phrase precedes dynamics");
+
+  // buildUserMonologue：完全无异常 → 返回 ""
+  const monologue2 = buildUserMonologue({
+    characterState: { mood_intensity: 0.1, mood_valence: 0.05, mood_arousal: 0.2, mood_emotion: "neutral" },
+    dynamicsState: { trust: 0.5, abandonment_fear: 0 },
+    now: Date.now(),
+    salientPhrase: null,
+    recentEpisodes: [],
+    activeTopics: [],
+    freshReflection: null,
+  });
+  assert(monologue2 === "", "all-neutral state → empty userPrefix");
+
+  // buildCharacterContext + lastUserMessage → salient phrase 命中
+  const ctxWithSalient = cb.buildCharacterContext(aid, {
+    lastUserMessage: "丢人现眼，至于吗",
+    includePromptFragment: true, // opt-in 验证向后兼容路径仍工作
+  });
+  assert(ctxWithSalient.salientPhrase !== null, "lastUserMessage triggers salient detection");
+  assert(ctxWithSalient.salientPhrase.triggerSource === "fear_of_losing_face", "East Asian wound triggers correctly");
+  assert(/丢人现眼|丢人/.test(ctxWithSalient.userPrefix), "salient phrase appears in userPrefix");
+
+  // promptFragment 仍是 system + userPrefix（向后兼容）
+  if (ctxWithSalient.userPrefix) {
+    assert(ctxWithSalient.promptFragment === ctxWithSalient.system + "\n\n" + ctxWithSalient.userPrefix, "promptFragment = system + \\n\\n + userPrefix");
+  }
+
+  // 长 character_background 兜底切：不切 <role> / <voice>，只切 <character>
+  const aidLong = makeAid("c_split_long");
+  const longBg = "你是一个非常复杂的角色，背景信息非常长。".repeat(80); // ~ 1600+ chars
+  const now = Date.now();
+  db.prepare(
+    "INSERT INTO assistant_profile (assistant_id, character_name, character_background, allow_auto_life, allow_proactive_message, assistant_type, created_at, updated_at) VALUES (?, ?, ?, 0, 0, ?, ?, ?)"
+  ).run(aidLong, aidLong, longBg, "character", now, now);
+  cs.ensureDefaultState(aidLong);
+  idsvc.ensureDefaultIdentity(aidLong);
+  const ctxLong2 = cb.buildCharacterContext(aidLong);
+  assert(ctxLong2.system.length <= SYSTEM_BUDGET_CHARS, `system stays within budget after truncation (${ctxLong2.system.length})`);
+  assert(/<role>/.test(ctxLong2.system) && /<voice>/.test(ctxLong2.system), "role/voice survive truncation");
+}
+
+// ── Suite 11: pronouns + 动态 voice anchor ────────────────────────────
+console.log("\n[Suite 11] pronouns parsing + dynamic voice anchor");
+{
+  const { parsePronouns, validatePronouns, PRONOUN_PRESETS } = vocab;
+  const cb = require("../src/services/character/characterContextBuilder");
+
+  // PRONOUN_PRESETS 至少包含 3 个常见 preset
+  assert(PRONOUN_PRESETS.includes("she/her"), "PRONOUN_PRESETS has she/her");
+  assert(PRONOUN_PRESETS.includes("he/him"), "PRONOUN_PRESETS has he/him");
+  assert(PRONOUN_PRESETS.includes("they/them"), "PRONOUN_PRESETS has they/them");
+
+  // parsePronouns —— 三个 preset 解析正确
+  const sheHer = parsePronouns("she/her");
+  assert(sheHer.subject === "she" && sheHer.object === "her" && sheHer.possessive === "her", "she/her parsed");
+  const heHim = parsePronouns("he/him");
+  assert(heHim.subject === "he" && heHim.object === "him" && heHim.possessive === "his", "he/him parsed");
+  const theyThem = parsePronouns("they/them");
+  assert(theyThem.subject === "they" && theyThem.object === "them" && theyThem.possessive === "their", "they/them parsed");
+
+  // 空 / null / undefined → default they/them
+  for (const v of [null, undefined, "", "   "]) {
+    const p = parsePronouns(v);
+    assert(p.subject === "they" && p.object === "them", `empty input "${v}" → they/them default`);
+  }
+
+  // 自定义代词（如 xe/xem/xyr）
+  const xe = parsePronouns("xe/xem/xyr");
+  assert(xe.subject === "xe" && xe.object === "xem" && xe.possessive === "xyr", "custom xe/xem/xyr parsed");
+
+  // validatePronouns
+  assert(validatePronouns("she/her").ok, "she/her valid");
+  assert(validatePronouns("").ok, "empty valid");
+  assert(validatePronouns(null).ok, "null valid");
+  assert(!validatePronouns(123).ok, "non-string rejected");
+  assert(!validatePronouns("a".repeat(50)).ok, "too long rejected");
+
+  // renderRoleDirective —— 用 object 代词
+  assert(cb.renderRoleDirective(sheHer) === "You are her. Speak as her, not about her.", "role directive: her");
+  assert(cb.renderRoleDirective(heHim) === "You are him. Speak as him, not about him.", "role directive: him");
+  assert(cb.renderRoleDirective(theyThem) === "You are them. Speak as them, not about them.", "role directive: them");
+
+  // renderVoiceAnchor —— 用 subject contraction + possessive
+  assert(/^She's mid-conversation/.test(cb.renderVoiceAnchor(sheHer)), "voice anchor: She's");
+  assert(/^He's mid-conversation/.test(cb.renderVoiceAnchor(heHim)), "voice anchor: He's");
+  assert(/^They're mid-conversation/.test(cb.renderVoiceAnchor(theyThem)), "voice anchor: They're");
+  assert(/Use her skills/.test(cb.renderVoiceAnchor(sheHer)), "voice anchor uses 'her' possessive");
+  assert(/Use his skills/.test(cb.renderVoiceAnchor(heHim)), "voice anchor uses 'his' possessive");
+  assert(/Use their skills/.test(cb.renderVoiceAnchor(theyThem)), "voice anchor uses 'their' possessive");
+
+  // 端到端：identity 设了 pronouns → buildCharacterContext 的 system 段用对应代词
+  const aidShe = makeAid("pron_she");
+  setupAssistant(aidShe, { pronouns: "she/her" });
+  const ctxShe = cb.buildCharacterContext(aidShe);
+  assert(/Speak as her, not about her/.test(ctxShe.system), "she/her identity → 'her' voice anchor");
+  assert(/She's mid-conversation/.test(ctxShe.system), "she/her identity → She's");
+  assert(ctxShe.identity.pronouns === "she/her", "pronouns surfaced in payload");
+
+  const aidHe = makeAid("pron_he");
+  setupAssistant(aidHe, { pronouns: "he/him" });
+  const ctxHe = cb.buildCharacterContext(aidHe);
+  assert(/Speak as him, not about him/.test(ctxHe.system), "he/him identity → 'him' voice anchor");
+  assert(/He's mid-conversation/.test(ctxHe.system), "he/him identity → He's");
+  assert(/Use his skills/.test(ctxHe.system), "he/him identity → Use his skills");
+
+  const aidThey = makeAid("pron_they");
+  setupAssistant(aidThey, { pronouns: "they/them" });
+  const ctxThey = cb.buildCharacterContext(aidThey);
+  assert(/Speak as them, not about them/.test(ctxThey.system), "they/them identity → 'them' voice anchor");
+  assert(/They're mid-conversation/.test(ctxThey.system), "they/them identity → They're");
+
+  // 空 pronouns → fallback they
+  const aidEmpty = makeAid("pron_empty");
+  setupAssistant(aidEmpty);
+  const ctxEmpty = cb.buildCharacterContext(aidEmpty);
+  assert(/Speak as them, not about them/.test(ctxEmpty.system), "empty pronouns → fallback they/them");
+
+  // upsert 支持 pronouns 字段
+  const aidUpsert = makeAid("pron_upsert");
+  setupAssistant(aidUpsert);
+  idsvc.upsertIdentity(aidUpsert, { pronouns: "he/him" });
+  assert(idsvc.getCharacterIdentity(aidUpsert).pronouns === "he/him", "pronouns persisted via upsert");
+  // 校验
+  let pronounThrew = false;
+  try { idsvc.upsertIdentity(aidUpsert, { pronouns: 12345 }); }
+  catch (e) { pronounThrew = /pronouns must be string/.test(e.message); }
+  assert(pronounThrew, "non-string pronouns rejected via upsert");
 }
 
 cleanupAll();
