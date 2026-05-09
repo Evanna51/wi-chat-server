@@ -205,6 +205,11 @@ async function classifyWithLLM(content, opts = {}) {
     responseFormat: "json",
     maxTokens: 240,
     temperature: 0,
+    callOpts: {
+      kind: "memory_classify",
+      scopeKey: opts.assistantId || null,
+      summary: `classify ${text.slice(0, 30)}`,
+    },
   });
 
   let parsed;
@@ -320,7 +325,7 @@ async function classifyAndPersist(memoryId, content, { force = false } = {}) {
 
   if (!result) {
     try {
-      result = await classifyWithLLM(content, { characterName });
+      result = await classifyWithLLM(content, { characterName, assistantId: row.assistant_id });
       method = "llm";
     } catch {
       result = null;
@@ -432,7 +437,7 @@ async function backfillMissingFacts({ limit = 20 } = {}) {
   for (const r of rows) {
     let llmResult;
     try {
-      llmResult = await classifyWithLLM(r.content, { characterName: r.character_name || null });
+      llmResult = await classifyWithLLM(r.content, { characterName: r.character_name || null, assistantId: r.assistant_id });
       llmCalls += 1;
     } catch {
       continue;

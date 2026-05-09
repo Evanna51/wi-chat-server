@@ -48,7 +48,7 @@ function extractJsonObject(text = "") {
   return text.slice(start, end + 1);
 }
 
-async function aiDecision(userInput) {
+async function aiDecision(userInput, { assistantId } = {}) {
   const prompt = [
     "判断以下用户输入是否需要检索历史记忆，输出严格 JSON。",
     "",
@@ -76,6 +76,11 @@ async function aiDecision(userInput) {
     ],
     responseFormat: "json",
     maxTokens: 160,
+    callOpts: {
+      kind: "memory_decide",
+      scopeKey: assistantId || null,
+      summary: `decide ${userInput.slice(0, 30)}`,
+    },
   });
   const jsonText = extractJsonObject(content);
   if (!jsonText) {
@@ -94,9 +99,9 @@ async function aiDecision(userInput) {
   };
 }
 
-async function shouldRetrieveMemory({ userInput }) {
+async function shouldRetrieveMemory({ userInput, assistantId } = {}) {
   try {
-    return await aiDecision(userInput);
+    return await aiDecision(userInput, { assistantId });
   } catch (error) {
     console.error("[memory-decision] ai fallback to heuristic:", error.message);
     return heuristicDecision(userInput);

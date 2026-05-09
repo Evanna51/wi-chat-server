@@ -4,6 +4,7 @@ const { db } = require("../db");
 const config = require("../config");
 const { runIndexerOnce } = require("../workers/memoryIndexer");
 const { sendFcmMessage } = require("../services/fcm");
+const callRegistry = require("../utils/callRegistry");
 
 const router = express.Router();
 
@@ -17,6 +18,40 @@ function authMiddleware(req, res, next) {
 }
 
 router.use(authMiddleware);
+
+// ── 在飞调用注册表（callRegistry）—— LLM + 任意 outbound HTTP ───────
+//
+// 三个端点：
+//   GET    /admin/calls                  - 列出当前在飞调用
+//   DELETE /admin/calls/:callId          - 取消单条
+//   DELETE /admin/calls?kind=&scopeKey=  - 按 scope 批量取消
+//
+// 取消通过 AbortController.abort() 立即触发；正在 await 的 fetch 抛 AbortError。
+
+router.get("/calls", (_req, res) => {
+  res.json({ ok: true, calls: callRegistry.list() });
+});
+
+router.delete("/calls/:callId", (req, res) => {
+  const reason = String(req.query.reason || "admin");
+  const ok = callRegistry.cancel(req.params.callId, reason);
+  res.json({ ok, callId: req.params.callId, found: ok });
+});
+
+router.delete("/calls", (req, res) => {
+  const schema = z.object({
+    kind: z.string().min(1),
+    scopeKey: z.string().min(1),
+    reason: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: parsed.error.message });
+  }
+  const { kind, scopeKey, reason = "admin_scope" } = parsed.data;
+  const cancelled = callRegistry.cancelByScope(kind, scopeKey, reason);
+  res.json({ ok: true, cancelled });
+});
 
 router.get("/memory-metrics", (_req, res) => {
   const outbox = db

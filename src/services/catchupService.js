@@ -187,7 +187,7 @@ function parseStrictJsonObject(text = "") {
   return parsed;
 }
 
-async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } = {}) {
+async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900, assistantId } = {}) {
   const { content } = await getProvider().complete({
     messages: [
       { role: "system", content: "你是角色生活事件生成器。以角色身份写离线期间发生的具体事件。输出严格 JSON，不要 markdown 代码块。" },
@@ -196,6 +196,11 @@ async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } 
     temperature,
     maxTokens,
     responseFormat: "json",
+    callOpts: {
+      kind: "catchup",
+      scopeKey: assistantId || null,
+      summary: `catchup ${(prompt || "").slice(0, 30)}`,
+    },
   });
   return parseStrictJsonObject(content);
 }
@@ -333,6 +338,7 @@ async function runCatchup({
         temperature: params.temperature,
         topP: params.top_p,
         maxTokens: 900,
+        assistantId,
       });
     } catch (error) {
       lastError = error;
@@ -342,6 +348,7 @@ async function runCatchup({
           temperature: params.temperature,
           topP: params.top_p,
           maxTokens: 900,
+          assistantId,
         });
         lastError = null;
       } catch (error2) {

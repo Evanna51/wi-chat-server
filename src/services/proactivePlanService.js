@@ -77,7 +77,7 @@ function parseStrictJsonObject(text = "") {
   return parsed;
 }
 
-async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600 } = {}) {
+async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600, assistantId } = {}) {
   const { content } = await getProvider().complete({
     messages: [
       { role: "system", content: "你是角色主动消息生成器。以角色身份写一条自然的主动消息。输出严格 JSON，不要 markdown 代码块。" },
@@ -86,6 +86,11 @@ async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600
     temperature,
     maxTokens,
     responseFormat: "json",
+    callOpts: {
+      kind: "proactive_plan",
+      scopeKey: assistantId || null,
+      summary: `proactive ${(prompt || "").slice(0, 30)}`,
+    },
   });
   return parseStrictJsonObject(content);
 }
@@ -509,7 +514,7 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
       });
       let raw;
       try {
-        raw = await callLlmForPlanDraft(prompt, { temperature: params.temperature });
+        raw = await callLlmForPlanDraft(prompt, { temperature: params.temperature, assistantId });
       } catch (error) {
         lastErr = error;
         continue;
@@ -929,7 +934,7 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
 
     let raw;
     try {
-      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800 });
+      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800, assistantId });
     } catch (e) {
       return { ok: false, skipped: "llm_unreachable", error: e.message };
     }

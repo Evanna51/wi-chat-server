@@ -1,6 +1,6 @@
 const { GoogleAuth } = require("google-auth-library");
 const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { registeredFetch } = require("../utils/registeredFetch");
 
 let authClient = null;
 
@@ -37,14 +37,23 @@ async function sendFcmMessage(deviceToken, payload) {
     },
   };
 
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+  const res = await registeredFetch(
+    url,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  }, 10000);
+    {
+      timeoutMs: 10000,
+      kind: "fcm_send",
+      scopeKey: deviceToken,
+      summary: `fcm to ${(deviceToken || "").slice(0, 12)}…`,
+    }
+  );
 
   const text = await res.text();
   if (!res.ok) {

@@ -249,7 +249,7 @@ function buildReflectionPrompt({
   ].join("\n");
 }
 
-async function callLlmForReflection(prompt) {
+async function callLlmForReflection(prompt, { assistantId } = {}) {
   const provider = getProvider();
   const result = await provider.complete({
     messages: [
@@ -259,6 +259,11 @@ async function callLlmForReflection(prompt) {
     temperature: 0.5,
     maxTokens: 800,
     responseFormat: "json",
+    callOpts: {
+      kind: "reflect",
+      scopeKey: assistantId || null,
+      summary: `reflect for ${assistantId || "unknown"}`,
+    },
   });
   return parseStrictJsonObject(result?.content);
 }
@@ -373,7 +378,7 @@ async function reflectFor(assistantId, {
 
   let parsed;
   try {
-    parsed = await callLlmForReflection(prompt);
+    parsed = await callLlmForReflection(prompt, { assistantId });
   } catch (err) {
     console.warn(`[reflection] LLM failed for ${assistantId}: ${err.message}`);
     return { skipped: true, reason: "llm_error", error: err.message };
