@@ -1,6 +1,7 @@
 const { v7: uuidv7 } = require("uuid");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+const { renderBackgroundForIntrospection } = require("./character/promptComposer");
 // T-CC-08: 注入结构化 identity + 多维 dynamics 体感到 catchup prompt
 const {
   getCharacterIdentity,
@@ -135,7 +136,7 @@ function buildCatchupPrompt({
     `跨度：${durationHours} 小时`,
     "",
     "【角色档案】",
-    clipText(characterBackground || "无", 800),
+    renderBackgroundForIntrospection(characterBackground, 800),
     "",
     "【最近 6 条对话】",
     turnLines || "- 无",

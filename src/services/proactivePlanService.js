@@ -2,6 +2,7 @@ const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+const { renderBackgroundForIntrospection } = require("./character/promptComposer");
 // T-CC-08: identity + dynamics 注入
 const {
   getCharacterIdentity,
@@ -151,7 +152,7 @@ function buildPlanPrompt({
     `触发：${triggerReason} — ${triggerExplanation}`,
     "",
     "角色档案：",
-    clipText(characterBackground || "无", 800),
+    renderBackgroundForIntrospection(characterBackground, 800),
     "",
     "最近 6 条对话：",
     turnLines || "- 无",
@@ -771,7 +772,7 @@ function buildNextPushPrompt({
     // T-CC4-02 注入：本次主动消息的意图（behaviorPlanner 决策）
     ...(intentFragment ? [intentFragment, ""] : []),
     "角色档案：",
-    clipText(characterBackground || "无", 600),
+    renderBackgroundForIntrospection(characterBackground, 600),
     "",
     "关键 facts：",
     coreFactLines || "- 无",

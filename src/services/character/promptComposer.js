@@ -414,6 +414,55 @@ function renderToolProtocolSlot() {
   return wrapXmlJson("tool_protocol", obj);
 }
 
+// ── Introspection family building blocks (Phase 1b) ─────────────────
+//
+// 给 server 内部 6 个 LLM-using service 共享的 building blocks。
+//
+// 范围说明：
+//   - 4 个 service 用 character_background（episodeBuilder / catchupService /
+//     proactivePlanService 的 plan + next_push） → 共享 renderBackgroundForIntrospection
+//   - reflectionService 的 identitySummary 是 1 行紧凑独立形态，差异化大、风险
+//     大于收益 → 保留 service-local，暂不收编
+//   - memoryClassificationService / memoryDecisionService 不用角色字段（纯 NLP
+//     task） → 不参与收编
+//
+// 见 docs/api-redesign-plan.md §3.8 + §6 Phase 1b。
+
+/**
+ * 与 4 个 service 内自定义 clipText 行为一致（strip whitespace + trim + ASCII "..."），
+ * 暴露出来作为统一工具。各 service 后续可以逐步切换到这个版本，或保留自己的 inline
+ * 定义都行 —— 行为一致，不影响 LLM 输出。
+ */
+function clipText(input, maxLen) {
+  const text = String(input || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}...`;
+}
+
+/**
+ * Introspection 端的 character_background 渲染 building block。
+ * 替代 4 个 service 里重复的 `clipText(characterBackground || "无", N)` 模式。
+ *
+ * 默认行为与现有 4 个 service 一致（不剥"系统提示"段、保留 LLM 输出 stability）。
+ * 设 stripSystemHints=true 才剥（chat 端走这个；task C 完成后 introspection 也可切换）。
+ *
+ * @param {string} characterBackground  原始 background string
+ * @param {number} maxChars             截断长度
+ * @param {object} [opts]
+ * @param {string} [opts.fallback="无"]
+ * @param {boolean} [opts.stripSystemHints=false]
+ */
+function renderBackgroundForIntrospection(characterBackground, maxChars, opts = {}) {
+  const { fallback = "无", stripSystemHints = false } = opts;
+  let bg = String(characterBackground || "");
+  if (stripSystemHints) {
+    bg = bg.replace(/系统提示[\s\S]*$/, "").trim();
+  }
+  if (!bg.trim()) return fallback;
+  return clipText(bg, maxChars);
+}
+
 // ── helpers ──────────────────────────────────────────────────────────
 
 function wrapXmlJson(tag, obj) {
@@ -431,7 +480,7 @@ function clip(s, n) {
 
 module.exports = {
   composeForChat,
-  // 暴露 building blocks 给测试 / 未来 composeForIntrospection 复用
+  // chat building blocks
   renderRoleSlot,
   renderCharacterSlot,
   renderBackgroundSlot,
@@ -440,6 +489,9 @@ module.exports = {
   renderNarrativeSlot,
   renderToolProtocolSlot,
   mergeSlots,
+  // introspection building blocks (Phase 1b)
+  clipText,
+  renderBackgroundForIntrospection,
   // 常量
   SLOT_SOFT_LIMITS,
 };
