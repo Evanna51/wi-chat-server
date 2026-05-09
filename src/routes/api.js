@@ -163,46 +163,16 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
 
 // 注：原 HTTP 轮询通道（/register-local-inbox, /pull-messages, /ack-message）
 // 与 /report-interaction 均已于 2026-05-06 移除。
-// 实时推送统一走 WebSocket /api/ws；对话写入统一走 /api/sync/push 与 /api/sync/snapshot。
-
-router.post("/chat-with-memory", authMiddleware, async (req, res) => {
-  const schema = z.object({
-    assistantId: z.string().min(1),
-    sessionId: z.string().min(1),
-    userInput: z.string().min(1),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { assistantId, sessionId, userInput } = parsed.data;
-
-  if (!config.memoryRetrievalEnabled) {
-    return res.json({ ok: true, answer: "记忆检索已关闭。", memories: [] });
-  }
-
-  try {
-    const memories = await retrieveMemory({
-      assistantId,
-      sessionId,
-      query: userInput,
-      topK: config.retrievalTopK,
-    });
-    const answer = await generateWithMemory({
-      assistantName: assistantId,
-      userPrompt: userInput,
-      memories,
-      fallbackText: "我记下了，我们继续聊聊。",
-    });
-    return res.json({
-      ok: true,
-      answer,
-      memories: memories.map((item) => ({ id: item.id, score: item.score })),
-    });
-  } catch (error) {
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
+// 实时推送统一走 WebSocket /api/ws；对话写入统一走 /api/chat/turn（语义化别名 /api/sync/push）。
+//
+// /api/chat-with-memory 已于 Phase 2 删除（无客户端调用，server 内部也不依赖）。
+// 客户端走 /api/chat/context（获取 system prompt 数据）+ 自己调 LLM + /api/chat/turn 上传。
 
 router.post("/tool/memory-context", authMiddleware, async (req, res) => {
+  // Phase 2: 标 deprecated。新客户端走 POST /api/chat/context（合并 character/context + memory-context）
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</api/chat/context>; rel="successor-version"');
+
   const schema = z.object({
     assistantId: z.string().min(1),
     sessionId: z.string().min(1),
@@ -560,6 +530,11 @@ router.get("/character/identity/vocab", authMiddleware, (_req, res) => {
 });
 
 router.post("/character/context", authMiddleware, (req, res) => {
+  // Phase 2: 标 deprecated。新客户端走 POST /api/chat/context（同时拼好 facts +
+  // narrative + tool_protocol，省掉客户端单独调 memory-context）
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</api/chat/context>; rel="successor-version"');
+
   const schema = z.object({
     assistantId: z.string().trim().min(1),
     sessionId: z.string().trim().optional(),
@@ -599,6 +574,11 @@ router.post("/character/context", authMiddleware, (req, res) => {
  * memory-context 才是每轮对话的查询入口。
  */
 router.get("/character/bootstrap", authMiddleware, (req, res) => {
+  // Phase 2: 标 deprecated。新客户端走 GET /api/character/{id}（合并 profile + identity +
+  // 静态 slots + etag）。
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</api/character/{assistantId}>; rel="successor-version"');
+
   const schema = z.object({ assistantId: z.string().trim().min(1) });
   const parsed = schema.safeParse(req.query || {});
   if (!parsed.success) {

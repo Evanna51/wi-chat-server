@@ -69,6 +69,11 @@ function emitUserBatchEvents(perAssistantStats, { cause, userId = null } = {}) {
 }
 
 router.post("/push", authMiddleware, (req, res) => {
+  // Phase 2: 标 deprecated（语义重命名）。新客户端走 POST /api/chat/turn
+  // —— 行为完全一致（内部都调 ingestTurnsBatch），只是命名按"客户端在做什么"。
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</api/chat/turn>; rel="successor-version"');
+
   const parsed = pushSchema.safeParse(req.body || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
