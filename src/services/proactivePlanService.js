@@ -38,6 +38,21 @@ function clipText(input = "", maxLen = 240) {
 }
 
 /**
+ * 给 LLM 看的人类可读时间戳（上海时间）。Date 的 getX 方法依赖 process.env.TZ；
+ * 我们在 ecosystem.config.js 里强制 TZ=Asia/Shanghai 保证一致。
+ */
+function formatLocalTs(ts) {
+  if (!ts) return "未知";
+  const d = new Date(ts);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const HH = String(d.getHours()).padStart(2, "0");
+  const MM = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${HH}:${MM}（上海时间）`;
+}
+
+/**
  * single-user 模型下的默认接收者。
  * 之前依赖 local_subscribers 表；那张表已随 HTTP 轮询通道一起删除（migration 015）。
  * WS 推送时 server 用此 userId 路由到 ws/connections.js 中已注册的 socket 集合；
@@ -907,7 +922,8 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       identityFragment,
       dynamicsFragment,
       intentFragment,
-      nowIso: new Date(now).toISOString(),
+      // 显式给 LLM 看本地时间（上海时间），不用 toISOString —— 那是 UTC，LLM 会按字面值解读，时间错位 8h
+      nowIso: formatLocalTs(now),
       hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });
 
