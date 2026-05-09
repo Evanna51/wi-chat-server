@@ -4,6 +4,8 @@
 >
 > 配套阅读：
 > - `README.md` — 端到端 API 参考
+> - `docs/api-redesign-plan.md` — **Phase 2 端点重构** — 新客户端走这套（5 核心 + 3 工具）
+> - `docs/client-prompt-merge-protocol.md` — V_NEW_LEAN 8 slot canonical merge 顺序
 > - `docs/offline-sync-plan.md` — sync 幂等设计
 > - `docs/character-cognition-architecture.md` — 7 层角色认知架构（设计与心智模型）
 > - `docs/character-system.md` — 角色系统 API + 运维手册（接入与 cron）
@@ -13,6 +15,13 @@
 > - `docs/refactor-plan.md` — 重构任务进度（结构 / 设计问题逐项落地）
 > - `docs/client-release-required.md` — 需客户端配合发版的事项
 > - `docs/known-issues.md` — 已知存在但暂不修的问题（鉴权 / 写回竞态等）
+
+> **⚠️ Phase 2 状态说明**（2026-05-10）：本文中描述的端点（`POST /api/sync/push` /
+> `POST /api/character/context` / `GET /api/character/bootstrap` /
+> `POST /api/tool/memory-context`）仍然工作，但 server 已加 `Deprecation: true`
+> response header。新客户端请走 `POST /api/chat/turn` / `POST /api/chat/context` /
+> `GET /api/character/{id}` —— 详见 [api-redesign-plan.md](./api-redesign-plan.md) §3 +
+> [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)。
 > - `docs/EXECUTION-PROGRESS.md` — 三阶段改造的"驾驶舱"，含 Phase A/B/C/D 与 Phase CC-1~4
 > - `docs/archive/` — 已交付或已归档的设计 / 路线图 / 阅读笔记
 > - `tests/retrieval/fixtures/README.md` — 检索回归 fixture 格式说明

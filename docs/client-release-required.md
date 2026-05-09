@@ -129,6 +129,81 @@
 
 ---
 
+## CR-06 V_NEW_LEAN structured chat slot + Phase 2 端点（对应服务端 Phase 1a + 1b + 2）
+
+> 详细设计 见 [api-redesign-plan.md](./api-redesign-plan.md) 与 [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)。
+
+### 服务端动作
+
+1. **Prompt 渲染重构（Phase 1a + 1b）**
+   - V_NEW_LEAN：`<character>` JSON 删 4 个心理深度字段（insecurities / core_wounds /
+     desires / tensions）+ 3 个数值字段（emotional_sensitivity / empathy_level /
+     expressiveness）—— 这些已通过 server introspection → reflection.summary →
+     `<narrative>` slot 间接传递
+   - 新增 `<narrative>` slot：reflection / episodes / topics 完整下放（之前压缩到 1 行
+     独白片段就丢失了大量上下文）
+   - 新增 `<facts>` slot：coreFacts + retrieved memories（之前完全没拼）
+   - `<tool_protocol>` 占 recency bias 黄金位
+   - 删除 chat 端 voice 例句（不固化句子，靠 speaking_style 描述让 LLM 自己生成）
+   - `buildCharacterContext` 同时返回旧 `system + userPrefix`（向后兼容）+ 新 `slots / mergedSystem`
+
+2. **新增端点（Phase 2）**
+   - `GET /api/character/{id}` — 取代 `/api/character/bootstrap`，返回 etag-able 静态 slots
+   - `POST /api/chat/context` — 取代 `/api/character/context` + `/api/tool/memory-context`
+     合并；返回 facts / narrative / prefill / etag / memoryDecision
+   - `POST /api/chat/turn` — 取代 `/api/sync/push`（语义重命名，行为完全一致）
+   - `DELETE /api/chat/turn/{turnId}` — 新增删除路径，cascade 衍生数据 + WS 推 turn_deleted
+
+3. **删除端点**
+   - `POST /api/chat-with-memory` — 已删除（无 caller）
+
+4. **旧端点加 Deprecation header**（保留兼容 1 release，仍可调用）
+   - `POST /api/character/context` → `Link: </api/chat/context>`
+   - `GET /api/character/bootstrap` → `Link: </api/character/{id}>`
+   - `POST /api/tool/memory-context` → `Link: </api/chat/context>`
+   - `POST /api/sync/push` → `Link: </api/chat/turn>`
+
+### 客户端需要做
+
+1. 新增方法已加：[ChatServerApi.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatServerApi.kt)
+   - `getCharacter(assistantId)` → ChatCharacterResponse
+   - `chatContext(ChatContextRequest)` → ChatContextResponse
+   - `chatTurn(ChatTurnRequest)` → ChatTurnResponse
+   - `deleteChatTurn(turnId)` → DeleteTurnResponse
+   - 新 DTO：[ChatDtos.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatDtos.kt)
+
+2. 旧方法保留并标 `@Deprecated`：`syncPush` / `characterContext` / `characterBootstrap`
+   —— 调用不会编译失败（仅 warning），但建议下次产品迭代时迁移：
+   - `SyncQueueDrainer.syncPush(...)` → `chatTurn(...)` （行为完全等价）
+   - `CharacterBootstrapStore.characterContext(...)` → `chatContext(...)`（拿到结构化 slots，更稳）
+   - `CharacterBootstrapStore.characterBootstrap(...)` → `getCharacter(...)`（etag 缓存）
+
+3. 实现 system prompt **canonical merge 顺序**：
+   - 详细伪代码 + slot 顺序 + `<client>` slot 嵌入位置见 [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)
+   - 8 段顺序：role / character / background / constraints / facts / narrative /
+     **&lt;client&gt;** / tool_protocol，末尾 assistantPrefill
+   - `<client>` slot 由客户端拼，注入：`current_time` / `user_locale` /
+     `device_platform` / 用户在 app 设置里写的 personalization
+
+4. **tool 循环 UX**：
+   - DeepSeek-V3 调 search_memory 时**默认 content 为空**（OpenAI 标准）；客户端
+     SDK 必须实现 stage1 + stage2 两阶段（见 protocol 文档 §5）
+   - stage1 没 content 时 UI 显示伪造占位 "正在查找相关记忆..."
+
+### 影响
+
+- 旧客户端继续走 `/api/character/context` / `/api/sync/push` 不会断（只是 response header 多 Deprecation）
+- 新客户端用 `chatContext` 拿到结构化 slots → system prompt 更精准（V_NEW_LEAN 实测 tool 触发率 72% → 92%，正确跳过 80% → 90%）
+- `/api/chat-with-memory` 调用会 404（确认 chatbox-Android 无 caller）
+
+### 状态
+
+- ✅ 服务端落地（Phase 1a / 1b / 2 共 5 个 commit on dev branch）
+- ✅ Android API 客户端方法 + DTO 已加
+- ⏳ Android 现有 caller（SyncQueueDrainer / CharacterBootstrapStore）迁移待 mobile 团队下次迭代
+
+---
+
 ## CR-X 模板（新增条目时复用）
 
 ```markdown
