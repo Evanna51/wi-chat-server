@@ -43,6 +43,7 @@ const { getLatestReflection } = require("./reflectionService");
 const { resolveEmotion } = require("../emotionTaxonomy");
 const { detectSalientPhrase } = require("./salientPhraseDetector");
 const { parsePronouns } = require("./identityVocab");
+const { composeForChat } = require("./promptComposer");
 
 // ── 预算 ─────────────────────────────────────────────────────────────
 //
@@ -194,7 +195,7 @@ function buildCharacterContext(assistantId, {
     salientPhrase,
   };
 
-  // system / userPrefix 总是返回 —— 这是 LLM 的实际输入。
+  // system / userPrefix 总是返回 —— 这是 LLM 的实际输入（旧客户端用）。
   // 只有 promptFragment（= system + userPrefix 简单拼接）是 opt-in，
   // 因为它和 system+userPrefix 内容完全冗余、纯属向后兼容用。
   const segs = buildPromptSegments({
@@ -213,6 +214,25 @@ function buildCharacterContext(assistantId, {
   if (includePromptFragment) {
     result.promptFragment = segs.combined;
   }
+
+  // Phase 1a — V_NEW_LEAN slots（新客户端用，向后兼容并存）
+  // 见 docs/api-redesign-plan.md §2.5 / §6 Phase 1a
+  // 注意：本次 Phase 1a 端点入参不带 coreFacts / retrievedMemories（那是 Phase 2
+  // /api/chat/context 端点的事）。slots.facts 会显示 "(no facts retrieved)" 占位 —
+  // 客户端按 canonical 顺序拼接时直接把 slots 喂进 system 即可，自己再插 <client>。
+  const composed = composeForChat({
+    profile,
+    identity,
+    coreFacts: [],
+    retrievedMemories: [],
+    recentReflection: freshReflection,
+    activeEpisodes: recentEpisodes,
+    activeTopics,
+    salientPhrase,
+    prefill: segs.userPrefix,
+  });
+  result.slots = composed.slots;
+  result.mergedSystem = composed.mergedSystem;
 
   return result;
 }
