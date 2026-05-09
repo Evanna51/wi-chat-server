@@ -318,21 +318,35 @@ src/services/character/promptComposer.js
     └── renderTaskBlock({ type, schema })   → introspection only
 ```
 
-### 收编范围（6 个 service → 1 个 composer）
+### 实际收编范围（务实评估）
 
-| service | 当前 prompt | 改造后 |
-|---|---|---|
-| `reflectionService` | hand-rolled `── 段标 ──` ([reflectionService.js:201](src/services/character/reflectionService.js:201)) | `composeForIntrospection({ task: 'reflection', ... })` |
-| `episodeBuilder` | hand-rolled prompt ([episodeBuilder.js:109](src/services/character/episodeBuilder.js:109)) | `composeForIntrospection({ task: 'episode_aggregation', ... })` |
-| `catchupService` | hand-rolled ([catchupService.js:319](src/services/catchupService.js:319)) | `composeForIntrospection({ task: 'catchup_event', ... })` |
-| `proactivePlanService` | 2 处 hand-rolled（plan + next_push）([proactivePlanService.js:143](src/services/proactivePlanService.js:143), [:764](src/services/proactivePlanService.js:764)) | `composeForIntrospection({ task: 'proactive_plan' / 'next_push', ... })` |
-| `memoryClassificationService` | inline prompt | `composeForIntrospection({ task: 'memory_classify', ... })` |
-| `memoryDecisionService` | inline prompt | `composeForIntrospection({ task: 'retrieval_decision', ... })` |
+Plan 初稿写"6 service 全收编"，落地时发现差异化大、强行统一会改 LLM 输出。务实评估后实际收编：
 
-**收编收益**：
-- 改 identity 字段渲染只改一处，不用改 6 个 service
-- 改深度字段语义只改 introspection 端，chat 不受影响
-- 两个 family 共享 role / persona / constraints 描述，避免角色定义在多处漂移
+| service | character_background | identity 描述 | 处置 |
+|---|---|---|---|
+| `episodeBuilder` | ✅ 共享 `renderBackgroundForIntrospection` | 不用 | **已收编** |
+| `catchupService` | ✅ 同上 | 不用 | **已收编** |
+| `proactivePlanService` (plan) | ✅ 同上 | 不用 | **已收编** |
+| `proactivePlanService` (next_push) | ✅ 同上 | 不用 | **已收编** |
+| `reflectionService` | 不用 | hand-rolled `identitySummary`（1 行紧凑） | **保留 service-local** —— 形态独立、风险大于收益 |
+| `memoryClassificationService` | 不用 | 不用（纯 NLP task） | **不参与** |
+| `memoryDecisionService` | 不用 | 不用（纯 NLP task） | **不参与** |
+
+**已收编（Phase 1b 落地）**：4 处 `clipText(characterBackground \|\| "无", N)` 模式 →
+`promptComposer.renderBackgroundForIntrospection(characterBackground, N)`。默认行为与
+原实现完全一致（不剥"系统提示"段、ASCII `...` trim、whitespace strip），LLM 输出零变化。
+
+**未收编（保持 service-local）**：reflection 的 identitySummary、各 service 的 prompt
+主结构 / 字段 layout / output schema 描述。这些与 task 强耦合，强行统一只会增加间接层。
+
+**收编收益（修正版）**：
+- 未来 character_background schema 变化（如 task C 拆"系统提示"段）只改一处
+- `composeForChat` + `renderBackgroundForIntrospection` 让两个 family **共享同一个**
+  background 渲染逻辑（chat 走 stripSystemHints=true，introspection 走 false，可单独切换）
+
+**未来 followup**（如有需要）：
+- reflection identitySummary 收编（如果新增类似 task 时再做）
+- 其它 service 的字段渲染共享（视产品需求）
 
 ---
 
@@ -431,18 +445,31 @@ client A 自己已经删了，会去重
 
 **完成标准**：现有客户端无变化；新客户端能开始用 `slots`（含 narrative）字段。
 
-### Phase 1b: Introspection prompt 收编（server-internal）
+### Phase 1b: Introspection 渲染收编（实际落地范围）
 
-复用 1a 的 building blocks，新增 `composeForIntrospection`：
-1. 实现 `renderRolePersona({mode:"introspection"})` — 全字段 + 第一人称
-2. 实现 `renderTaskBlock({ type, schema })` — 抽象 6 种 task 的输出 schema 描述
-3. 6 个 service 逐个迁移调用：reflectionService → episodeBuilder → catchupService → proactivePlanService → memoryClassificationService → memoryDecisionService
-4. 每迁移一个跑回归测试（已有的 narrativeAndTopics / characterCognition / reflection 测试）
-5. 删除每个 service 内的 hand-rolled prompt 函数
+务实评估后，实际收编**只共享 character_background 渲染**（4 service）。其余各 service
+的 prompt 主结构 / identity 描述 / output schema 差异化大，强行统一风险大于收益，
+保留 service-local。
 
-**完成标准**：6 个 service 的 LLM 输出格式不变（schema 兼容），但 prompt 字符串由 composer 统一生成。
+**已落地**（commit 146806e）：
+1. promptComposer.js 暴露 `clipText` + `renderBackgroundForIntrospection(string, N, opts)`
+   building block，默认行为与现有 4 service 自定义 clipText 完全一致
+2. episodeBuilder / catchupService / proactivePlanService（plan + next_push）4 处
+   `clipText(characterBackground || "无", N)` → `renderBackgroundForIntrospection(...)`
+3. 跑回归测试 546/546 passed
 
-**1a / 1b 关系**：建议**并行启动**（共享 promptComposer building blocks），1a 优先发布（直接影响 chat 质量），1b 紧随（一次性收编 6 个 service，不阻塞产品发布）。
+**完成标准** ✅：4 个 service 的 LLM 输出 prompt 字符串保持完全一致（默认
+stripSystemHints=false 与原实现等价）。
+
+**未落地** (followup，如有需要再做)：
+- `composeForIntrospection({task, ...})` 高层 helper（评估后认为间接层无实际收益）
+- reflection identitySummary 共享渲染
+- introspection 字段全字段第一人称模板
+
+**1a / 1b 关系**：1a / 1b 在同一批 commit 序列里完成（共享 promptComposer 文件），
+1a 提供 chat slot 渲染，1b 抽出 introspection 共享 building block。两个 family
+现在共享 `clipText` 这个底层工具 + `<background>` 渲染逻辑（chat 走
+stripSystemHints=true，introspection 走 false，可单独切换）。
 
 ### Phase 2: 端点合并 + 命名规范化
 1. 新建 `POST /api/chat/context`，内部调 `buildCharacterContext` + `buildMemoryContext`
@@ -481,7 +508,7 @@ client A 自己已经删了，会去重
    - `POST /api/tool/memory-recall` / `memory-correct` / `knowledge-add`
 6. **`/chat-with-memory`** ✅ **删除**（不保留为 fallback）。
 7. **A/B 角色选择** ✅ 用金宵（已通过 [scripts/patch-jinxiao-identity.js](scripts/patch-jinxiao-identity.js) 补全 skills_json + pronouns，identity_version 1→2）。
-8. **Phase 1b 收编节奏** ✅ 一次性收编 6 个 service。
+8. **Phase 1b 收编节奏** ✅ 一次性落地。务实评估后实际范围 = 4 service 共享 character_background 渲染（reflection identitySummary / classify / decision 风险大于收益，保留 service-local）。
 9. **本地模型升级** ✅ 暂不调整（保持当前 Qwen），1b 完成后视效果再说。
 
 ---
