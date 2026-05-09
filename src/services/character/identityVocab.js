@@ -149,6 +149,18 @@ const COMMON_INSECURITIES = Object.freeze([
   "fear_of_inadequacy",
   "fear_of_losing_independence",
   "fear_of_being_misunderstood",
+  "fear_of_rejection",
+  "fear_of_being_too_much",
+  "fear_of_failure",
+  "fear_of_being_used",
+  "fear_of_loss",
+  "fear_of_change",
+  "fear_of_loneliness",
+  "fear_of_being_seen",
+  "fear_of_commitment",
+  "fear_of_vulnerability",
+  "fear_of_disappointing_others",
+  "fear_of_aging",
 ]);
 
 const COMMON_CORE_WOUNDS = Object.freeze([
@@ -159,6 +171,16 @@ const COMMON_CORE_WOUNDS = Object.freeze([
   "emotional_invalidation",        // 情绪不被允许
   "loss_of_caregiver",
   "chronic_loneliness",
+  "parental_enmeshment",           // 与父母过度纠缠
+  "bullying_history",
+  "body_shame",
+  "chronic_invalidation",
+  "divorce_of_parents",
+  "early_loss",
+  "caretaker_role_too_young",      // 过早承担照护者
+  "emotional_incest",              // 情感越界
+  "public_humiliation",
+  "religious_or_cultural_trauma",
 ]);
 
 const COMMON_DESIRES = Object.freeze([
@@ -170,6 +192,16 @@ const COMMON_DESIRES = Object.freeze([
   "safe_to_be_weak",
   "to_matter_to_someone",
   "freedom_to_be_oneself",
+  "to_be_seen_fully",
+  "to_be_held",                    // 被拥抱 / 物理安抚
+  "to_belong",
+  "creative_freedom",
+  "adventure_and_growth",
+  "domestic_intimacy",             // 日常生活中的亲密
+  "to_be_someones_safe_person",
+  "to_be_proud_of_oneself",
+  "aesthetic_immersion",           // 沉浸式审美
+  "mutual_growth",
 ]);
 
 // ── 校验函数 ─────────────────────────────────────────────────────────

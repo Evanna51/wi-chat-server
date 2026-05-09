@@ -628,8 +628,9 @@ router.get("/character/bootstrap", authMiddleware, (req, res) => {
 /**
  * Agentic RAG 搜索端点：给 app 端 LLM 的 search_memory tool 直接调用。
  *
- * - 默认 source='user'，只搜用户说过的话；角色信息（life_event 等）多在上下文里已有
- * - 显式提到"你"或角色名时，app 端 LLM 应改传 source='character'
+ * - 默认 source='user'，只搜用户说过的话（user_turn）；适用于绝大多数召回场景
+ * - source='character' 只搜角色自生成的叙事（life_event/work_event），条目极少，
+ *   仅在明确需要角色内心独白/日记时使用；用户提到"你记得吗"不等于 source=character
  * - 无 decision 逻辑（与 /tool/memory-context 区分）：LLM 已决定要查，server 直接执行
  */
 router.post("/tool/memory-recall", authMiddleware, async (req, res) => {

@@ -10,6 +10,7 @@ const {
 } = require("../db");
 const {
   deleteConversationTurnCascade,
+  deleteMemoryItemCascade,
 } = require("../services/memoryEditService");
 const {
   getActiveUserIds,
@@ -199,6 +200,49 @@ router.delete("/conversation-turns/:id", (req, res) => {
       return res.status(404).json({ ok: false, error: "turn_not_found", turnId });
     }
     return res.json({ ok: true, turnId, deleted: result.deleted });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+// ── 物理删除：admin UI 用，**不可恢复** ───────────────────────────────
+
+// memory_items 级联：memory_facts / memory_edges / memory_vectors / outbox_events / source_turn
+router.delete("/memories/:id", (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "missing_id" });
+  try {
+    const result = deleteMemoryItemCascade(id, null, { actor: "admin_ui", reason: "browse_delete" });
+    if (!result.found) {
+      return res.status(404).json({ ok: false, error: result.reason || "memory_not_found" });
+    }
+    return res.json({ ok: true, id, deleted: result.deleted });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+// memory_facts 单条删除（id 是 TEXT / UUID v7，不是 INTEGER）
+router.delete("/facts/:id", (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "missing_id" });
+  try {
+    const r = db.prepare("DELETE FROM memory_facts WHERE id = ?").run(id);
+    if (r.changes === 0) return res.status(404).json({ ok: false, error: "fact_not_found" });
+    return res.json({ ok: true, id, deleted: r.changes });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+// character_behavior_journal 单条删除（id 是 TEXT / UUID v7）
+router.delete("/journal/:id", (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "missing_id" });
+  try {
+    const r = db.prepare("DELETE FROM character_behavior_journal WHERE id = ?").run(id);
+    if (r.changes === 0) return res.status(404).json({ ok: false, error: "journal_not_found" });
+    return res.json({ ok: true, id, deleted: r.changes });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
   }

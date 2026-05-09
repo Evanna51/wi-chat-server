@@ -5,12 +5,16 @@
 > 配套阅读：
 > - `README.md` — 端到端 API 参考
 > - `docs/offline-sync-plan.md` — sync 幂等设计
-> - `docs/realtime-and-autonomous-redesign.md` — 主动消息与实时通道演进
-> - `docs/storage-optimization-plan.md` — 存储瘦身路线
+> - `docs/character-cognition-architecture.md` — 7 层角色认知架构（设计与心智模型）
+> - `docs/character-system.md` — 角色系统 API + 运维手册（接入与 cron）
 > - `docs/ai-tool-memory-recall-and-correct.md` — 客户端 LLM 工具集成手册
+> - `docs/ws-client-integration.md` — WebSocket 客户端接入
+> - `docs/android-sync-integration.md` — Android 离线同步对接
 > - `docs/refactor-plan.md` — 重构任务进度（结构 / 设计问题逐项落地）
 > - `docs/client-release-required.md` — 需客户端配合发版的事项
 > - `docs/known-issues.md` — 已知存在但暂不修的问题（鉴权 / 写回竞态等）
+> - `docs/EXECUTION-PROGRESS.md` — 三阶段改造的"驾驶舱"，含 Phase A/B/C/D 与 Phase CC-1~4
+> - `docs/archive/` — 已交付或已归档的设计 / 路线图 / 阅读笔记
 > - `tests/retrieval/fixtures/README.md` — 检索回归 fixture 格式说明
 
 ---
@@ -150,7 +154,7 @@ npm run eval:retrieval -- --write-baseline
 
 ## 4. 数据模型
 
-### 4.1 表分类（18 张主表 + 1 张 FTS5 虚表）
+### 4.1 表分类（24 张主表 + 1 张 FTS5 虚表）
 
 按职能划分：
 
@@ -166,8 +170,16 @@ npm run eval:retrieval -- --write-baseline
                      memory_retrieval_log                      — 每次检索的得分明细（评估用，30d TTL）
 
 [ 角色状态 ]          assistant_profile                        — 名字 / background / 开关 / type
-                     character_state                           — mood / intimacy / energy 实时态（懒衰减）
+                     character_state                           — mood / intimacy / energy 实时态（懒衰减；含 CC-1 加的 suppressed/trend24h）
                      character_behavior_journal                — 主动决策 / catchup 日志
+
+[ 角色认知层 ]        character_identity                       — 21 字段人格底色（CC-1, migration 025）
+                     relationship_state                        — 12 维关系动力学（CC-1, migration 026）
+                     relationship_event                        — 关系事件流水，reflection 数据源
+                     narrative_episode                         — 故事化叙事（CC-2, migration 028）
+                     episode_memory_link                       — episode ↔ memory_item 多对多
+                     persistent_topic                          — 长期话题 + 7 状态机
+                     relationship_reflection                   — AI 关系反思时间线（CC-3, migration 029）
 
 [ 主动消息 ]          proactive_plans                          — pending → sent / cancelled
 
@@ -432,7 +444,7 @@ phone push (POST /api/sync/push)
 └────────────────────────────────────────┘
 ```
 
-**为什么 assistant_turn 完全不入 memory_items**（T-08）：实测 625 条 `assistant_turn memory_items` 抽出 **0 条 fact**，AI 自己说的话语义稀释、占据 top-K 候选位、挤出真正有价值的 user_turn。migration 024 一次性清了历史 627 行；新 ingest 路径上 assistant role 直接 short-circuit 成 logOnly。详见 [storage-optimization-plan.md](./storage-optimization-plan.md)。
+**为什么 assistant_turn 完全不入 memory_items**（T-08）：实测 625 条 `assistant_turn memory_items` 抽出 **0 条 fact**，AI 自己说的话语义稀释、占据 top-K 候选位、挤出真正有价值的 user_turn。migration 024 一次性清了历史 627 行；新 ingest 路径上 assistant role 直接 short-circuit 成 logOnly。历史背景见 [archive/storage-optimization-plan.md](./archive/storage-optimization-plan.md)。
 
 ### 7.1 ingestInteraction 函数签名
 
@@ -735,6 +747,12 @@ SELECT * FROM proactive_plans
 ---
 
 ## 10. 角色情绪 / 关系 / 精力（character_state）
+
+> **本节描述的是 Phase B/B.2 实现的实时态层（情绪+亲密度+精力）**，是 7 层认知架构的"第 3 层"基础。
+> 完整的角色认知层（identity / 12 维 dynamics / 叙事记忆 / 长期话题 / 反思 / 行为决策）见
+> [character-cognition-architecture.md](./character-cognition-architecture.md) +
+> [character-system.md](./character-system.md)。
+> 客户端要拼 system prompt，调 `POST /api/character/context` 即可拿到 7 层聚合 + promptFragment，**不必**再单独读 `/api/relationship/state`。
 
 ### 10.1 三层数据
 
@@ -1279,6 +1297,11 @@ node scripts/dead-letter-replay.js --purge            # 清 outbox.status='dead'
 022 drop_legacy_proactive_log      删 proactive_message_log（旧 FCM 推送日志，新链路用 proactive_plans）
 023 drop_scheduler_locks           删 scheduler_locks（单进程 cron 不需要分布式锁）
 024 purge_assistant_turn_memory_items  清 627 行 assistant_turn 派生数据（T-08，conversation_turns 原文不动）
+025 character_identity             21 字段人格底色（traits / attachment_style / values / boundaries / insecurities / care_languages / tensions），CC-1
+026 relationship_state             12 维关系动力学 + 6 时间戳 + relationship_event 流水，CC-1
+027 emotion_inertia                character_state 加 5 列：suppressed_emotion / unresolved_topic / mood_trend_24h，CC-1
+028 narrative_episode              narrative_episode + episode_memory_link + persistent_topic（CC-2）
+029 relationship_reflection        relationship_reflection（14 字段，CC-3 周/触发/手动反思）
 ```
 
 ---

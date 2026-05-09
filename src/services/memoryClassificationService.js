@@ -198,7 +198,10 @@ async function classifyWithLLM(content, opts = {}) {
     .replace(/__CHARACTER_NAME__/g, promptCharacter)
     .replace("__CONTENT__", text.slice(0, 500));
   const { content: raw } = await getProvider().complete({
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      { role: "system", content: "你是记忆分类与事实抽取引擎。只输出 JSON，不要额外文字。" },
+      { role: "user", content: prompt },
+    ],
     responseFormat: "json",
     maxTokens: 240,
     temperature: 0,

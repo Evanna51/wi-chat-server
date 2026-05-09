@@ -85,13 +85,13 @@ function getLastEpisodeEndAt(assistantId) {
 
 /**
  * 拉本次 build 的 memory_items 窗口。
- * 起点：上次 episode 末尾；没有 episode 就拿最近 24h
+ * 起点：上次 episode 末尾；没有 episode（首次构建）则按 fallbackDays 回看（默认 24h，admin/init 路径可传更长）
  * 终点：now
  * 不超过 MAX_MEMORIES_PER_RUN
  */
-function fetchMemoriesForBuild(assistantId, { now = Date.now() } = {}) {
+function fetchMemoriesForBuild(assistantId, { now = Date.now(), fallbackDays = 1 } = {}) {
   const lastEnd = getLastEpisodeEndAt(assistantId);
-  const start = lastEnd || (now - 24 * 60 * 60 * 1000);
+  const start = lastEnd || (now - fallbackDays * 24 * 60 * 60 * 1000);
   const rows = db
     .prepare(
       `SELECT id, memory_type, content, salience, created_at
@@ -106,7 +106,7 @@ function fetchMemoriesForBuild(assistantId, { now = Date.now() } = {}) {
 
 // ── prompt ────────────────────────────────────────────────────────
 
-function buildPrompt({ characterName, characterBackground, memories, knownTopics }) {
+function buildPrompt({ characterBackground, memories, knownTopics }) {
   const memLines = memories.map((m, i) => {
     const ts = formatHumanTs(m.created_at);
     return `${i + 1}. [${ts} ${m.memory_type}] ${clipText(m.content, 160)}`;
@@ -119,7 +119,8 @@ function buildPrompt({ characterName, characterBackground, memories, knownTopics
     : "（暂无）";
 
   return [
-    `你是「${characterName}」的叙事助手。任务是把以下记忆条目按"主题 + 时间相关性"聚合成 K 个 narrative_episode（叙事段），同时识别长期话题的 mention 和候选新话题。`,
+    `你是这个角色的叙事助手。把以下记忆按"主题 + 时间相关性"聚合成 K 个 narrative_episode，同时识别长期话题的 mention 和候选新话题。`,
+    `所有输出里用"你"指代角色、用"ta"指代用户，不要写具体名字。`,
     "",
     "── 角色档案 ──",
     clipText(characterBackground || "无", 400),
@@ -164,8 +165,10 @@ function buildPrompt({ characterName, characterBackground, memories, knownTopics
 async function callLlmForEpisodes(prompt, opts = {}) {
   const provider = getProvider();
   const result = await provider.complete({
-    systemPrompt: "你是叙事记忆聚合助手。输出严格 JSON，不要 markdown 代码块。",
-    userPrompt: prompt,
+    messages: [
+      { role: "system", content: "你是叙事记忆聚合助手。输出严格 JSON，不要 markdown 代码块。" },
+      { role: "user", content: prompt },
+    ],
     temperature: 0.4,
     maxTokens: 1500,
     responseFormat: "json",
@@ -233,18 +236,19 @@ function insertEpisode({
  *
  * @returns {{episodesCreated, topicsUpdated, newTopicsCreated, memoriesScanned, skipped, reason}|null}
  */
-async function buildEpisodesFor(assistantId, { now = Date.now(), source = "cron" } = {}) {
+async function buildEpisodesFor(assistantId, { now = Date.now(), source = "cron", fallbackDays } = {}) {
   const profile = getAssistantProfile(assistantId);
   if (!profile) return { skipped: true, reason: "no_profile", memoriesScanned: 0 };
 
-  const { memories, windowStart, windowEnd } = fetchMemoriesForBuild(assistantId, { now });
+  // cron 路径默认 24h（每天累积），admin / init 路径首次构建时回看 90 天
+  const effectiveFallback = fallbackDays ?? (source === "cron" ? 1 : 90);
+  const { memories, windowStart, windowEnd } = fetchMemoriesForBuild(assistantId, { now, fallbackDays: effectiveFallback });
   if (memories.length < MIN_MEMORIES_TO_RUN) {
     return { skipped: true, reason: "too_few_memories", memoriesScanned: memories.length };
   }
 
   const knownTopics = listAllTopics(assistantId, { limit: 30 });
   const prompt = buildPrompt({
-    characterName: profile.character_name || assistantId,
     characterBackground: profile.character_background || "",
     memories,
     knownTopics,

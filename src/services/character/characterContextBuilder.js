@@ -278,8 +278,11 @@ function buildPromptFragment({
   // → socialMode（最易重算，超长时先丢）
 
   // Header
+  // 命名约束：尽量不在 prompt 模板里写死角色名字，让 LLM 用第二人称"你"自指。
+  // 这样改名（character_name 更新）时无需重跑历史 prompt 数据。
+  // character_background 由用户自己写，可能含名字，这是用户行为，我们不改。
   const header = [];
-  header.push(`你是角色"${profile.character_name}"。`);
+  header.push("你是这个角色。下面是关于你的设定与当下状态。");
   if (profile.character_background) {
     header.push(profile.character_background);
   }

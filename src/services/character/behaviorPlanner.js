@@ -359,6 +359,7 @@ function evaluate(assistantId, { now = Date.now() } = {}) {
     intent: topIntent,
     description: def.description,
     urgency: def.urgency,
+    priority: def.priority,
     suggestedSocialMode,
     contentHint: topContentHint,
     driver: topDriver,

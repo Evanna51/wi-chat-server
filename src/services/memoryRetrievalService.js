@@ -26,7 +26,7 @@ function computeSemanticScoresForIds(memoryIds, queryVector) {
 
 // 评分公式版本号，写入 memory_retrieval_log.strategy 作为评估切片用。
 // 改任一权重 / 半衰期 / 公式形态 → 必须 bump 此版本号，回归脚本据此分组对比。
-const RETRIEVAL_STRATEGY_VERSION = "v1";
+const RETRIEVAL_STRATEGY_VERSION = "v2";
 
 const QUALITY_WEIGHT = { A: 1.0, B: 0.8, C: 0.6, D: 0.3, E: 0.0 };
 
@@ -225,7 +225,7 @@ async function retrieveMemory({
     vectorMatches = await vectorStore.search({
       assistantId,
       queryVector,
-      topK: Math.max(topK * (hasFilter ? 5 : 2), 20),
+      topK: Math.max(topK * 5, 30),
     });
     memoryIds = vectorMatches.map((item) => item.memoryId);
   }
@@ -256,6 +256,9 @@ async function retrieveMemory({
   const placeholders = memoryIds.map(() => "?").join(",");
   const whereClauses = [`assistant_id = ?`, `id IN (${placeholders})`];
   const params = [assistantId, ...memoryIds];
+
+  // v2: 排除 E 级噪声 — 这些条目对任何 query 都没有信息价值
+  whereClauses.push("(quality_grade IS NULL OR quality_grade != 'E')");
 
   // SQL-first 路径已经过滤过了；走向量路径时这里再加 SQL 过滤
   if (!useSqlFirst) {
@@ -311,7 +314,9 @@ async function retrieveMemory({
   const ranked = rows
     .map((row) => {
       const rawSemantic    = matchScoreMap.get(row.id);
-      const semantic       = rawSemantic == null ? 0.5 : (rawSemantic + 1) / 2;
+      // v2: 不再 (raw+1)/2 压缩到 [0.5,1.0]，直接 clamp 到 [0,1] 保留区分度。
+      // 同语言 embedding cosine 正常在 [0.3, 1.0]，负值极罕见。
+      const semantic       = rawSemantic == null ? 0.3 : Math.max(0, Math.min(1, rawSemantic));
       const recency        = scoreRecency(row.created_at, now, row.memory_category, row.cite_count, row.memory_type);
       const salience       = row.salience || 0.5;
       const confidence     = row.confidence || 0.5;

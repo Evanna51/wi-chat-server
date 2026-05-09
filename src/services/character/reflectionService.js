@@ -144,7 +144,6 @@ function fetchRecentEvents(assistantId, fromMs, toMs) {
 // ── prompt ────────────────────────────────────────────────────────
 
 function buildReflectionPrompt({
-  characterName,
   identity,
   characterState,
   dynamicsState,
@@ -200,7 +199,8 @@ function buildReflectionPrompt({
     : "（无前次反思）";
 
   return [
-    `你是「${characterName}」。当前不是要发消息给用户，而是给自己写一段对最近关系的反思。`,
+    `你是这个角色。给自己写一段对最近关系的反思——不是要发给用户，是给自己看。`,
+    `用"你"自指、用"ta"指代用户，不要写具体名字。`,
     "",
     `── 反思类型 ──`,
     `${reflectionType}${triggerReason ? `（触发：${triggerReason}）` : ""}`,
@@ -252,8 +252,10 @@ function buildReflectionPrompt({
 async function callLlmForReflection(prompt) {
   const provider = getProvider();
   const result = await provider.complete({
-    systemPrompt: "你是关系反思助手。输出严格 JSON，不要 markdown。",
-    userPrompt: prompt,
+    messages: [
+      { role: "system", content: "你是关系反思助手。输出严格 JSON，不要 markdown。" },
+      { role: "user", content: prompt },
+    ],
     temperature: 0.5,
     maxTokens: 800,
     responseFormat: "json",
@@ -343,13 +345,18 @@ async function reflectFor(assistantId, {
   const recentTurns = getRecentTurnsAcrossSessions({ assistantId, limit: 8 });
   const previousReflection = getLatestReflection(assistantId);
 
-  // 数据太少 → skip（首日没数据，跑 cron 也产 nothing）
-  if (events.length === 0 && episodes.length === 0 && topics.length === 0) {
+  // 数据太少 → skip。recentTurns 是兜底信号：哪怕没有 episode/event/topic，
+  // 只要还有最近对话，就值得让 LLM 写一段反思（首次手动触发场景常见）。
+  if (
+    events.length === 0 &&
+    episodes.length === 0 &&
+    topics.length === 0 &&
+    recentTurns.length === 0
+  ) {
     return { skipped: true, reason: "no_data_in_window" };
   }
 
   const prompt = buildReflectionPrompt({
-    characterName: profile.character_name || assistantId,
     identity,
     characterState,
     dynamicsState,

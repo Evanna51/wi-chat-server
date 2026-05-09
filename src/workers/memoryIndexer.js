@@ -2,6 +2,7 @@ const { db } = require("../db");
 const config = require("../config");
 const { embedText } = require("../services/embeddingService");
 const { vectorStore } = require("../services/vectorStore");
+const { classifyAndPersist } = require("../services/memoryClassificationService");
 const { v7: uuidv7 } = require("uuid");
 
 function nextRetryMs(retryCount) {
@@ -87,6 +88,16 @@ async function processEvent(event) {
      SET vector_status='ready', vector_provider=?, vector_updated_at=?, updated_at=?
      WHERE id=?`
   ).run(vectorStore.name, now, now, memory.id);
+
+  // 实时分类 + 事实抽取：在 embedding 完成后立即执行，不等 cron backfill。
+  // classifyAndPersist 内部幂等（已分类的跳过），不会和 cron 冲突。
+  // 失败不阻塞 indexer 主流程（分类可以由 cron 兜底）。
+  try {
+    await classifyAndPersist(memory.id, memory.content);
+  } catch (err) {
+    console.warn("[indexer] classify failed (cron will retry):", memory.id, err.message);
+  }
+
   db.prepare(
     `INSERT INTO sync_checkpoints (name, last_event_id, updated_at)
      VALUES ('memory_indexer', ?, ?)

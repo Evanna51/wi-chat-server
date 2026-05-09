@@ -50,20 +50,30 @@ function extractJsonObject(text = "") {
 
 async function aiDecision(userInput) {
   const prompt = [
-    "你是记忆检索决策器。基于当前用户输入，判断是否需要检索历史记忆。",
-    "仅输出一个JSON对象，不要输出任何额外文字。",
-    "严格格式:",
-    '{"shouldRetrieve":true|false,"intent":"fact_query|continuation|care_response|small_talk|task_only","reason":"<snake_case_reason>","query":"<用于检索的查询语句>"}',
-    "规则:",
-    "1) 若用户在问偏好、过往事实、上文延续，shouldRetrieve=true，intent优先用fact_query/continuation。",
-    "2) 若是关心、安慰、共情类回复需要避免编造，也可shouldRetrieve=true，intent=care_response。",
-    "3) 若是纯即时闲聊且不依赖历史，shouldRetrieve=false，intent=small_talk。",
-    "4) query要简短明确，适合作为向量检索查询；若不检索可给空字符串。",
-    `当前用户输入: ${userInput}`,
+    "判断以下用户输入是否需要检索历史记忆，输出严格 JSON。",
+    "",
+    "输出格式：",
+    '{"shouldRetrieve":true|false,"intent":"fact_query|continuation|care_response|small_talk|task_only","reason":"<snake_case>","query":"<检索关键词>"}',
+    "",
+    "判断规则：",
+    "- 问偏好/过往/上文延续 → shouldRetrieve=true, intent=fact_query 或 continuation",
+    "- 关心/安慰/共情（需要避免编造）→ shouldRetrieve=true, intent=care_response",
+    "- 纯即时闲聊、不依赖历史 → shouldRetrieve=false, intent=small_talk",
+    "- query 要精炼成向量检索关键词（去掉语气词），不检索则空字符串",
+    "",
+    "示例：",
+    '输入: "你还记得我上次说的那件事吗" → {"shouldRetrieve":true,"intent":"continuation","reason":"user_asks_recall","query":"上次提到的事"}',
+    '输入: "哈哈哈好搞笑" → {"shouldRetrieve":false,"intent":"small_talk","reason":"reaction_only","query":""}',
+    '输入: "我之前不是跟你说过我喜欢喝拿铁吗" → {"shouldRetrieve":true,"intent":"fact_query","reason":"user_references_preference","query":"喜欢 拿铁 咖啡"}',
+    "",
+    `用户输入: ${userInput}`,
   ].join("\n");
 
   const { content } = await getProvider().complete({
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      { role: "system", content: "你是记忆检索决策器。只输出 JSON，不要额外文字。" },
+      { role: "user", content: prompt },
+    ],
     responseFormat: "json",
     maxTokens: 160,
   });

@@ -64,7 +64,10 @@ function parseStrictJsonObject(text = "") {
 
 async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600 } = {}) {
   const { content } = await getProvider().complete({
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      { role: "system", content: "你是角色主动消息生成器。以角色身份写一条自然的主动消息。输出严格 JSON，不要 markdown 代码块。" },
+      { role: "user", content: prompt },
+    ],
     temperature,
     maxTokens,
     responseFormat: "json",
@@ -73,7 +76,6 @@ async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600
 }
 
 function buildPlanPrompt({
-  characterName,
   characterBackground,
   triggerReason,
   triggerExplanation,
@@ -118,8 +120,9 @@ function buildPlanPrompt({
   );
 
   return [
-    `你是「${characterName}」，要给用户主动发一条消息。`,
+    `你是这个角色，要给用户主动发一条消息。`,
     scenarioOneLine,
+    `输出里用"你"自指、用"ta"指代用户，不要写具体名字（消息正文 body 直接对 ta 说话即可）。`,
     "",
     // T-CC-08 注入：identity → state → dynamics
     ...(identityFragment ? [identityFragment, ""] : []),
@@ -477,7 +480,6 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
     for (let attemptIdx = 0; attemptIdx < attempts.length; attemptIdx += 1) {
       const params = attempts[attemptIdx];
       const prompt = buildPlanPrompt({
-        characterName: profile.character_name || assistantId,
         characterBackground: profile.character_background || "",
         triggerReason: trigger.triggerReason,
         triggerExplanation: trigger.triggerExplanation,
@@ -544,7 +546,8 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
       userId,
       triggerReason: trigger.triggerReason,
       intent: chosen.intent,
-      draftTitle: chosen.title || `${profile.character_name || assistantId} 想说`,
+      // 命名约束：避免把 character_name 写进 draft_title，改名后会留旧名
+      draftTitle: chosen.title || "想说点什么",
       draftBody: chosen.body,
       anchorTopic: chosen.anchorTopic,
       rationale: chosen.rationale,
@@ -702,7 +705,6 @@ function cancelExistingNextPushPlans(assistantId, reason = "replaced_by_new_turn
 }
 
 function buildNextPushPrompt({
-  characterName,
   characterBackground,
   recentTurns,
   userFacts,
@@ -739,7 +741,8 @@ function buildNextPushPrompt({
     .join("\n");
 
   return [
-    `你是「${characterName}」。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
+    `你是这个角色。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
+    `输出里用"你"自指、用"ta"指代用户，不要写具体名字。`,
     "",
     // T-CC-08 注入：identity → state → dynamics
     ...(identityFragment ? [identityFragment, ""] : []),
@@ -893,7 +896,6 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
     const intentFragment = intentResult ? buildIntentPromptFragment(intentResult) : "";
 
     const prompt = buildNextPushPrompt({
-      characterName: profile.character_name || assistantId,
       characterBackground: profile.character_background || "",
       recentTurns,
       userFacts,
@@ -948,7 +950,8 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       userId: userId || process.env.DEFAULT_USER_ID || "default-user",
       triggerReason: NEXT_PUSH_TRIGGER_REASON,
       intent: draft.intent,
-      draftTitle: draft.title || `${profile.character_name || assistantId} 想说`,
+      // 命名约束：避免把 character_name 写进 draft_title，改名后会留旧名
+      draftTitle: draft.title || "想说点什么",
       draftBody: draft.body,
       anchorTopic: draft.anchorTopic,
       rationale: draft.rationale,

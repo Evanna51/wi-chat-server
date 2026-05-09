@@ -88,7 +88,6 @@ function spreadFallbackTimestamps(events, windowStart, windowEnd) {
 }
 
 function buildCatchupPrompt({
-  characterName,
   characterBackground,
   lastInteractionAt,
   now,
@@ -122,7 +121,8 @@ function buildCatchupPrompt({
     .join("\n");
 
   return [
-    `你正在为 AI 角色「${characterName}」写一份"在用户不在的这段时间里发生了什么"的私人日记。这是给角色自己的内部记录，不是要发给用户的内容。`,
+    `你正在给这个角色写"用户不在的这段时间里发生了什么"的私人日记。给角色自己看，不发给用户。`,
+    `用"你"自指、用"ta"指代用户，不要写具体名字。`,
     "",
     // T-CC-08 注入顺序：identity（不变层）→ state（实时态）→ dynamics（关系叙事）
     // 顺序按"稳定性递减"排，让 LLM 先建立"我是谁"再代入"我此刻在哪"
@@ -189,7 +189,10 @@ function parseStrictJsonObject(text = "") {
 
 async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } = {}) {
   const { content } = await getProvider().complete({
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      { role: "system", content: "你是角色生活事件生成器。以角色身份写离线期间发生的具体事件。输出严格 JSON，不要 markdown 代码块。" },
+      { role: "user", content: prompt },
+    ],
     temperature,
     maxTokens,
     responseFormat: "json",
@@ -279,7 +282,6 @@ async function runCatchup({
   if (!profile) {
     return { ok: false, generated: 0, reason: "assistant_not_found" };
   }
-  const characterName = profile.character_name || assistantId;
   const characterBackground = profile.character_background || "";
 
   const recentTurns = getRecentTurnsAcrossSessions({ assistantId, limit: 8 });
@@ -310,7 +312,6 @@ async function runCatchup({
     const params = attempts[attemptIdx];
     seed = `${seedBase}:a${attemptIdx}`;
     const prompt = buildCatchupPrompt({
-      characterName,
       characterBackground,
       lastInteractionAt: lastTs,
       now,
