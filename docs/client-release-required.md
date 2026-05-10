@@ -212,6 +212,71 @@
 
 ---
 
+## CR-07 setup_prompt + lore + LLM-assisted persona extraction（Phase 3）
+
+### 服务端动作
+
+1. **Schema migration 032**：assistant_profile 加 4 列
+   - `setup_prompt` — 用户原始输入（archive，不直接进 prompt）
+   - `lore` — LLM 提炼后的纯叙事段（渲染进 `<background>` slot）
+   - `extraction_status` — pending / ready / failed / skipped
+   - `extraction_error` / `extracted_at`
+   - 老 `character_background` 保留作 fallback；写入时 dual-write
+
+2. **新增端点**：
+   - `POST /api/character/extract` — dry-run preview（接受 setupPrompt 或 assistantId）
+   - `POST /api/character/lore/save` — 保存修改后的 lore
+
+3. **异步触发**：assistant-profile/upsert 后，setup_prompt 改了 + character/空 type
+   → emit `profile.setup_prompt.changed` event → personaExtraction subscriber
+   `setImmediate` 跑 LLM 提炼 → 更新 identity + lore + status
+
+4. **promptComposer.renderBackgroundSlot** 优先用 `profile.lore`，fallback `character_background`
+
+5. **admin UI** identity tab 加 "🤖 AI 分析 setup_prompt" 按钮 + preview dialog
+   （在 [public/app.js](public/app.js) `renderIdentityTab` + `showExtractPreviewDialog`）
+
+### 客户端需要做
+
+1. **`assistant-profile/upsert` 响应**新增字段（不破坏旧结构，仅新增）：
+   - `setupPrompt` / `lore` / `extractionStatus` / `extractedAt`
+   - 旧客户端忽略即可（仍能读 characterBackground）
+
+2. **新角色编辑流程**（Android EditMyAssistantActivity 或 web）：
+   - 用户填 setup_prompt（沿用现 characterBackground 字段提交即可，server 端 dual-write）
+   - 提交后异步触发 LLM 提炼（用户感知不到延迟）
+   - 编辑入口可加 "AI 分析" 按钮调 `/api/character/extract` 看 preview
+   - apply 调 `/api/character/identity/upsert` + `/api/character/lore/save`
+
+3. **chatbox-Android caller 适配**（visible 字段，可选）：
+   - `CharacterBootstrapStore` 缓存 etag 同时记 `extractionStatus`
+   - 显示"角色分析中…"占位（status='pending' 时）
+
+### 影响
+
+- 老调用 `assistant-profile/upsert` 完全兼容（多了字段）
+- Phase 1a `<background>` slot 内容会变化：
+  - LLM 提炼跑过 → 显示净化后的 lore（更短、更聚焦）
+  - 提炼失败 / pending → 显示原始 character_background（fallback）
+
+### 设计意图
+
+用户写的 setup_prompt 是混合体（lore + 风格 + 系统指令）。三类分离后：
+- 风格指令 → identity.speaking_style 字段（结构化）
+- 边界 → identity.hardBoundaries / softBoundaries
+- 系统指令 → 删除（应该升格成 system-level rule）
+- lore → 纯叙事段进 `<background>` slot
+
+零重复 → 降低 LLM 注意力稀释（之前 ab-prompt-test 证明的问题）。
+
+### 状态
+
+- ✅ 服务端落地（migration + service + endpoints + subscriber + admin UI 按钮）
+- ⏳ 现有 5 角色 batch re-extract（等本地 Qwen 在线时跑：在 admin UI identity tab 点"AI 分析"）
+- ⏳ chatbox-Android EditMyAssistantActivity 适配（视产品需求）
+
+---
+
 ## CR-X 模板（新增条目时复用）
 
 ```markdown

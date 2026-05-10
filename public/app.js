@@ -1575,9 +1575,33 @@ async function renderIdentityTab(body, a) {
 
   // 渲染表单：每个字段一行，受控词表用 multi-checkbox / select；0-1 floats 用 number input
   const form = el("article", {});
+  const aiExtractBtn = el("button", {
+    class: "outline secondary small",
+    style: "margin-left: 12px; font-size: 12px; padding: 4px 12px;",
+  }, "🤖 AI 分析 setup_prompt");
+  aiExtractBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    aiExtractBtn.setAttribute("aria-busy", "true");
+    aiExtractBtn.textContent = "分析中（本地 LLM 跑约 10-30s）...";
+    try {
+      const result = await api.post("/api/character/extract", { assistantId: a.assistantId });
+      if (!result.ok) {
+        showToast(`提炼失败: ${result.error || "unknown"}`, "error");
+        return;
+      }
+      // 把 identity 字段 + lore 显示出来给 admin 看，提供"应用"按钮一键写入
+      showExtractPreviewDialog(a, result, () => renderIdentityTab(body, a));
+    } catch (err) {
+      showToast(`请求失败: ${err.message}`, "error");
+    } finally {
+      aiExtractBtn.removeAttribute("aria-busy");
+      aiExtractBtn.textContent = "🤖 AI 分析 setup_prompt";
+    }
+  });
   form.appendChild(el("header", {}, [
     el("strong", {}, "Identity (21 fields)"),
     el("small", { class: "muted" }, id.identityVersion ? `  v${id.identityVersion}` : "  尚未配置"),
+    aiExtractBtn,
   ]));
 
   const grid = el("div", { class: "identity-grid" });
@@ -1789,6 +1813,70 @@ async function renderIdentityTab(body, a) {
   form.appendChild(saveBtn);
 
   body.appendChild(form);
+}
+
+// ─── AI 提炼 preview dialog ─────────────────────────────────────────
+//
+// 给 identity tab 的"AI 分析"按钮用。展示 LLM 提炼出的 identity 字段 + 净化 lore，
+// 让 admin review；点"应用"调 identity/upsert + lore/save 落库。
+function showExtractPreviewDialog(a, result, onApplied) {
+  const dlg = document.createElement("dialog");
+  dlg.style.cssText =
+    "max-width:680px; width:92%; padding:20px; border-radius:12px; border:0; " +
+    "background:white; box-shadow:0 8px 32px rgba(0,0,0,0.15);";
+
+  const id = result.identity || {};
+  const lore = result.lore || "";
+
+  // 字段行
+  const idLines = [];
+  for (const [k, v] of Object.entries(id)) {
+    const displayV = typeof v === "string" ? v : JSON.stringify(v);
+    idLines.push(`${k}: ${displayV}`);
+  }
+  const idPre = el("pre", {
+    style: "max-height:280px; overflow:auto; font-size:11px; background:#f5f5f7; " +
+           "padding:12px; border-radius:8px; white-space:pre-wrap; word-break:break-word;",
+  }, idLines.join("\n") || "(无字段)");
+
+  const lorePre = el("pre", {
+    style: "max-height:200px; overflow:auto; font-size:12px; background:#f5f5f7; " +
+           "padding:12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; margin-top:8px;",
+  }, lore || "(空)");
+
+  const applyBtn = el("button", {}, "应用并保存");
+  const cancelBtn = el("button", { class: "outline" }, "取消");
+  cancelBtn.addEventListener("click", () => dlg.close());
+  applyBtn.addEventListener("click", async () => {
+    applyBtn.setAttribute("aria-busy", "true");
+    try {
+      if (Object.keys(id).length > 0) {
+        await api.post("/api/character/identity/upsert", { assistantId: a.assistantId, ...id });
+      }
+      await api.post("/api/character/lore/save", { assistantId: a.assistantId, lore });
+      showToast("已应用并保存（identity + lore）", "success");
+      dlg.close();
+      if (typeof onApplied === "function") onApplied();
+    } catch (err) {
+      showToast(`保存失败: ${err.message}`, "error");
+      applyBtn.removeAttribute("aria-busy");
+    }
+  });
+
+  dlg.appendChild(el("h3", { style: "margin:0 0 12px 0" }, "🤖 AI 提炼结果"));
+  dlg.appendChild(el("p", { class: "muted small", style: "margin:0 0 16px 0" },
+    `提炼耗时 ${result.extractionMs} ms · 字段 ${Object.keys(id).length} 项 · lore ${lore.length} 字`));
+  dlg.appendChild(el("h5", { style: "margin:8px 0 4px 0" }, "📋 Identity 字段"));
+  dlg.appendChild(idPre);
+  dlg.appendChild(el("h5", { style: "margin:12px 0 4px 0" }, "📖 Lore（净化后）"));
+  dlg.appendChild(lorePre);
+  dlg.appendChild(el("div", { style: "display:flex; gap:12px; justify-content:flex-end; margin-top:16px;" },
+    [cancelBtn, applyBtn]));
+
+  document.body.appendChild(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", ""); // fallback for older browsers
 }
 
 // ─── Cognition tab (Phase CC-2 / CC-3) ─────────────────────────────
