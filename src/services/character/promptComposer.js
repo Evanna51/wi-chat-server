@@ -222,20 +222,27 @@ function renderCharacterSlot({ profile, identity, pronouns }) {
 
 /**
  * <background> — lore prose（自由文本，不 JSON 化）。
- * 剥掉末尾"系统提示"段（那是 rule，不是 lore；详见 docs/api-redesign-plan.md
- * 附录 B "task C"，独立 PR 处理 schema 拆分）。
+ *
+ * Phase 3：优先用 profile.lore（LLM 提炼后的净化叙事段，identity 字段已剥离），
+ * fallback 到 character_background（提炼未跑完 / 失败时）。fallback 路径仍剥末尾
+ * "系统提示"段（那是 rule，不是 lore）。
  */
 function renderBackgroundSlot({ profile }) {
-  const bg = profile.character_background || "";
-  // 临时启发式：剥掉末尾"系统提示"段。Schema 拆分前的兼容处理。
-  let lore = bg.replace(/系统提示[\s\S]*$/, "").trim();
-  if (!lore) {
+  const lore = (profile.lore || "").trim();
+  let body;
+  if (lore) {
+    body = lore;
+  } else {
+    const bg = profile.character_background || "";
+    body = bg.replace(/系统提示[\s\S]*$/, "").trim();
+  }
+  if (!body) {
     return `<background>\n(no background lore)\n</background>`;
   }
-  if (lore.length > SLOT_SOFT_LIMITS.background) {
-    lore = lore.slice(0, SLOT_SOFT_LIMITS.background - 3) + "...";
+  if (body.length > SLOT_SOFT_LIMITS.background) {
+    body = body.slice(0, SLOT_SOFT_LIMITS.background - 3) + "...";
   }
-  return `<background>\n${lore}\n</background>`;
+  return `<background>\n${body}\n</background>`;
 }
 
 /**

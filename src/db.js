@@ -391,10 +391,39 @@ function upsertAssistantProfile({
     assistantType !== undefined && assistantType !== null
       ? String(assistantType)
       : current?.assistant_type || "";
+
+  // Phase 3: setup_prompt 与 character_background 同步写（dual-write）。
+  // 兼容期：客户端仍传 characterBackground 字段；server 把它当 setup_prompt 存档。
+  // 真实"角色 lore"是 LLM 提炼后的 lore 字段（subscriber 异步更新）。
+  const setupPromptNew = characterBackground || "";
+  const setupPromptChanged =
+    !current || (current.setup_prompt || current.character_background || "") !== setupPromptNew;
+
+  // 决定 extraction_status：
+  // - 新角色 + character/空 type → pending（异步触发 extract）
+  // - setup_prompt 改了 + character/空 type → pending（重新提炼）
+  // - 不变 → 保留旧 status
+  // - writer/general 类 → skipped
+  const isCharacterType = nextType === "character" || nextType === "";
+  let nextExtractionStatus = current?.extraction_status || "pending";
+  if (!isCharacterType) {
+    nextExtractionStatus = "skipped";
+  } else if (setupPromptChanged) {
+    nextExtractionStatus = "pending";
+  }
+
   const next = {
     assistant_id: assistantId,
     character_name: characterName,
     character_background: characterBackground,
+    setup_prompt: setupPromptNew,
+    // lore: 仅在新建时初始化为 setup_prompt（暂用），等 LLM 提炼跑完替换。
+    // setup_prompt 改动 *不* 立刻覆盖 lore（保留旧 lore 给当前 chat 用，直到新提炼完成）。
+    lore: current?.lore || setupPromptNew,
+    extraction_status: nextExtractionStatus,
+    // extraction_error 重置为空（新一轮提炼）
+    extraction_error: setupPromptChanged ? "" : current?.extraction_error || "",
+    extracted_at: current?.extracted_at || 0,
     allow_auto_life: allowAutoLife ? 1 : 0,
     allow_proactive_message: allowProactiveMessage ? 1 : 0,
     assistant_type: nextType,
@@ -405,18 +434,29 @@ function upsertAssistantProfile({
   };
   db.prepare(
     `INSERT INTO assistant_profile
-      (assistant_id, character_name, character_background, allow_auto_life, allow_proactive_message, assistant_type, last_session_id, last_proactive_check_at, created_at, updated_at)
+      (assistant_id, character_name, character_background, setup_prompt, lore,
+       extraction_status, extraction_error, extracted_at,
+       allow_auto_life, allow_proactive_message, assistant_type,
+       last_session_id, last_proactive_check_at, created_at, updated_at)
      VALUES
-      (@assistant_id, @character_name, @character_background, @allow_auto_life, @allow_proactive_message, @assistant_type, @last_session_id, @last_proactive_check_at, @created_at, @updated_at)
+      (@assistant_id, @character_name, @character_background, @setup_prompt, @lore,
+       @extraction_status, @extraction_error, @extracted_at,
+       @allow_auto_life, @allow_proactive_message, @assistant_type,
+       @last_session_id, @last_proactive_check_at, @created_at, @updated_at)
      ON CONFLICT(assistant_id) DO UPDATE SET
       character_name=excluded.character_name,
       character_background=excluded.character_background,
+      setup_prompt=excluded.setup_prompt,
+      extraction_status=excluded.extraction_status,
+      extraction_error=excluded.extraction_error,
       allow_auto_life=excluded.allow_auto_life,
       allow_proactive_message=excluded.allow_proactive_message,
       assistant_type=excluded.assistant_type,
       updated_at=excluded.updated_at`
   ).run(next);
-  return getAssistantProfile(assistantId);
+  const row = getAssistantProfile(assistantId);
+  // 标记 changed 给 caller —— caller 决定是否触发异步 extract
+  return Object.assign({}, row, { _setupPromptChanged: setupPromptChanged });
 }
 
 function getAssistantProfile(assistantId) {

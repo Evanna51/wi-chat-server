@@ -25,6 +25,7 @@ const {
   listAllIdentities,
 } = require("../services/character/identityService");
 const identityVocab = require("../services/character/identityVocab");
+const { extractPersona } = require("../services/character/personaExtractor");
 // Phase 2: narrative + topics
 const {
   listEpisodes,
@@ -136,6 +137,17 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
     assistantType: type,
   });
 
+  // Phase 3: setup_prompt 改了 → emit profile.setup_prompt.changed，
+  // personaExtraction subscriber 异步跑 LLM 提炼（不阻塞 HTTP 响应）。
+  if (row._setupPromptChanged) {
+    const { profileEvents } = require("../events/profileEvents");
+    profileEvents.emitSetupPromptChanged({
+      assistantId: row.assistant_id,
+      setupPrompt: row.setup_prompt || row.character_background || "",
+      assistantType: row.assistant_type || "",
+    });
+  }
+
   const autoLifeCount = countAllowAutoLifeAssistants();
   if (autoLifeCount > 10 && !didWarnAutoLifeCount) {
     didWarnAutoLifeCount = true;
@@ -150,6 +162,11 @@ router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
       assistantId: row.assistant_id,
       characterName: row.character_name,
       characterBackground: row.character_background,
+      // Phase 3 字段
+      setupPrompt: row.setup_prompt || "",
+      lore: row.lore || "",
+      extractionStatus: row.extraction_status || "skipped",
+      extractedAt: row.extracted_at || 0,
       allowAutoLife: row.allow_auto_life === 1,
       allowProactiveMessage: row.allow_proactive_message === 1,
       assistantType: row.assistant_type || "",
@@ -270,6 +287,91 @@ router.post("/character/identity/upsert", authMiddleware, (req, res) => {
   } catch (error) {
     const msg = error?.message || String(error);
     return res.status(/identity validation/i.test(msg) ? 400 : 500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * POST /api/character/extract — Phase 3: setup_prompt → identity + lore（同步 dry-run）。
+ *
+ * 用本地 LLM 提炼用户写的角色 prompt，返回结构化 identity 字段 + 净化后的 lore。
+ * 端点**不写库** —— 让 admin UI 拿到 preview 后让用户 review/修改，再调
+ * /api/character/identity/upsert + /api/character/lore/save 保存。
+ *
+ * 也可直接传 assistantId 让 server 从 DB 拿 setup_prompt（admin UI 简化路径）。
+ *
+ * @body { setupPrompt?: string, assistantId?: string }
+ *   两者至少传一个；都传时 setupPrompt 优先（让 admin 在 UI 里改完未保存就能 preview）。
+ */
+router.post("/character/extract", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    setupPrompt: z.string().optional(),
+    assistantId: z.string().trim().min(1).optional(),
+  }).refine((d) => d.setupPrompt || d.assistantId, {
+    message: "either setupPrompt or assistantId required",
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+
+  let { setupPrompt, assistantId } = parsed.data;
+
+  // 没传 setupPrompt → 从 DB 拿
+  if (!setupPrompt && assistantId) {
+    const profile = getAssistantProfile(assistantId);
+    if (!profile) return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
+    setupPrompt = profile.setup_prompt || profile.character_background || "";
+  }
+  if (!setupPrompt || !setupPrompt.trim()) {
+    return res.status(400).json({ ok: false, error: "empty_setup_prompt" });
+  }
+
+  const start = Date.now();
+  try {
+    const result = await extractPersona(setupPrompt, {
+      callOpts: { scopeKey: assistantId || null },
+    });
+    return res.json({
+      ok: !result.error,
+      assistantId: assistantId || null,
+      identity: result.identity,
+      lore: result.lore,
+      error: result.error || null,
+      extractionMs: Date.now() - start,
+      // raw LLM 输出 — 调试用，前端可隐藏
+      raw: result.raw,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+/**
+ * POST /api/character/lore/save — 写 assistant_profile.lore（净化后的叙事段）。
+ *
+ * extract 端点拿到 preview 后，admin UI 让用户 review/修改 identity + lore，
+ * 然后分别调 /api/character/identity/upsert 和本端点保存 lore。
+ *
+ * @body { assistantId: string, lore: string }
+ */
+router.post("/character/lore/save", authMiddleware, (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    lore: z.string(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  const { assistantId, lore } = parsed.data;
+  try {
+    const r = db
+      .prepare(
+        "UPDATE assistant_profile SET lore = ?, extraction_status = 'ready', extracted_at = ?, updated_at = ? WHERE assistant_id = ?"
+      )
+      .run(lore, Date.now(), Date.now(), assistantId);
+    if (r.changes === 0) {
+      return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
+    }
+    return res.json({ ok: true, assistantId, loreLen: lore.length });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || String(error) });
   }
 });
 

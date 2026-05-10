@@ -12,15 +12,25 @@
  */
 const { turnEvents } = require("../events/turnEvents");
 
-const SUBSCRIBERS = [
+// turn-event subscribers — register(turnEvents)
+const TURN_SUBSCRIBERS = [
   require("./cancelPendingPlans"),
   require("./scheduleNextPush"),
   require("./characterStateUpdater"),
 ];
 
+// 自管理 subscribers（监听 profileEvents 等其它 event bus，自己 import）
+// 这些 register() 不需要参数。
+const STANDALONE_SUBSCRIBERS = [
+  require("./personaExtraction"),
+];
+
 function registerAll() {
-  for (const sub of SUBSCRIBERS) {
+  for (const sub of TURN_SUBSCRIBERS) {
     sub.register(turnEvents);
+  }
+  for (const sub of STANDALONE_SUBSCRIBERS) {
+    sub.register();
   }
 }
 
