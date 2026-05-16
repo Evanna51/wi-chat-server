@@ -385,15 +385,47 @@ function findPlanById(id) {
   return db.prepare("SELECT * FROM proactive_plans WHERE id = ?").get(id);
 }
 
+/**
+ * 标记 plan 已派发，并把 character_state.last_proactive_at 推到 now —— 让
+ * scheduleNextPushPlan / runProactiveWatchdogOnce 里那俩 gap 闸门
+ * （NEXT_PUSH_MIN_GAP_FROM_LAST_MS / WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS）真正生效。
+ *
+ * 之前 last_proactive_at 字段没人写，闸门永远 falsy → option A 自递归循环没人拦
+ * → 每 30~40min 重复推同一条 LLM 输出。
+ *
+ * 把两步包进 SQLite 事务：plan 没 marked sent（已 sent / cancelled）就不动 state。
+ */
 function markPlanSent(planId, now = Date.now()) {
-  const result = db
-    .prepare(
-      `UPDATE proactive_plans
-       SET status = 'sent', sent_at = ?, updated_at = ?
-       WHERE id = ? AND status = 'pending'`
-    )
-    .run(now, now, planId);
-  return result.changes || 0;
+  const tx = db.transaction(() => {
+    const result = db
+      .prepare(
+        `UPDATE proactive_plans
+         SET status = 'sent', sent_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`
+      )
+      .run(now, now, planId);
+    if (result.changes && result.changes > 0) {
+      // 取 assistant_id 顺手 upsert character_state.last_proactive_at
+      const row = db
+        .prepare("SELECT assistant_id FROM proactive_plans WHERE id = ?")
+        .get(planId);
+      if (row?.assistant_id) {
+        // 不强行 require characterStateService（避免循环依赖）；直接 SQL upsert。
+        // character_state 表至少有 (assistant_id PK, last_proactive_at, updated_at,
+        // created_at)，由 ensureDefaultState 初始化。如果还没初始化（理论上派 plan
+        // 前已经 onUserMessage 过），fall back 用 INSERT OR IGNORE 兜一道。
+        db.prepare(
+          `INSERT INTO character_state (assistant_id, last_proactive_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(assistant_id) DO UPDATE SET
+             last_proactive_at = excluded.last_proactive_at,
+             updated_at = excluded.updated_at`
+        ).run(row.assistant_id, now, now, now);
+      }
+    }
+    return result.changes || 0;
+  });
+  return tx();
 }
 
 function cancelPlanById(planId, reason = "manual") {
@@ -959,6 +991,46 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
 
     if (!draft.body || draft.body.length < 2) {
       return { ok: false, skipped: "empty_body" };
+    }
+
+    // Jaccard dedup —— 与 generatePlanForAssistant 对齐。低温 + 同上下文下 LLM 会
+    // 反复吐同一句话，没拦截就 30min 一条循环推送给用户。> 0.55 视为雷同直接 skip。
+    // 语料取最近 6 条 sent / pending 的 next_push body（同一 assistant）。
+    try {
+      const corpusRows = db
+        .prepare(
+          `SELECT draft_body FROM proactive_plans
+            WHERE assistant_id = ?
+              AND trigger_reason = ?
+              AND status IN ('sent', 'pending')
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 6`
+        )
+        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 24 * 60 * 60 * 1000);
+      const corpus = corpusRows.map((r) => r.draft_body || "").filter(Boolean);
+      const score = maxJaccardAgainst(draft.body, corpus);
+      if (score > 0.55) {
+        insertBehaviorJournalEntry({
+          runType: "next_push_schedule",
+          assistantId,
+          sessionId: profile.last_session_id || null,
+          shouldPushMessage: false,
+          status: "skipped",
+          reason: "duplicate_against_recent_drafts",
+          input: { sinceLastUserMs, jaccardScore: Number(score.toFixed(2)) },
+          result: { draftBody: clipText(draft.body, 120) },
+          createdAt: now,
+        });
+        return {
+          ok: true,
+          skipped: "duplicate_against_recent_drafts",
+          jaccardScore: Number(score.toFixed(2)),
+        };
+      }
+    } catch (e) {
+      // dedup 失败不阻塞主流程（最多就是退化到没有 dedup，由 30min gap 闸门兜底）
+      console.warn(`[proactive] next_push jaccard dedup failed: ${e.message}`);
     }
 
     const scheduledAt = now + draft.delayMs;
