@@ -9,12 +9,6 @@ const {
   searchMemory,
 } = require("../db");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
-const { generateWithMemory } = require("../services/langchainQwenService");
-const {
-  shouldRetrieveMemory,
-  formatMemoryLines,
-  buildMemoryGuidance,
-} = require("../services/memoryDecisionService");
 const { runCatchup } = require("../services/catchupService");
 const { ensureDefaultState } = require("../services/characterStateService");
 const { buildRelationshipStatePayload } = require("../services/relationshipStateView");
@@ -51,6 +45,8 @@ const {
   evaluate: evaluateBehaviorIntent,
   INTENT_DEFINITIONS,
 } = require("../services/character/behaviorPlanner");
+// 2026-05-10: behavior-intent 端点 + attention-1h debug 端点共用
+const { buildAttention1h } = require("../services/character/attentionWindow");
 const {
   deleteMemoryItemCascade,
   deleteMemoryItemsBatch,
@@ -91,21 +87,6 @@ const authMiddleware = (req, res, next) => {
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
-});
-
-router.post("/register-push-token", authMiddleware, (req, res) => {
-  const schema = z.object({
-    userId: z.string().min(1),
-    token: z.string().min(10),
-    platform: z.string().default("android"),
-  });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const { userId, token, platform } = parsed.data;
-  db.prepare(
-    "INSERT OR IGNORE INTO push_token (user_id, token, platform, created_at) VALUES (?, ?, ?, ?)"
-  ).run(userId, token, platform, Date.now());
-  res.json({ ok: true });
 });
 
 router.post("/assistant-profile/upsert", authMiddleware, (req, res) => {
@@ -216,9 +197,14 @@ function safeBuildRelationshipState(assistantId) {
 /**
  * GET /api/relationship/state?assistantId=xxx
  *
- * 客户端主动拉取角色当前情绪/关系/精力快照。
- * 如果 character_state 行不存在（角色尚未交互过），自动用 ensureDefaultState 初始化默认值，
- * 保证客户端永远拿到结构完整的 payload，无需处理 404。
+ * @dormant 暂未使用 — 当前 Android / admin UI 都不调。
+ *
+ * 用途：返回角色实时态（mood + 关系 + 精力）的轻量快照。
+ * 与 POST /api/character/context 的关系：context 响应里 `characterState` 字段已经包含
+ * 同一份 payload，客户端实际从那里 fan-out。这个端点保留是因为未来如果要"只刷新状态、
+ * 不重拉整个 character bootstrap"会需要它。
+ *
+ * 行为：character_state 行不存在时 ensureDefaultState 兜底，永远返回结构完整 payload。
  */
 router.get("/relationship/state", authMiddleware, (req, res) => {
   const schema = z.object({ assistantId: z.string().trim().min(1) });
@@ -399,6 +385,13 @@ router.get("/character/episodes", authMiddleware, (req, res) => {
   return res.json({ ok: true, episodes: listEpisodes(assistantId, { limit, minImportance }) });
 });
 
+/**
+ * GET /api/character/episodes/:id
+ *
+ * @dormant 暂未使用 — admin UI 只调列表 /character/episodes，未做详情页。
+ * 用途：单条 episode 详情（含原始 memory link）。未来 admin episode 详情页或客户端
+ * "查看完整叙事段"功能会用上。
+ */
 router.get("/character/episodes/:id", authMiddleware, (req, res) => {
   const ep = getEpisodeById(req.params.id);
   if (!ep) return res.status(404).json({ ok: false, error: "episode_not_found" });
@@ -433,6 +426,12 @@ router.get("/character/topics", authMiddleware, (req, res) => {
   return res.json({ ok: true, topics });
 });
 
+/**
+ * POST /api/character/topics/upsert
+ *
+ * @dormant 暂未使用 — hot path 不创建新 topic（topic 由对话流程自动浮现）。
+ * 用途：手动创建 topic。未来 admin UI "手工标注话题" 或运营干预场景会用。
+ */
 router.post("/character/topics/upsert", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().trim().min(1),
@@ -452,6 +451,12 @@ router.post("/character/topics/upsert", authMiddleware, (req, res) => {
   }
 });
 
+/**
+ * POST /api/character/topics/:id/status
+ *
+ * @dormant 暂未使用 — topic 状态机（active/dormant/closed/...）目前由内部服务推进，
+ * 未暴露 admin UI 手动转换入口。未来 admin 需要"强制 close 一个话题"会用。
+ */
 router.post("/character/topics/:id/status", authMiddleware, (req, res) => {
   const schema = z.object({ status: z.enum([...VALID_STATUSES]) });
   const parsed = schema.safeParse(req.body || {});
@@ -469,6 +474,12 @@ router.post("/character/topics/:id/status", authMiddleware, (req, res) => {
  * GET  /api/character/reflection?assistantId=  最新一条
  * GET  /api/character/reflections?assistantId=&type=&limit=  时间线（多条）
  * POST /api/admin/character/reflect  body={ assistantId, reflectionType?, triggerReason? }
+ */
+/**
+ * GET /api/character/reflection?assistantId=
+ *
+ * @dormant 暂未使用 — admin UI 用复数版 /character/reflections（时间线）。
+ * 用途：取最新一条 reflection。未来如果客户端需要"快速读最近一次反思摘要"会用。
  */
 router.get("/character/reflection", authMiddleware, (req, res) => {
   const schema = z.object({ assistantId: z.string().trim().min(1) });
@@ -492,20 +503,50 @@ router.get("/character/reflections", authMiddleware, (req, res) => {
 
 /**
  * Phase 4: behavior planner intent (T-CC4-03)
- * GET /api/character/behavior-intent?assistantId=  当前主推荐意图（debug / admin）
- * GET /api/character/behavior-intent/vocab          14 个 intent 定义
+ * GET /api/character/behavior-intent?assistantId=        当前主推荐意图（debug / admin）
+ * GET /api/character/behavior-intent/vocab               14 个 intent 定义
+ * GET /api/character/attention-1h?assistantId=           1h 滚动注意力（debug / admin / chat hot path 共用同一缓存）
+ *
+ * 2026-05-10: behavior-intent 改 async — 内部 await buildAttention1h，让启发式 intent 评估
+ *   能用上 LLM 提炼的现场感（abandonment_focus / unresolved_topic_in_attention 等）。
+ *   传 ?withAttention=0 可跳过 attention 入参（保持原启发式行为，便于对比）。
  */
-router.get("/character/behavior-intent", authMiddleware, (req, res) => {
-  const schema = z.object({ assistantId: z.string().trim().min(1) });
+router.get("/character/behavior-intent", authMiddleware, async (req, res) => {
+  const schema = z.object({
+    assistantId: z.string().trim().min(1),
+    withAttention: z.coerce.boolean().optional(),
+  });
   const parsed = schema.safeParse(req.query || {});
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
-  const result = evaluateBehaviorIntent(parsed.data.assistantId);
+  const { assistantId, withAttention = true } = parsed.data;
+
+  let attention1h = null;
+  if (withAttention) {
+    try {
+      attention1h = await buildAttention1h(assistantId);
+    } catch (err) {
+      console.warn(`[behavior-intent] attention_1h failed: ${err.message}`);
+    }
+  }
+  const result = evaluateBehaviorIntent(assistantId, { attention1h });
   if (!result) return res.status(404).json({ ok: false, error: "no_character_state" });
-  return res.json({ ok: true, ...result });
+  return res.json({ ok: true, ...result, attention1h });
 });
 
 router.get("/character/behavior-intent/vocab", authMiddleware, (_req, res) => {
   return res.json({ ok: true, intents: INTENT_DEFINITIONS });
+});
+
+router.get("/character/attention-1h", authMiddleware, async (req, res) => {
+  const schema = z.object({ assistantId: z.string().trim().min(1) });
+  const parsed = schema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.message });
+  try {
+    const payload = await buildAttention1h(parsed.data.assistantId);
+    return res.json({ ok: true, ...payload });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || String(err) });
+  }
 });
 
 router.post("/admin/character/reflect", authMiddleware, async (req, res) => {
@@ -527,6 +568,12 @@ router.post("/admin/character/reflect", authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/character/topics/:id/importance
+ *
+ * @dormant 暂未使用 — importance 由内部信号自动调，未暴露 admin 手动调整。
+ * 用途：手工调整 topic 重要度（0-1）。未来运营干预或 admin 调试场景会用。
+ */
 router.post("/character/topics/:id/importance", authMiddleware, (req, res) => {
   const schema = z.object({ importance: z.number().min(0).max(1) });
   const parsed = schema.safeParse(req.body || {});
@@ -836,9 +883,13 @@ router.post("/tool/memory-correct", authMiddleware, (req, res) => {
 
 // ─────────────────────────── Knowledge base endpoints ──────────────────────
 //
-// memory_type='knowledge' 的条目独立于对话流。AI 可主动 add（值得长期保留的事实），
-// 用户/管理员也可在浏览器手动维护（角色设定、世界观、长期偏好等）。
-// 检索时通过 memory-recall 加 source='knowledge' 或 kbName='xxx' 过滤。
+// @dormant 整组暂未使用 — knowledge 写入路径（手动 + AI 主动）都未启用。
+//
+// memory_type='knowledge' 的条目独立于对话流，设计上：AI 可主动 add（值得长期保留的事实），
+// 用户/管理员也可手动维护（角色设定、世界观、长期偏好等）；检索通过 memory-recall 加
+// source='knowledge' / kbName='xxx' 过滤。但当前 admin UI 没做 knowledge 编辑页，
+// AI 也没启用 knowledge-add tool，所以四个端点 (upsert/list/bases/tool-knowledge-add)
+// 全部 dormant。未来知识库功能上线时直接复用，schema 保持稳定。
 //
 
 router.post("/knowledge/upsert", authMiddleware, (req, res) => {
@@ -932,7 +983,15 @@ router.post("/tool/knowledge-add", authMiddleware, (req, res) => {
   }
 });
 
-// FTS 关键词搜索：ops/调试用，非 tool 调用
+/**
+ * POST /api/admin/search-fts
+ *
+ * @dormant 暂未使用 — admin UI 用 /api/search（browse router），不调这个。
+ * 注：migration 020_drop_conversation_fts.sql 已经砍掉 conversation_turns_fts 表，
+ * 这个端点现在依赖的 FTS 后端可能不全。如未来复活需要先确认 FTS 表是否存在。
+ *
+ * 用途：FTS 关键词搜索 — ops / 调试用，非 tool 调用。
+ */
 router.post("/admin/search-fts", authMiddleware, (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
