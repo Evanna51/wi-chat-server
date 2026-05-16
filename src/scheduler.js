@@ -32,6 +32,7 @@ const {
   fetchDuePendingPlans,
   markPlanSent,
   scheduleNextPushPlan,
+  runProactiveWatchdogOnce,
   NEXT_PUSH_TRIGGER_REASON,
 } = require("./services/proactivePlanService");
 const {
@@ -240,6 +241,25 @@ async function runDeadLetterMonitorTick() {
   }
 }
 
+/**
+ * Proactive watchdog tick — 周期性给所有 active assistant 重新机会决定要不要主动发。
+ * 之前只有 turn.user.batch + plan 派发后会 schedule —— AI 一次 ai_chose_skip 就死链。
+ * 详见 src/services/proactivePlanService.js#runProactiveWatchdogOnce
+ */
+async function runProactiveWatchdogTick() {
+  try {
+    const result = await runProactiveWatchdogOnce();
+    console.log(
+      `[proactive-watchdog] scanned=${result.scanned} triggered=${result.triggered} ` +
+      `skipped=${JSON.stringify(result.skipped)}`
+    );
+    return result;
+  } catch (err) {
+    console.error("[proactive-watchdog] failed:", err.message);
+    throw err;
+  }
+}
+
 async function runPlanGenerationTick() {
   try {
     const result = await generatePlans({});
@@ -409,6 +429,13 @@ function startScheduler() {
 
   scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick, { lockTtlMs: SHORT_TTL });
   scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick, { lockTtlMs: LLM_TTL });
+  // 2026-05-10: proactive watchdog — 周期性给 AI 重新决定主动消息的机会
+  scheduleIfEnabled(
+    config.proactiveWatchdogCron || "*/30 * * * *", // 默认每 30 min
+    "proactive-watchdog",
+    runProactiveWatchdogTick,
+    { lockTtlMs: LLM_TTL }
+  );
   scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick, { lockTtlMs: MEDIUM_TTL });
   scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick, { lockTtlMs: MEDIUM_TTL });
   scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick, { lockTtlMs: SHORT_TTL });
@@ -426,6 +453,7 @@ module.exports = {
   runRetentionSweepTick,
   runPlanGenerationTick,
   runPlanExecutorOnce,
+  runProactiveWatchdogTick,
   runDailyBackupTick,
   runWeeklyBackupTick,
   runMemoryClassifyBackfillTick,
