@@ -228,18 +228,19 @@ detached / caretaker / inquisitive / ritualistic / confessional / reassuring
 
 ---
 
-## API 表（Phase CC-1）
+## API 表
+
+> 端点权威列表见 [api.md](api.md)。
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/character/identity` | GET | 读 identity |
 | `/api/character/identity/upsert` | POST | 创建 / 更新 identity（vocab 校验） |
 | `/api/character/identity/vocab` | GET | 拿全部受控词表（admin UI 用） |
-| `/api/character/context` | POST | **聚合端点**：identity + state + dynamics + emotion + socialMode + promptFragment |
-| `/api/relationship/state` | GET | 老端点（保留 1 个 release 兼容） |
-| `/api/character/bootstrap` | GET | 老端点（保留 1 个 release 兼容） |
-
-`promptFragment` 总长 ≤ 800 字符（约 512 tokens），超出按"末尾砍 social mode → dynamics narrative"顺序 truncate。
+| `/api/character/:id` | GET | 静态 slots（profile + identity + 5 个 rendered slot + etag）— 客户端 boot 时调 |
+| `/api/character/context` | POST | **聚合端点**：identity + state + dynamics + emotion + socialMode + V_NEW_LEAN slots + mergedSystem + assistantPrefill —— admin / debug / boot cache 用，不带本轮 user 上下文 |
+| `/api/chat/context` | POST | hot path：每轮发消息前调，返回 facts / narrative / prefill / memoryDecision / etag |
+| `/api/relationship/state` | GET | dormant — 客户端从 context 响应里 fan-out characterState |
 
 ---
 

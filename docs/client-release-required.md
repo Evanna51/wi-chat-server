@@ -1,7 +1,9 @@
 # 客户端配合事项
 
-> 服务端重构（见 [refactor-plan.md](./refactor-plan.md)）中需要客户端发版同步的改动。
-> 每条事项的处理顺序：**客户端先发版 → 服务端再合 PR**，避免线上 4xx / 字段缺失。
+> **本文是历史 CR 清单**（每条变更需要客户端做什么）。当前 API 现状见 [api.md](api.md)。
+>
+> 项目无向后兼容期 —— 服务端改动直接生效，客户端必须同步。本文条目按时间留作参考。
+> 服务端重构总进度见 [refactor-plan.md](refactor-plan.md)。
 
 ---
 
@@ -13,8 +15,8 @@
   2. 移除 FCM SDK 集成（如果离线消息已完全走 WS + `local_outbox_messages`，FCM 已无作用）。
   3. 确认 push 通知统一走 WS `proactive` op + `queued_batch` 重连兜底。
 - **影响**：
-  - 调用 `POST /api/register-push-token` 服务端会返回 404；客户端如未删除会反复打错 → 监控告警。
-- **状态**：⏳ 待客户端发版
+  - 调用 `POST /api/register-push-token` 服务端会返回 404。
+- **状态**：✅ 服务端端点已删除（2026-05-10）。客户端如还有调用代码请尽快移除。
 
 ---
 
@@ -51,43 +53,22 @@
 > 接入手册见 [character-system.md](./character-system.md)。
 > 本条 CR 拆 4 节，前 3 节是**新增能力**（客户端可按需接），第 4 节是 **deprecated 窗口提醒**。
 
-### CR-04.1 新增主入口端点 `POST /api/character/context`（推荐替代 bootstrap）
+### CR-04.1 主入口端点 `POST /api/character/context`（已落地，bootstrap 已删除）
 
-- **服务端动作**：新增聚合端点，一次返回 7 层完整 payload + 拼好的 `promptFragment`（≤1500 中文字）。
-- **客户端建议做**（**非强制**，旧路径仍能用 1 个 release）：
-  1. 替换 `GET /api/character/bootstrap` + `GET /api/relationship/state` 调用 → `POST /api/character/context`，body：
-     ```json
-     { "assistantId": "...", "includePromptFragment": true }
-     ```
-  2. 直接把响应里的 `promptFragment` 拼进 system prompt，不再自己拼 identity / state / dynamics 三段。
-  3. 如果想要更精细的控制（比如只展示 mood / 不要 dynamics），用结构化字段：
-     `identity / characterState / emotion / relationshipDynamics / socialMode / activeTopics / recentEpisodes / latestReflection`
-- **影响**：
-  - 旧客户端继续走 `/relationship/state` + `/character/bootstrap` 不会断（payload schema 不动）。
-  - 新客户端用 `/character/context` 拿到的 system prompt 上下文更完整、token 更省（重复字段不再每次重发）。
-- **状态**：⏳ 待客户端按需迁移
+- **当前状态**：boot cache / admin / debug 端点。`GET /api/character/bootstrap` 已物理删除，客户端必须用本端点；hot path 已进一步演进到 `POST /api/chat/context`（CR-06）。
+- **服务端动作**：聚合端点一次返回 7 层 payload + V_NEW_LEAN 8 个 slot + mergedSystem + assistantPrefill（不带本轮 user 上下文）。
+- **客户端用法**：
+  1. boot 时调一次缓存进 `CharacterBootstrapStore`，让首条消息延迟低
+  2. 每轮发消息走 `POST /api/chat/context`（带 facts + narrative）
+  3. 不再自己拼 identity / state / dynamics 三段
+- **状态**：✅ 落地，bootstrap 已删除，relationship/state 已 dormant
 
-### CR-04.2 新增 admin / debug 端点（无需客户端集成，可选）
+### CR-04.2 admin / debug 端点
 
-| 端点 | 用途 |
-|------|------|
-| `GET /api/character/identity?assistantId=` | 读人格 21 字段 |
-| `POST /api/character/identity/upsert` | 写人格 |
-| `GET /api/character/identity/vocab` | 拉受控词表（trait / mode / care_language / tension）|
-| `GET /api/character/episodes?assistantId=&limit=&minImportance=` | 叙事段时间线 |
-| `GET /api/character/episodes/:id` | 叙事段详情 |
-| `POST /api/admin/character/build-episodes` | 手动触发 LLM 聚合 |
-| `GET /api/character/topics?assistantId=&status=&limit=&includeInactive=` | 长期话题 |
-| `POST /api/character/topics/upsert` | 手动创建话题 |
-| `POST /api/character/topics/:id/status` | 7 状态机转换 |
-| `POST /api/character/topics/:id/importance` | 调 importance |
-| `GET /api/character/reflection?assistantId=` | 最新一条关系反思 |
-| `GET /api/character/reflections?assistantId=&type=&limit=` | 反思时间线 |
-| `POST /api/admin/character/reflect` | 手动触发反思 |
-| `GET /api/character/behavior-intent?assistantId=` | 当前推荐意图（debug）|
-| `GET /api/character/behavior-intent/vocab` | 14 个 intent 定义 |
+> 完整列表见 [api.md §2](api.md)。其中 `episodes/:id` / `topics/upsert` / `topics/:id/status` /
+> `topics/:id/importance` / `reflection`（单数）当前 dormant，标在 [api.md §3](api.md)。
 
-- **客户端需要做**：**没有**。这些端点服务端 admin UI（`public/`）已用，移动端按需而定。
+- **客户端需要做**：**没有**。这些端点服务端 admin UI（`public/`）按需调用。
 - **状态**：✅ 不阻塞客户端发版
 
 ### CR-04.3 LLM 生成内容风格变化（draft_title / proactive body / 反思文案）
@@ -104,14 +85,11 @@
   - `memory_facts.fact_value` **仍然使用具体角色名**（设计选择，因为事实需要 anchor —— "ta 握过我的手"里的 ta 失锚）。改名时需要服务端跑批量字符串替换工具，不需重跑 LLM。
 - **状态**：⏳ 客户端自检后可标记 OK
 
-### CR-04.4 老端点 deprecated 窗口提醒（下个 release 移除）
+### CR-04.4 旧端点处理（已完成）
 
-- **将被移除**：
-  - `GET /api/relationship/state` → 用 `POST /api/character/context`
-  - `GET /api/character/bootstrap` → 用 `POST /api/character/context`
-- **窗口长度**：1 个 release（具体日期看你们发版节奏）
-- **客户端需要做**：在下次发版时迁移到 `/api/character/context`
-- **状态**：⏳ 待客户端发版迁移
+- `GET /api/character/bootstrap` → ✅ **已物理删除**。客户端用 `GET /api/character/:id`（静态 slots）+ `POST /api/character/context`（boot cache）+ `POST /api/chat/context`（hot path）。
+- `GET /api/relationship/state` → ✅ **dormant**（保留端点，未来轻量刷新状态用）。客户端从 `/api/character/context` / `/api/chat/context` 响应里 fan-out `characterState`，无需独立调用。
+- **状态**：✅ 落地
 
 ---
 
@@ -131,7 +109,7 @@
 
 ## CR-06 V_NEW_LEAN structured chat slot + Phase 2 端点（对应服务端 Phase 1a + 1b + 2）
 
-> 详细设计 见 [api-redesign-plan.md](./api-redesign-plan.md) 与 [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)。
+> 历史决策记录见 [archive/api-redesign-plan.md](archive/api-redesign-plan.md)；当前协议看 [client-prompt-merge-protocol.md](client-prompt-merge-protocol.md)；当前端点状态看 [api.md](api.md)。
 
 ### 服务端动作
 
@@ -145,23 +123,19 @@
    - 新增 `<facts>` slot：coreFacts + retrieved memories（之前完全没拼）
    - `<tool_protocol>` 占 recency bias 黄金位
    - 删除 chat 端 voice 例句（不固化句子，靠 speaking_style 描述让 LLM 自己生成）
-   - `buildCharacterContext` 同时返回旧 `system + userPrefix`（向后兼容）+ 新 `slots / mergedSystem`
+   - `buildCharacterContext` 输出 `slots / mergedSystem / assistantPrefill`
 
-2. **新增端点（Phase 2）**
-   - `GET /api/character/{id}` — 取代 `/api/character/bootstrap`，返回 etag-able 静态 slots
-   - `POST /api/chat/context` — 取代 `/api/character/context` + `/api/tool/memory-context`
-     合并；返回 facts / narrative / prefill / etag / memoryDecision
-   - `POST /api/chat/turn` — 取代 `/api/sync/push`（语义重命名，行为完全一致）
-   - `DELETE /api/chat/turn/{turnId}` — 新增删除路径，cascade 衍生数据 + WS 推 turn_deleted
+2. **端点变化（Phase 2 — 已完成）**
+   - 新增 `GET /api/character/{id}` — 静态 slots（profile + identity + 5 个 rendered slot + etag）
+   - 新增 `POST /api/chat/context` — hot path 端点（每轮发消息前调）
+   - 新增 `POST /api/chat/turn` 取代 `/api/sync/push`（**已物理删除旧路径**）
+   - 新增 `DELETE /api/chat/turn/{turnId}` — cascade 衍生数据 + WS 推 turn_deleted
 
-3. **删除端点**
-   - `POST /api/chat-with-memory` — 已删除（无 caller）
-
-4. **旧端点加 Deprecation header**（保留兼容 1 release，仍可调用）
-   - `POST /api/character/context` → `Link: </api/chat/context>`
-   - `GET /api/character/bootstrap` → `Link: </api/character/{id}>`
-   - `POST /api/tool/memory-context` → `Link: </api/chat/context>`
-   - `POST /api/sync/push` → `Link: </api/chat/turn>`
+3. **删除端点（已完成）**
+   - `POST /api/chat-with-memory` — 已删除
+   - `GET /api/character/bootstrap` — 已删除
+   - `POST /api/tool/memory-context` — 已删除
+   - `POST /api/sync/push` — 已删除
 
 ### 客户端需要做
 
@@ -172,11 +146,7 @@
    - `deleteChatTurn(turnId)` → DeleteTurnResponse
    - 新 DTO：[ChatDtos.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatDtos.kt)
 
-2. 旧方法保留并标 `@Deprecated`：`syncPush` / `characterContext` / `characterBootstrap`
-   —— 调用不会编译失败（仅 warning），但建议下次产品迭代时迁移：
-   - `SyncQueueDrainer.syncPush(...)` → `chatTurn(...)` （行为完全等价）
-   - `CharacterBootstrapStore.characterContext(...)` → `chatContext(...)`（拿到结构化 slots，更稳）
-   - `CharacterBootstrapStore.characterBootstrap(...)` → `getCharacter(...)`（etag 缓存）
+2. 旧方法已物理删除（`syncPush` / `characterBootstrap`）；`characterContext` 保留作 admin/debug/boot cache 端点。当前 [ChatServerApi.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatServerApi.kt) 只剩活跃方法。
 
 3. 实现 system prompt **canonical merge 顺序**：
    - 详细伪代码 + slot 顺序 + `<client>` slot 嵌入位置见 [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)
@@ -192,9 +162,8 @@
 
 ### 影响
 
-- 旧客户端继续走 `/api/character/context` / `/api/sync/push` 不会断（只是 response header 多 Deprecation）
-- 新客户端用 `chatContext` 拿到结构化 slots → system prompt 更精准（V_NEW_LEAN 实测 tool 触发率 72% → 92%，正确跳过 80% → 90%）
-- `/api/chat-with-memory` 调用会 404（确认 chatbox-Android 无 caller）
+- 老路径全部物理删除（`/api/sync/push` / `/api/character/bootstrap` / `/api/tool/memory-context` / `/api/chat-with-memory`）— 调用 → 404
+- 客户端用 `chatContext` 拿到结构化 slots → system prompt 更精准（V_NEW_LEAN 实测 tool 触发率 72% → 92%，正确跳过 80% → 90%）
 
 ### 状态
 

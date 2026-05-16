@@ -1,6 +1,19 @@
-# API 重构计划 — 从客户端生命周期反推
+# [已归档] API 重构计划 — 从客户端生命周期反推
 
-**Status**: Draft · 2026-05-10
+> **⚠️ 归档说明（2026-05-10 归档）**
+>
+> 本文档是 API 重构的**历史决策记录**，不再代表当前线上状态。
+> **当前 API 清单见 [docs/api.md](../api.md)。**
+>
+> 文档原意是描述"从旧到新"的迁移路径（含 Phase 1a / 1b / 2 / 3 / 4 + 向后兼容窗口），
+> 但 dev 客户端**不需要向后兼容**，所有"过渡保留"的设计都已物理删除。
+> 留这份文档是为了记录**为什么这么改**（决策点 §7）和**端点设计的初衷**（§2 / §3）。
+>
+> 不要再把本文当作 API 实现参考——文中"✅ 不变"等标记可能与当前不一致。
+
+---
+
+**Status**: Archived · 2026-05-10（原 Draft 同日归档）
 **Authors**: Evanna + Claude
 **Replaces**: 散落的 `/character/context` + `/character/bootstrap` + `/tool/memory-context` + `/tool/memory-recall` + `/chat-with-memory` 等 6+ 个端点
 

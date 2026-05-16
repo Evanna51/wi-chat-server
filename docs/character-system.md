@@ -115,12 +115,14 @@
 }
 ```
 
+> 端点权威清单见 [api.md](api.md)。本节按"角色系统"维度归类，含 dormant 标注。
+
 ### 2.3 Narrative Episodes
 
 | 端点 | 用途 |
 |------|------|
-| `GET /api/character/episodes?assistantId=&limit=&minImportance=` | 列表（按 time_range_end DESC）|
-| `GET /api/character/episodes/:id` | 详情（含 memory link）|
+| `GET /api/character/episodes` | 列表（按 time_range_end DESC）|
+| `GET /api/character/episodes/:id` | 详情（含 memory link）— **dormant** |
 | `POST /api/admin/character/build-episodes` | **手动触发** LLM 聚合（admin / 测试用）|
 
 build-episodes 是 `episodeBuilder` cron 的同步触发版本，body `{ assistantId }`，返回构建产物。
@@ -130,17 +132,19 @@ build-episodes 是 `episodeBuilder` cron 的同步触发版本，body `{ assista
 | 端点 | 用途 |
 |------|------|
 | `GET /api/character/topics?assistantId=&status=&limit=&includeInactive=` | 列表（默认排除 dormant/resolved）|
-| `POST /api/character/topics/upsert` | 手动创建（hot path 不创建新 topic）|
-| `POST /api/character/topics/:id/status` | 7 状态机转换 |
-| `POST /api/character/topics/:id/importance` | 调 importance（0-1）|
+| `POST /api/character/topics/upsert` | 手动创建话题 — **dormant**（hot path 由内部自动浮现）|
+| `POST /api/character/topics/:id/status` | 7 状态机转换 — **dormant** |
+| `POST /api/character/topics/:id/importance` | 调 importance（0-1）— **dormant** |
 
 7 状态：`growing / unresolved / painful / nostalgic / exciting / dormant / resolved`。
+
+> dormant 三个写端点未上线 admin UI；schema 稳定，未来运营干预 / 手工标注时启用。
 
 ### 2.5 Reflection（关系反思）
 
 | 端点 | 用途 |
 |------|------|
-| `GET /api/character/reflection?assistantId=` | 最新一条 |
+| `GET /api/character/reflection?assistantId=` | 最新一条 — **dormant**（admin UI 用复数版）|
 | `GET /api/character/reflections?assistantId=&type=&limit=` | 时间线 |
 | `POST /api/admin/character/reflect` | 手动触发 LLM 反思 |
 
@@ -155,14 +159,15 @@ build-episodes 是 `episodeBuilder` cron 的同步触发版本，body `{ assista
 
 **注意**：生产路径不需要客户端调这个。它由 `proactivePlanService` 内部消费决定 next-push 的意图。这两个端点纯供调试/可视化用。
 
-### 2.7 兼容老端点
+### 2.7 客户端拼 system prompt 走哪儿
 
-| 端点 | 状态 |
-|------|------|
-| `GET /api/relationship/state` | 保留 1 release 兼容窗口，下个 release 删 |
-| `GET /api/character/bootstrap` | 同上 |
+| 客户端调用 | 端点 |
+|---|---|
+| App boot / 切角色（拉静态 slots） | `GET /api/character/:id` |
+| 每轮发消息前（hot path） | `POST /api/chat/context` |
+| boot prompt 缓存（admin/debug） | `POST /api/character/context` |
 
-新客户端用 `/api/character/context`。`relationshipState` 字段在 context payload 里以 `characterState` 字段名返回（schema 一致）。
+`/api/character/context` 和 `/api/chat/context` 响应里都含 `characterState` payload（schema 等价于旧 `relationshipState`），客户端无需再单独调 `/api/relationship/state`（已 dormant）。
 
 ---
 

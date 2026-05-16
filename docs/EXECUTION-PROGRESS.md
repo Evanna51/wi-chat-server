@@ -333,7 +333,7 @@ socialMode 4 场景：
 
 - 现有 4 个生产 assistant 还没人手 hand-craft identity（用 seed --all 配最小默认即可，业务方面用户可自己通过 admin UI 手填）
 - Phase 2-4 蓝图已写在 character-cognition-architecture.md，等用户决定优先级
-- 老端点 `/api/relationship/state` 和 `/character/bootstrap` 暂留 1 个 release 兼容窗口，下个 release 删
+- 老端点处理：`/character/bootstrap` 已物理删除；`/api/relationship/state` 转 dormant（客户端从 context 响应 fan-out characterState）
 
 ---
 
