@@ -25,12 +25,14 @@ const {
   getCharacterIdentity,
 } = require("../services/character/identityService");
 const { buildCharacterContext } = require("../services/character/characterContextBuilder");
-const { composeForChat } = require("../services/character/promptComposer");
 const {
-  shouldRetrieveMemory,
-  formatMemoryLines,
-  buildMemoryGuidance,
-} = require("../services/memoryDecisionService");
+  composeForChatV3,
+  composeForChatV3Default,
+} = require("../services/character/promptComposer");
+const { decideRegister } = require("../services/character/registerRouter");
+const { buildAttention1h } = require("../services/character/attentionWindow");
+const { getSkillById } = require("../services/character/dialogueSkillsCatalog");
+const { evaluate: evaluateBehaviorIntent } = require("../services/character/behaviorPlanner");
 const { retrieveMemory } = require("../services/memoryRetrievalService");
 const { getCoreMemories, getCoreFacts } = require("../db");
 const { ingestTurnsBatch } = require("../services/syncIngestService");
@@ -91,9 +93,20 @@ router.get("/character/:id", authMiddleware, (req, res) => {
     }
     const identity = getCharacterIdentity(assistantId);
 
-    // 用 composer 渲染静态 slots（不含 facts / narrative — 那些每轮变，走 chat/context）
-    const composed = composeForChat({ profile, identity });
-    const { role, character, background, constraints, tool_protocol } = composed.slots;
+    // 2026-05-10: boot 路径用 V3 default 渲染，输出 schema 跟 chat/context 一致。
+    const composed = composeForChatV3Default({ profile, identity });
+    const slots = {
+      role: composed.slots.role || "",
+      style: composed.slots.style || "",
+      voice_skills: composed.slots.voice_skills || "",
+      background: composed.slots.background || "",
+      constraints: composed.slots.constraints || "",
+      attention_1h: composed.slots.attention_1h || "",
+      narrative: composed.slots.narrative || "",
+      facts: composed.slots.facts || "",
+      tool_protocol: composed.slots.tool_protocol || "",
+      avoid: composed.slots.avoid || "",
+    };
 
     return res.json({
       ok: true,
@@ -106,7 +119,10 @@ router.get("/character/:id", authMiddleware, (req, res) => {
         allowProactiveMessage: !!profile.allow_proactive_message,
       },
       identity: identity || null,
-      renderedSlots: { role, character, background, constraints, tool_protocol },
+      // ⭐ 主输出 — 跟 chat/context 同 schema，客户端 boot fallback 直接用 mergedSystem
+      mergedSystem: composed.mergedSystem,
+      enabledSlots: composed.enabledSlots,
+      slots,
       etag: computeSlotsEtag({ profile, identity }),
       ts: Date.now(),
     });
@@ -122,114 +138,213 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
     assistantId: z.string().trim().min(1),
     sessionId: z.string().trim().min(1).optional(),
     userInput: z.string().min(1),
-    haveSlotsETag: z.string().trim().optional(),
+    history: z
+      .array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() }))
+      .max(10)
+      .optional(),
     topK: z.number().int().positive().max(20).optional(),
   });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
-  const { assistantId, sessionId, userInput, haveSlotsETag, topK } = parsed.data;
+  const { assistantId, sessionId, userInput, history = [], topK } = parsed.data;
 
   try {
     const profile = getAssistantProfile(assistantId);
     if (!profile) {
       return res.status(404).json({ ok: false, error: "assistant_profile_not_found" });
     }
+    const identity = getCharacterIdentity(assistantId);
 
-    // 1. 角色认知（state / dynamics / episodes / topics / reflection / prefill）
-    const ctx = buildCharacterContext(assistantId, { lastUserMessage: userInput });
+    // ── 并行拉两个昂贵数据源：1h attention + character context ──
+    const [attention1h, ctx] = await Promise.all([
+      buildAttention1h(assistantId).catch((e) => {
+        console.warn("[chat/context] attention1h failed:", e.message);
+        return { topics: [], innerFocus: null, emotionalTone: null, turnCount: 0, ts: Date.now() };
+      }),
+      Promise.resolve(buildCharacterContext(assistantId, { lastUserMessage: userInput })),
+    ]);
+
     if (!ctx) {
       return res.status(404).json({ ok: false, error: "character_context_unavailable" });
     }
 
-    // 2. 用户事实（pinned + retrieved）
+    // ── 用户事实（pinned）──
     const coreFacts = safeGetCoreFacts(assistantId);
     const coreMemories = safeGetCoreMemories(assistantId);
+    const facts = coreFacts.length ? coreFacts : coreMemories;
 
+    // ── available 矩阵（router 决策前给它看哪些层"潜在有数据"）──
+    // facts_retrieved 此刻还不知道，标 true（可能有）—— router 自己决定要不要触发
+    const available = {
+      attention_1h: !!(attention1h.topics?.length || attention1h.innerFocus),
+      narrative_reflection: !!ctx.latestReflection?.summary,
+      narrative_episodes: !!(ctx.recentEpisodes?.length),
+      narrative_topics: !!(ctx.activeTopics?.length),
+      narrative_salient: !!ctx.salientPhrase,
+      lore_background: !!(profile.lore || profile.character_background),
+      facts_core: !!facts.length,
+      facts_retrieved: !!(config.memoryRetrievalEnabled && sessionId), // 能不能跑 RAG
+    };
+
+    // ── 启发式 behavior intent（cheap，~10ms）——给 router 看角色当前内心倾向 ──
+    let characterIntent = null;
+    try {
+      characterIntent = evaluateBehaviorIntent(assistantId, {
+        now: Date.now(),
+        attention1h, // 复用 chat path 已经 await 的 attention，零额外成本
+      });
+    } catch (err) {
+      console.warn("[chat/context] evaluateBehaviorIntent failed:", err.message);
+    }
+
+    // ── Router LLM 决策：register + skills + layers + budget + tools ──
+    const decision = await decideRegister({
+      userInput,
+      history,
+      available,
+      identity,
+      characterIntent,
+    });
+
+    // ── 跑 router 决定的 server_tools（当前只有 search_memory → retrieveMemory）──
     let retrievedMemories = [];
-    let memoryDecision = null;
-    if (config.memoryRetrievalEnabled && sessionId) {
-      const decision = await shouldRetrieveMemory({ userInput, assistantId });
-      memoryDecision = {
-        shouldRetrieve: !!decision.shouldRetrieve,
-        intent: decision.intent || (decision.shouldRetrieve ? "fact_query" : "small_talk"),
-        source: decision.source,
-        reason: decision.reason,
-      };
-      if (decision.shouldRetrieve) {
+    const memoryDecision = {
+      shouldRetrieve: false,
+      ranTools: [],
+      reason: decision.reason,
+    };
+
+    for (const t of decision.server_tools || []) {
+      if (t.tool === "search_memory") {
+        if (!config.memoryRetrievalEnabled || !sessionId) {
+          memoryDecision.skipped = "memory_retrieval_disabled_or_no_session";
+          continue;
+        }
         try {
           const items = await retrieveMemory({
             assistantId,
             sessionId,
-            query: decision.query || userInput,
+            query: t.args.query || userInput,
             topK: topK || config.retrievalTopK,
           });
-          retrievedMemories = items.map((m) => ({
-            id: m.id,
-            content: m.content,
-            score: m.score,
-            createdAt: m.createdAt,
-          }));
+          retrievedMemories = retrievedMemories.concat(
+            items.map((m) => ({
+              id: m.id,
+              content: m.content,
+              score: m.score,
+              createdAt: m.createdAt,
+            }))
+          );
+          memoryDecision.shouldRetrieve = true;
+          memoryDecision.intent = t.args.intent || "fact_query";
+          memoryDecision.source = t.args.source;
+          memoryDecision.ranTools.push({ tool: t.tool, args: t.args, hits: items.length });
         } catch (err) {
-          // retrieve 失败不阻塞 chat path —— 客户端拿不到 retrieved 也能用 prefill
           memoryDecision.retrievalError = err.message;
         }
       }
-    } else if (!sessionId) {
-      memoryDecision = { shouldRetrieve: false, intent: "small_talk", reason: "no_session" };
     }
 
-    // 3. 用 composer 渲染本轮动态 slots（facts / narrative / prefill）
-    const identity = getCharacterIdentity(assistantId);
-    const composed = composeForChat({
+    // 如果 router 决定 facts_retrieved=1 但实际没召回任何 memory，自动关闭这层
+    if (decision.layers.facts_retrieved === 1 && !retrievedMemories.length) {
+      decision.layers.facts_retrieved = 0;
+    }
+
+    // ── Resolve skills (router output → catalog) ──
+    const skills = decision.skill_ids
+      .map((id) => getSkillById(id, identity))
+      .filter(Boolean);
+
+    // ── V3 compose ──
+    const composed = composeForChatV3({
       profile,
       identity,
-      coreFacts: coreFacts.length ? coreFacts : coreMemories,
+      decision,
+      skills,
+      attention1h,
+      coreFacts: facts,
       retrievedMemories,
       recentReflection: ctx.latestReflection,
       activeEpisodes: ctx.recentEpisodes,
       activeTopics: ctx.activeTopics,
       salientPhrase: ctx.salientPhrase,
-      prefill: ctx.userPrefix,
+      prefill: "", // V3 不放 prefill —— 角色独白由 LLM 自然生成
     });
 
-    // 4. etag 比对：客户端 etag 没变就不回传静态 slots
-    const etag = computeSlotsEtag({ profile, identity });
-    const slotsChanged = !haveSlotsETag || haveSlotsETag !== etag;
+    // ── 按 slot 名字给字典 — 仅当客户端要嵌自己的 <client> slot 时用 ──
+    // 每个值已经 XML-wrap 好（"<role>...</role>"），未启用的 slot 是空字符串 ""。
+    // canonical 顺序见 docs/client-prompt-merge-protocol.md。
+    const slots = {
+      role: composed.slots.role || "",
+      style: composed.slots.style || "",
+      voice_skills: composed.slots.voice_skills || "",
+      background: composed.slots.background || "",
+      constraints: composed.slots.constraints || "",
+      attention_1h: composed.slots.attention_1h || "",
+      narrative: composed.slots.narrative || "",
+      facts: composed.slots.facts || "",
+      tool_protocol: composed.slots.tool_protocol || "",
+      avoid: composed.slots.avoid || "",
+    };
 
-    const response = {
+    return res.json({
       ok: true,
       assistantId,
       sessionId: sessionId || null,
-      facts: composed.slots.facts,
-      narrative: composed.slots.narrative,
+
+      // ⭐ 主输出 — 直接当 system prompt 喂 LLM。99% 的客户端只用这个字段就够。
+      mergedSystem: composed.mergedSystem,
       assistantPrefill: composed.assistantPrefill,
-      salientPhrase: ctx.salientPhrase || null,
+
+      // router 决策结果：本轮要拼哪些 slot（按 canonical 顺序）。
+      // 例 ["role", "style", "voice_skills", "constraints", "attention_1h", "avoid"]
+      // 客户端按这个数组 map slots 即可，无需自己硬编码 canonical 顺序。
+      enabledSlots: composed.enabledSlots,
+
+      // slot 字典：按 slot 名字给已渲染好的字符串（"<role>...</role>"），
+      // 没启用的 slot 是 ""。仅当客户端要嵌 <client> slot 时配合 enabledSlots 用。
+      // 推荐 <client> slot 插在 constraints 后、attention_1h 前。
+      slots,
+
+      // chat LLM tool capability — 调 LLM 时按这个 list 附 tools schema。
+      availableTools: decision.client_tools || [],
+
+      // ── 决策可见性（debug + 监控）──
+      routerDecision: {
+        register: decision.register,
+        skill_ids: decision.skill_ids,
+        budget: decision.budget,
+        layers: decision.layers,
+        server_tools: decision.server_tools || [],
+        client_tools: decision.client_tools || [],
+        reason: decision.reason,
+        // 启发式 intent（router 决策的输入之一）
+        characterIntent: characterIntent
+          ? {
+              intent: characterIntent.intent,
+              urgency: characterIntent.urgency,
+              priority: characterIntent.priority,
+              contentHint: characterIntent.contentHint,
+              suggestedSocialMode: characterIntent.suggestedSocialMode,
+            }
+          : null,
+      },
+      attention1h: {
+        topics: attention1h.topics || [],
+        innerFocus: attention1h.innerFocus || null,
+        emotionalTone: attention1h.emotionalTone || null,
+        turnCount: attention1h.turnCount || 0,
+      },
+
+      // ── memory 决策结果 ──
       memoryDecision,
-      etag,
-      stateVersion: ctx.ts,  // 客户端可记下来
+
+      // ── 元信息 ──
+      stateVersion: ctx.ts,
       ts: Date.now(),
-    };
-    if (slotsChanged) {
-      response.renderedSlots = {
-        role: composed.slots.role,
-        character: composed.slots.character,
-        background: composed.slots.background,
-        constraints: composed.slots.constraints,
-        tool_protocol: composed.slots.tool_protocol,
-      };
-    } else {
-      response.renderedSlots = null; // signal client: use cached slots
-    }
-
-    // 调试用辅助字段（旧 memory-context 客户端可能依赖）
-    if (memoryDecision?.shouldRetrieve && retrievedMemories.length) {
-      response.memoryLines = formatMemoryLines(retrievedMemories);
-      response.memoryGuidance = buildMemoryGuidance(response.memoryLines);
-    }
-
-    return res.json(response);
+    });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || String(error) });
   }

@@ -1,27 +1,19 @@
 /**
- * promptComposer — Phase 1a 落地：chat family 的结构化 prompt slot 渲染。
+ * promptComposer — V3 register-aware 渲染。
  *
- * 目的：把 V_NEW_LEAN（XML envelope + 内层 JSON）渲染成 8 个 slot，给客户端按
- * canonical 顺序拼接成最终 system prompt。客户端在 <narrative> 后、<tool_protocol>
- * 前插入自己的 <client> slot（当前时间 / locale / 用户自定义）。
+ * V3 chat hot path（POST /api/chat/context）走 router 决策 → composeForChatV3。
+ * Boot / admin / debug 路径（GET /api/character/:id, POST /api/character/context）
+ * 走 composeForChatV3Default（layers 全开 + skill ids 从 identity 抽前 2 个）。
  *
- * 与旧 `buildSystemSegment`（prose 描述堆叠）的区别：
- *   1. 字段精简：删 4 心理深度（insecurities/core_wounds/desires/tensions）+ 3 数值
- *      （emotional_sensitivity/empathy_level/expressiveness）。这些 deep 字段已通过
- *      server introspection 链路 → reflection.summary → <narrative> slot 间接传递。
- *   2. JSON 化：<character> / <constraints> / <tool_protocol> / <narrative> 内部用
- *      JSON，让大模型按字段解析，不当 prose 扫读。
- *   3. 加 <facts> slot：之前完全没拼，导致 LLM 凭印象答（详见 [docs/api-redesign-plan.md]）。
- *   4. 加 <narrative> slot：reflection / episodes / topics 完整数据下放到客户端 LLM，
- *      不再压缩成 1 行独白片段后丢失全部上下文。
+ * V3 slot 集合（canonical 顺序）：
+ *   <role> <style> <voice_skills> <background> <constraints>
+ *   <attention_1h> <narrative> <facts> <tool_protocol> <avoid>
  *
- * 不含的字段（chat 不需要）：dynamics 数值、socialMode 选择、attention_window_1h（TODO-2）。
+ * 字段格式：所有 slot 都是中文 markdown key:value（不再有 JSON.stringify dump）。
+ * 长度限制：facts ≤ 600 / narrative ≤ 800（带 drop-priority truncation）/
+ *          background ≤ 300（默认）或 ≤ 1200（lore_background=2 RP 模式）。
  *
- * Phase 1b 会新增 `composeForIntrospection` 给 server 内部 6 个 service（reflection /
- * episode / catchup / proactive / classify / decision）共用同一套 building blocks，
- * 但走 markdown 风格、保留全字段。本文件目前只实现 composeForChat。
- *
- * 见 docs/api-redesign-plan.md §2.5 / §3.8。
+ * V_NEW_LEAN composeForChat / mergeSlots / 旧 render*Slot 已删除（2026-05-10）。
  */
 
 const { parsePronouns } = require("./identityVocab");
@@ -62,206 +54,16 @@ const SLOT_SOFT_LIMITS = Object.freeze({
   // 其它 slot 字段固定，不会爆
 });
 
-const NARRATIVE_REFLECTION_SUMMARY_CAP = 200;
+const NARRATIVE_REFLECTION_SUMMARY_CAP = 180;
 const NARRATIVE_EPISODES_LIMIT = 3;
-const NARRATIVE_EPISODE_SUMMARY_CAP = 100;
-const NARRATIVE_TOPICS_LIMIT = 5;
+const NARRATIVE_EPISODE_SUMMARY_CAP = 80;
+const NARRATIVE_TOPICS_LIMIT = 4;
+// 数组字段（user_needs / concerns / opportunities / unresolved_threads）每项的字符上限，
+// 以及最多保留几项 — 之前完全没限，是 1655 chars 超 800 hard cap 的主因。
+const NARRATIVE_ARRAY_ITEM_CAP = 50;
+const NARRATIVE_ARRAY_LEN = 3;
 
-// ── 主入口 ───────────────────────────────────────────────────────────
-
-/**
- * 渲染 chat family 的 system prompt slot 集合。
- *
- * @param {object} args
- * @param {object} args.profile          assistant_profile row
- * @param {object} args.identity         character_identity（decoded camelCase）。可为 null
- * @param {Array}  [args.coreFacts]      pinned 关键事实 [{ content, importance, ... }]
- * @param {Array}  [args.retrievedMemories]  retrieved 记忆 [{ content, score, createdAt, ... }]
- * @param {object} [args.recentReflection]   fresh reflection（freshReflection 入参，14d 内）
- * @param {Array}  [args.activeEpisodes]     近期 unresolved episode（已 filter，最多 3 条）
- * @param {Array}  [args.activeTopics]       active topics（最多 5 条）
- * @param {object} [args.salientPhrase]      可选，UI 高亮 + 独白用
- * @param {string} [args.prefill]            assistantPrefill 现成段（buildUserMonologue 的输出）
- * @returns {{ slots: object, mergedSystem: string, assistantPrefill: string }}
- */
-function composeForChat({
-  profile,
-  identity,
-  coreFacts = [],
-  retrievedMemories = [],
-  recentReflection = null,
-  activeEpisodes = [],
-  activeTopics = [],
-  salientPhrase = null,
-  prefill = "",
-} = {}) {
-  if (!profile) {
-    throw new Error("composeForChat: profile required");
-  }
-
-  const pronouns = parsePronouns(identity ? identity.pronouns : "");
-
-  const slots = {
-    role: renderRoleSlot({ pronouns }),
-    character: renderCharacterSlot({ profile, identity, pronouns }),
-    background: renderBackgroundSlot({ profile }),
-    constraints: renderConstraintsSlot({ identity }),
-    facts: renderFactsSlot({ coreFacts, retrievedMemories }),
-    narrative: renderNarrativeSlot({
-      recentReflection,
-      activeEpisodes,
-      activeTopics,
-      salientPhrase,
-    }),
-    tool_protocol: renderToolProtocolSlot(),
-  };
-
-  // mergedSystem: server 端拼接好的完整 system prompt（不含 <client> slot —— 那是
-  // 客户端在 <narrative> 后、<tool_protocol> 前自己插入）。给 server-internal caller
-  // 或不需要 <client> slot 的客户端直接用。
-  const mergedSystem = mergeSlots(slots, prefill);
-
-  return {
-    slots,
-    mergedSystem,
-    assistantPrefill: prefill || "",
-  };
-}
-
-/**
- * 按 canonical 顺序拼接 server slots（不含 client slot）+ assistantPrefill。
- * 客户端实现 merge 协议时**必须**在 narrative 后、tool_protocol 前插 <client>。
- */
-function mergeSlots(slots, prefill = "") {
-  const order = [
-    slots.role,
-    slots.character,
-    slots.background,
-    slots.constraints,
-    slots.facts,
-    slots.narrative,
-    slots.tool_protocol,
-  ];
-  const sys = order.filter(Boolean).join("\n\n");
-  return prefill ? `${sys}\n\n${prefill}` : sys;
-}
-
-// ── slot 渲染 ────────────────────────────────────────────────────────
-
-/**
- * <role> = role directive（立场） + voice anchor（语气锚定）。
- * 合并是因为 V_NEW 里没单独的 <voice> slot —— role 段同时承担"你是谁"+"怎么说话"。
- * 旧 buildSystemSegment 把 voice 单独放末尾 utilizes recency bias，但 V_NEW 把
- * <tool_protocol> 占了那个位置（产品决策：tool calling 决策更需要 recency 加权）。
- */
-function renderRoleSlot({ pronouns }) {
-  return [
-    "<role>",
-    renderRoleDirective(pronouns),
-    renderVoiceAnchor(pronouns),
-    "</role>",
-  ].join("\n");
-}
-
-/**
- * <character> JSON — V_NEW_LEAN 字段集（精简版）。
- *
- * 包含：身份基线 + 表达层（speaking_style + skills）+ 价值观。
- * 删除：心理深度（insecurities/core_wounds/desires/tensions）→ 已通过 reflection 链路
- *       间接传递；数值字段 → LLM 不直接消费数值。
- */
-function renderCharacterSlot({ profile, identity, pronouns }) {
-  const charObj = {
-    name: profile.character_name || null,
-  };
-
-  if (identity) {
-    if (identity.pronouns) charObj.pronouns = identity.pronouns;
-    if (identity.age_years || identity.ageYears) {
-      charObj.age = identity.age_years ?? identity.ageYears;
-    }
-    if (identity.gender_expression || identity.genderExpression) {
-      charObj.gender_expression = identity.gender_expression ?? identity.genderExpression;
-    }
-    if (identity.speaking_style || identity.speakingStyle) {
-      charObj.speaking_style = identity.speaking_style ?? identity.speakingStyle;
-    }
-    if (identity.worldview) charObj.worldview = identity.worldview;
-
-    const traits = identity.personality_traits ?? identity.personalityTraits ?? [];
-    if (Array.isArray(traits) && traits.length) {
-      charObj.personality_traits = traits;
-    }
-
-    if (identity.attachment_style || identity.attachmentStyle) {
-      charObj.attachment_style = identity.attachment_style ?? identity.attachmentStyle;
-    }
-
-    const values = identity.values ?? [];
-    if (Array.isArray(values) && values.length) {
-      charObj.values = values;
-    }
-
-    const careLangs = identity.care_languages ?? identity.careLanguages ?? null;
-    if (careLangs && (careLangs.give?.length || careLangs.receive?.length)) {
-      charObj.care_languages = careLangs;
-    }
-
-    // skills 单独处理 — 接受 string[] 或 [{name, examples}] 混合形态
-    const skills = identity.skills ?? [];
-    if (Array.isArray(skills) && skills.length) {
-      charObj.skills = skills;
-    }
-  } else {
-    // identity 缺失时，pronouns 至少给一个默认（让 voice anchor 不空）
-    charObj.pronouns = "they/them";
-  }
-
-  return wrapXmlJson("character", charObj);
-}
-
-/**
- * <background> — lore prose（自由文本，不 JSON 化）。
- *
- * Phase 3：优先用 profile.lore（LLM 提炼后的净化叙事段，identity 字段已剥离），
- * fallback 到 character_background（提炼未跑完 / 失败时）。fallback 路径仍剥末尾
- * "系统提示"段（那是 rule，不是 lore）。
- */
-function renderBackgroundSlot({ profile }) {
-  const lore = (profile.lore || "").trim();
-  let body;
-  if (lore) {
-    body = lore;
-  } else {
-    const bg = profile.character_background || "";
-    body = bg.replace(/系统提示[\s\S]*$/, "").trim();
-  }
-  if (!body) {
-    return `<background>\n(no background lore)\n</background>`;
-  }
-  if (body.length > SLOT_SOFT_LIMITS.background) {
-    body = body.slice(0, SLOT_SOFT_LIMITS.background - 3) + "...";
-  }
-  return `<background>\n${body}\n</background>`;
-}
-
-/**
- * <constraints> JSON — 硬/软边界 + 回避/触发话题。
- */
-function renderConstraintsSlot({ identity }) {
-  const obj = {};
-  if (identity) {
-    const hb = identity.hard_boundaries ?? identity.hardBoundaries ?? [];
-    const sb = identity.soft_boundaries ?? identity.softBoundaries ?? [];
-    const av = identity.avoidance_topics ?? identity.avoidanceTopics ?? [];
-    const tg = identity.triggering_topics ?? identity.triggeringTopics ?? [];
-    if (hb.length) obj.hard_boundaries = hb;
-    if (sb.length) obj.soft_boundaries = sb;
-    if (av.length) obj.avoidance_topics = av;
-    if (tg.length) obj.triggering_topics = tg;
-  }
-  return wrapXmlJson("constraints", obj);
-}
+// ── 共享 slot 渲染（V3 也用）────────────────────────────────────────
 
 /**
  * <facts> — coreFacts + retrievedMemories。
@@ -291,9 +93,8 @@ function renderFactsSlot({ coreFacts, retrievedMemories }) {
     }
   }
 
-  if (!lines.length) {
-    return `<facts>\n(no facts retrieved for this turn)\n</facts>`;
-  }
+  // 2026-05-10: 空时返回空字符串，让上层 join 时自然跳过 — 不再输出 "(no facts retrieved)" 占位
+  if (!lines.length) return "";
 
   let body = lines.join("\n");
   if (body.length > SLOT_SOFT_LIMITS.facts) {
@@ -310,41 +111,71 @@ function renderFactsSlot({ coreFacts, retrievedMemories }) {
  *
  * attention_window_1h 暂不实现，见 docs/api-redesign-plan.md 附录 B TODO-2。
  */
+// 数组字段截断 helper：取前 N 条，每条 clip 到 cap。
+function clipArray(arr, len, cap) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .slice(0, len)
+    .map((s) => (typeof s === "string" ? clip(s, cap) : s))
+    .filter(Boolean);
+}
+
+// 优先级丢弃：narrative obj 仍然超 budget 时按这个顺序逐个剔除字段，
+// 直到 JSON.stringify 结果 ≤ budget。最不重要在最前。
+const NARRATIVE_DROP_ORDER = [
+  // 路径数组：[topLevelKey, subKey?] — 沿着对象按键删
+  ["salient_phrase"],
+  ["active_topics"],
+  ["recent_reflection", "opportunities"],
+  ["recent_reflection", "user_needs"],
+  ["recent_reflection", "concerns"],
+  ["active_episodes"],
+  ["recent_reflection", "direction"],
+];
+
+function dropAtPath(obj, path) {
+  if (path.length === 1) {
+    delete obj[path[0]];
+  } else if (obj[path[0]]) {
+    delete obj[path[0]][path[1]];
+    if (obj[path[0]] && Object.keys(obj[path[0]]).length === 0) {
+      delete obj[path[0]];
+    }
+  }
+}
+
 function renderNarrativeSlot({
   recentReflection,
   activeEpisodes,
   activeTopics,
   salientPhrase,
 }) {
+  // 内部仍用 obj 跟踪存在哪些字段（drop logic 需要），最后再渲染成 markdown
   const obj = {};
 
   if (recentReflection && recentReflection.summary) {
     const sum = clip(recentReflection.summary, NARRATIVE_REFLECTION_SUMMARY_CAP);
-    obj.recent_reflection = {
-      summary: sum,
-    };
+    obj.recent_reflection = { summary: sum };
     if (recentReflection.relationshipDirection) {
       obj.recent_reflection.direction = recentReflection.relationshipDirection;
     }
-    if (recentReflection.userNeeds?.length) {
-      obj.recent_reflection.user_needs = recentReflection.userNeeds;
-    }
-    if (recentReflection.concerns?.length) {
-      obj.recent_reflection.concerns = recentReflection.concerns;
-    }
-    if (recentReflection.opportunities?.length) {
-      obj.recent_reflection.opportunities = recentReflection.opportunities;
-    }
+    const userNeeds = clipArray(recentReflection.userNeeds, NARRATIVE_ARRAY_LEN, NARRATIVE_ARRAY_ITEM_CAP);
+    if (userNeeds.length) obj.recent_reflection.user_needs = userNeeds;
+    const concerns = clipArray(recentReflection.concerns, NARRATIVE_ARRAY_LEN, NARRATIVE_ARRAY_ITEM_CAP);
+    if (concerns.length) obj.recent_reflection.concerns = concerns;
+    const opportunities = clipArray(recentReflection.opportunities, NARRATIVE_ARRAY_LEN, NARRATIVE_ARRAY_ITEM_CAP);
+    if (opportunities.length) obj.recent_reflection.opportunities = opportunities;
   }
 
   if (Array.isArray(activeEpisodes) && activeEpisodes.length) {
     obj.active_episodes = activeEpisodes
       .slice(0, NARRATIVE_EPISODES_LIMIT)
       .map((e) => {
-        const out = { title: e.title };
+        const out = { title: clip(e.title || "", 40) };
         if (e.summary) out.summary = clip(e.summary, NARRATIVE_EPISODE_SUMMARY_CAP);
         if (e.emotionalTone) out.emotional_tone = e.emotionalTone;
-        if (e.unresolvedThreads?.length) out.unresolved_threads = e.unresolvedThreads;
+        const threads = clipArray(e.unresolvedThreads, NARRATIVE_ARRAY_LEN, NARRATIVE_ARRAY_ITEM_CAP);
+        if (threads.length) out.unresolved_threads = threads;
         if (typeof e.importance === "number") out.importance = e.importance;
         return out;
       });
@@ -354,71 +185,78 @@ function renderNarrativeSlot({
     obj.active_topics = activeTopics
       .slice(0, NARRATIVE_TOPICS_LIMIT)
       .map((t) => {
-        const out = { topic: t.topic, status: t.status };
-        if (t.emotionalAssociation) out.emotional_association = t.emotionalAssociation;
-        if (t.lastDiscussedAt) out.last_discussed_at = t.lastDiscussedAt;
+        const out = { topic: clip(t.topic || "", 30), status: t.status };
+        if (t.emotionalAssociation) out.emotional_association = clip(t.emotionalAssociation, 40);
         return out;
       });
   }
 
   if (salientPhrase && salientPhrase.phrase) {
-    obj.salient_phrase = {
-      phrase: salientPhrase.phrase,
-    };
+    obj.salient_phrase = { phrase: clip(salientPhrase.phrase, 40) };
     if (salientPhrase.triggerSource) {
       obj.salient_phrase.trigger_source = salientPhrase.triggerSource;
     }
   }
 
   if (Object.keys(obj).length === 0) {
-    return `<narrative>\n(no narrative context)\n</narrative>`;
+    return `<narrative>\n(无叙事上下文)\n</narrative>`;
   }
 
-  let body = JSON.stringify(obj, null, 2);
+  // 优先级丢弃 + markdown 渲染：先用 markdown 体积估算，超 budget 按 NARRATIVE_DROP_ORDER 砍。
+  let body = _renderNarrativeMarkdown(obj);
   if (body.length > SLOT_SOFT_LIMITS.narrative) {
-    // 不强切 JSON 结构（破坏会失败解析）；只 warn，让上游降低 limit 或 producer 收紧
-    console.warn(
-      `[promptComposer] narrative slot ${body.length} chars > soft limit ${SLOT_SOFT_LIMITS.narrative}. ` +
-      `检查 episodes / topics 数量或 summary cap。`
-    );
+    for (const path of NARRATIVE_DROP_ORDER) {
+      dropAtPath(obj, path);
+      body = _renderNarrativeMarkdown(obj);
+      if (body.length <= SLOT_SOFT_LIMITS.narrative) break;
+    }
   }
   return `<narrative>\n${body}\n</narrative>`;
 }
 
-/**
- * <tool_protocol> JSON — 工具调用协议。
- *
- * 包含：
- *   - always_emit_content_with_tool_call: 提示模型不要 tool_call only（虽然不能 100% 强制，
- *     prompt 工程能让命中率从 19% → 37%；剩余靠客户端 SDK fallback UI 占位）
- *   - search_memory tool 的简要 hint（详细描述放在 tool definition 的 description 字段，
- *     由客户端 SDK 在调 LLM 时附 tools 数组）
- *
- * 见 ab-prompt-test 报告 + docs/api-redesign-plan.md §4。
- */
-function renderToolProtocolSlot() {
-  const obj = {
-    always_emit_content_with_tool_call: true,
-    content_when_calling_tool:
-      "1-2 short sentences in character voice; acknowledge the search action; do NOT preview the answer",
-    tools: {
-      search_memory: {
-        purpose: "Retrieve user context from shared conversation history",
-        trigger_must: {
-          time_words: [
-            "上次", "之前", "还记得", "那时", "前几天", "上周", "上周末",
-            "最近", "以前", "曾经", "当时", "那次", "有次",
-          ],
-          recall_words: ["你记得吗", "还记得", "想起", "提过", "聊过", "说过", "告诉过"],
-        },
-        trigger_should: "user references a person/place/event by name that may have prior context",
-        skip_when: ["greetings", "character_setting_questions", "hypothetical_future"],
-        cost_model: "false_positive_cheap; false_negative_expensive; when_uncertain_call",
-        default_source: "user",
-      },
-    },
-  };
-  return wrapXmlJson("tool_protocol", obj);
+function _renderNarrativeMarkdown(obj) {
+  const sections = [];
+
+  if (obj.recent_reflection) {
+    const r = obj.recent_reflection;
+    const lines = [];
+    if (r.summary) lines.push(`最近反思：${r.summary}`);
+    if (r.direction) lines.push(`反思方向：${r.direction}`);
+    if (r.user_needs?.length) lines.push(`用户需求：${r.user_needs.join(" / ")}`);
+    if (r.concerns?.length) lines.push(`担忧：${r.concerns.join(" / ")}`);
+    if (r.opportunities?.length) lines.push(`机会：${r.opportunities.join(" / ")}`);
+    if (lines.length) sections.push(lines.join("\n"));
+  }
+
+  if (Array.isArray(obj.active_episodes) && obj.active_episodes.length) {
+    const lines = ["未解事件："];
+    for (const e of obj.active_episodes) {
+      const meta = [];
+      if (e.emotional_tone) meta.push(e.emotional_tone);
+      if (typeof e.importance === "number") meta.push(`重要 ${e.importance.toFixed(1)}`);
+      const head = e.title + (meta.length ? `（${meta.join(" / ")}）` : "");
+      lines.push(`- ${head}`);
+      if (e.summary) lines.push(`  ${e.summary}`);
+      if (e.unresolved_threads?.length) lines.push(`  悬而未决：${e.unresolved_threads.join(" / ")}`);
+    }
+    sections.push(lines.join("\n"));
+  }
+
+  if (Array.isArray(obj.active_topics) && obj.active_topics.length) {
+    const parts = obj.active_topics.map((t) => {
+      const tail = t.emotional_association ? `（${t.emotional_association}）` : "";
+      return `${t.topic}[${t.status}]${tail}`;
+    });
+    sections.push(`近期话题：${parts.join(" / ")}`);
+  }
+
+  if (obj.salient_phrase) {
+    const sp = obj.salient_phrase;
+    const trail = sp.trigger_source ? `（${sp.trigger_source}）` : "";
+    sections.push(`被勾住的词：${sp.phrase}${trail}`);
+  }
+
+  return sections.join("\n\n");
 }
 
 // ── Introspection family building blocks (Phase 1b) ─────────────────
@@ -472,11 +310,11 @@ function renderBackgroundForIntrospection(characterBackground, maxChars, opts = 
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-function wrapXmlJson(tag, obj) {
-  if (!obj || (typeof obj === "object" && !Array.isArray(obj) && Object.keys(obj).length === 0)) {
-    return `<${tag}>\n{}\n</${tag}>`;
-  }
-  return `<${tag}>\n${JSON.stringify(obj, null, 2)}\n</${tag}>`;
+// 中文 markdown 包装：body 是已经渲染好的多行字符串。
+function wrapXmlMarkdown(tag, body) {
+  const trimmed = (body || "").trim();
+  if (!trimmed) return `<${tag}>\n（无）\n</${tag}>`;
+  return `<${tag}>\n${trimmed}\n</${tag}>`;
 }
 
 function clip(s, n) {
@@ -485,20 +323,353 @@ function clip(s, n) {
   return str.length <= n ? str : str.slice(0, n - 1) + "…";
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// V3 — register-aware composer
+// ═══════════════════════════════════════════════════════════════════
+//
+// 输入 router decision，按 layer flag 拼 prompt：
+//   1) 永远有的：<role> / <style> / <voice_skills> / <attention_1h> / <avoid>
+//   2) 可选层：<background> / <constraints> / <facts> / <narrative>
+//   3) 不放：<character> JSON 全字段（V_NEW_LEAN 改用 <style> 描述）/ <tool_protocol>（chat-only 不需要）
+//
+// 跟 V_NEW_LEAN composeForChat 的关系：保留 composeForChat 给 admin/debug/boot cache；
+// 生产 hot path 切到 composeForChatV3。
+
+const { renderSkillForPrompt } = require("./dialogueSkillsCatalog");
+
+const V3_SLOT_LIMITS = Object.freeze({
+  background: 300,    // V3 默认 300（V_NEW_LEAN 是 1500）
+  background_full: 1200, // RP 模式（lore_background=2）才放完整 lore
+});
+
+function _renderRoleV3({ profile, identity }) {
+  const name = profile?.character_name || "ta";
+  const role = identity?.speakingStyle?.split(/[。\n]/)[0]?.trim() || "";
+  const pronouns = parsePronouns(identity ? identity.pronouns : "");
+
+  const lines = [];
+  lines.push(`<role>`);
+  lines.push(`你是 ${name}${role ? "——" + role.slice(0, 40) : ""}。`);
+  lines.push(`Speak as ${pronouns.object}, not about ${pronouns.object}. Mid-conversation, not on stage.`);
+  lines.push(`</role>`);
+  return lines.join("\n");
+}
+
+function _renderStyleV3({ identity }) {
+  const ss = (identity?.speakingStyle || "").trim();
+  if (!ss) return "";
+  return `<style>\n${clipText(ss, 200)}\n</style>`;
+}
+
+function _renderVoiceSkillsV3(skills, { maxExamples = 2 } = {}) {
+  if (!Array.isArray(skills) || !skills.length) return "";
+  const lines = ["<voice_skills>"];
+  for (const s of skills) {
+    if (!s) continue;
+    lines.push(renderSkillForPrompt(s, { maxExamples }));
+  }
+  lines.push("</voice_skills>");
+  return lines.join("\n");
+}
+
+function _renderAttention1hV3(attention) {
+  if (!attention || (!attention.topics?.length && !attention.innerFocus)) return "";
+  const lines = ["<attention_1h>"];
+  if (attention.topics?.length) {
+    lines.push(`最近一小时在聊：${attention.topics.slice(0, 5).join(" / ")}`);
+  }
+  if (attention.innerFocus) {
+    lines.push(`你正在关注：${clipText(attention.innerFocus, 60)}`);
+  }
+  if (attention.emotionalTone) {
+    lines.push(`整体基调：${attention.emotionalTone}`);
+  }
+  lines.push("</attention_1h>");
+  return lines.join("\n");
+}
+
+function _renderAvoidV3(extraAvoid = []) {
+  // 不放"枚举式回答" — 它跟客户端的 split message 协议（多条短消息）有歧义，
+  // 模型可能误读成"不要 split"。要避免列点回答用更精准的"1.2.3 编号列表"。
+  const base = [
+    "过度共情套路（'我能理解你...'）",
+    "文学化升华（'接住你整个人'之类）",
+    "归纳总结对方情绪（'听起来你...'）",
+    "1.2.3 编号列表（除非用户明确要求列点）",
+  ];
+  const all = base.concat(extraAvoid).slice(0, 6);
+  return `<avoid>\n${all.map((s) => "- " + s).join("\n")}\n</avoid>`;
+}
+
+/**
+ * V3 tool_protocol slot —— 按 router decision 的 client_tools 决定是否注入。
+ * 不放完整 tool 定义（那个由客户端在 LLM API 请求里附 tools 数组），
+ * 这里只放协议提示：哪些 tool 可调、调用规则。
+ */
+function _renderToolProtocolV3(clientTools = []) {
+  if (!Array.isArray(clientTools) || !clientTools.length) return "";
+  const lines = ["<tool_protocol>"];
+  lines.push("你有以下工具可主动调用（emit tool_call）：");
+  for (const t of clientTools) {
+    if (t === "search_memory") {
+      lines.push("- search_memory: 查询过往对话/事实。当你需要 narrow 检索某个具体记忆时调用。");
+    }
+  }
+  lines.push("");
+  lines.push("调用规则：");
+  lines.push("- 同时输出 content（一两句 in-character 的话承接此刻语境）和 tool_call");
+  lines.push("- content 不要预告答案，只承认正在查");
+  lines.push("- 不确定时倾向调用，没命中代价低");
+  lines.push("</tool_protocol>");
+  return lines.join("\n");
+}
+
+function _renderBackgroundV3({ profile }, { mode = 1 }) {
+  if (!mode) return "";
+  const lore = (profile.lore || "").trim();
+  let body = lore || (profile.character_background || "").replace(/系统提示[\s\S]*$/, "").trim();
+  if (!body) return "";
+  const cap = mode === 2 ? V3_SLOT_LIMITS.background_full : V3_SLOT_LIMITS.background;
+  if (body.length > cap) body = body.slice(0, cap - 3) + "...";
+  return `<background>\n${body}\n</background>`;
+}
+
+function _renderConstraintsV3({ identity }) {
+  // 仅 hard_boundaries — 其他放 <avoid>
+  const hb = identity?.hard_boundaries ?? identity?.hardBoundaries ?? [];
+  if (!Array.isArray(hb) || !hb.length) return "";
+  return `<constraints>\nhard_boundaries: ${JSON.stringify(hb)}\n</constraints>`;
+}
+
+/**
+ * V3 主入口 — register-aware。
+ *
+ * @param {object} args
+ * @param {object} args.profile
+ * @param {object} args.identity
+ * @param {object} args.decision           registerRouter 输出
+ * @param {Array}  [args.skills]           已 resolve 的 skills（按 decision.skill_ids）
+ * @param {object} [args.attention1h]
+ * @param {Array}  [args.coreFacts]
+ * @param {Array}  [args.retrievedMemories]
+ * @param {object} [args.recentReflection]
+ * @param {Array}  [args.activeEpisodes]
+ * @param {Array}  [args.activeTopics]
+ * @param {object} [args.salientPhrase]
+ * @param {string} [args.prefill]
+ * @returns {{ slots:object, mergedSystem:string, assistantPrefill:string, debug:object }}
+ */
+function composeForChatV3({
+  profile,
+  identity,
+  decision,
+  skills = [],
+  attention1h = null,
+  coreFacts = [],
+  retrievedMemories = [],
+  recentReflection = null,
+  activeEpisodes = [],
+  activeTopics = [],
+  salientPhrase = null,
+  prefill = "",
+}) {
+  if (!profile) throw new Error("composeForChatV3: profile required");
+  if (!decision) throw new Error("composeForChatV3: decision required");
+
+  const layers = decision.layers || {};
+
+  // 永远有
+  const slotRole = _renderRoleV3({ profile, identity });
+  const slotStyle = _renderStyleV3({ identity });
+  const slotVoice = _renderVoiceSkillsV3(skills);
+  const slotAttention = layers.attention_1h ? _renderAttention1hV3(attention1h) : "";
+  const slotAvoid = _renderAvoidV3();
+
+  // 按 layer 开关
+  const slotBackground = _renderBackgroundV3({ profile }, { mode: layers.lore_background || 0 });
+  const slotConstraints = _renderConstraintsV3({ identity });
+
+  // tool_protocol：仅当 router 在 client_tools 列出时注入
+  const slotToolProtocol = _renderToolProtocolV3(decision.client_tools || []);
+
+  // facts: 按 facts_core / facts_retrieved 装
+  const includedCoreFacts = layers.facts_core ? coreFacts : [];
+  const includedRetrieved = layers.facts_retrieved ? retrievedMemories : [];
+  const slotFacts =
+    includedCoreFacts.length || includedRetrieved.length
+      ? renderFactsSlot({ coreFacts: includedCoreFacts, retrievedMemories: includedRetrieved })
+      : "";
+
+  // narrative: 按 4 个 sub-flag 装；只装被 router 打开的部分
+  const slotNarrative = _renderNarrativeFiltered({
+    recentReflection: layers.narrative_reflection ? recentReflection : null,
+    activeEpisodes: layers.narrative_episodes ? activeEpisodes : [],
+    activeTopics: layers.narrative_topics ? activeTopics : [],
+    salientPhrase: layers.narrative_salient ? salientPhrase : null,
+  });
+
+  const slots = {
+    role: slotRole,
+    style: slotStyle,
+    voice_skills: slotVoice,
+    attention_1h: slotAttention,
+    background: slotBackground,
+    constraints: slotConstraints,
+    facts: slotFacts,
+    narrative: slotNarrative,
+    tool_protocol: slotToolProtocol,
+    avoid: slotAvoid,
+  };
+
+  // canonical V3 顺序：role → style → voice_skills → background → constraints
+  // → attention_1h → narrative → facts → tool_protocol → avoid → prefill
+  // tool_protocol 放 facts 后、avoid 前，占 recency bias 的次黄金位（avoid 是终止指令）。
+  //
+  // enabledSlots = 本轮 router 决策启用（非空）的 slot 名字数组，按 canonical 顺序。
+  // 客户端按这个数组 map 到 slots 字典即可拼出 mergedSystem，不需要硬编码 canonical 顺序。
+  const SLOT_CANONICAL_ORDER = SLOT_CANONICAL;
+  const enabledSlots = SLOT_CANONICAL_ORDER.filter((name) => slots[name]);
+  const order = enabledSlots.map((name) => slots[name]);
+
+  let mergedSystem = order.join("\n\n");
+  if (prefill) mergedSystem = `${mergedSystem}\n\n${prefill}`;
+
+  return {
+    slots,
+    enabledSlots,
+    mergedSystem,
+    assistantPrefill: prefill || "",
+    debug: {
+      register: decision.register,
+      skill_ids: decision.skill_ids,
+      budget: decision.budget,
+      layers: decision.layers,
+      reason: decision.reason,
+      systemLen: mergedSystem.length,
+    },
+  };
+}
+
+// V3 canonical slot 顺序 — 改这里要同步改 docs/client-prompt-merge-protocol.md。
+// `<client>` slot 推荐插在 constraints 后、attention_1h 前。
+const SLOT_CANONICAL = Object.freeze([
+  "role",
+  "style",
+  "voice_skills",
+  "background",
+  "constraints",
+  "attention_1h",
+  "narrative",
+  "facts",
+  "tool_protocol",
+  "avoid",
+]);
+
+// 跟 renderNarrativeSlot 相同逻辑，但只装传入的 sub-fields（已经被 router filter 过）。
+// 直接复用 renderNarrativeSlot — 它在传 null/[] 时会自动跳过对应字段。
+function _renderNarrativeFiltered(parts) {
+  const hasAny =
+    (parts.recentReflection && parts.recentReflection.summary) ||
+    (Array.isArray(parts.activeEpisodes) && parts.activeEpisodes.length) ||
+    (Array.isArray(parts.activeTopics) && parts.activeTopics.length) ||
+    (parts.salientPhrase && parts.salientPhrase.phrase);
+  if (!hasAny) return "";
+  return renderNarrativeSlot(parts);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// V3 default — boot / admin / debug 路径用。
+// ─────────────────────────────────────────────────────────────────
+//
+// chat hot path 走 router 决策；boot 时没有用户消息可以让 router 决策，
+// 用一个 default decision：layers 全开（让 client 拿到完整 fallback prompt），
+// skills 从 identity.skills 取前 2 个 catalog id，缺则 fallback 到 fragmented_speech。
+//
+// 这样 boot mergedSystem 与 chat hot path 输出**结构一致**（都有 voice_skills），
+// 不再出现"客户端 fallback prompt 没有 SKILL"的问题。
+
+function _defaultDecisionForBoot(identity) {
+  const skillIds = [];
+  if (Array.isArray(identity?.skills)) {
+    for (const s of identity.skills) {
+      if (skillIds.length >= 2) break;
+      if (typeof s === "string") skillIds.push(s);
+      else if (s && typeof s === "object" && s.name) skillIds.push(s.name);
+    }
+  }
+  if (!skillIds.length) skillIds.push("fragmented_speech");
+
+  return {
+    register: "闲聊",
+    skill_ids: skillIds,
+    budget: "medium",
+    layers: {
+      attention_1h: 1,
+      narrative_reflection: 1,
+      narrative_episodes: 1,
+      narrative_topics: 1,
+      narrative_salient: 0,
+      lore_background: 1,
+      facts_core: 1,
+      facts_retrieved: 0,
+    },
+    server_tools: [],
+    client_tools: [],
+    reason: "boot/admin default — layers 全开做 fallback prompt",
+  };
+}
+
+/**
+ * 给 boot / admin / debug 路径用：用 default decision 调 composeForChatV3。
+ * 输出格式与 chat hot path 一致（含 voice_skills + attention_1h + avoid）。
+ */
+function composeForChatV3Default({
+  profile,
+  identity,
+  attention1h = null,
+  coreFacts = [],
+  retrievedMemories = [],
+  recentReflection = null,
+  activeEpisodes = [],
+  activeTopics = [],
+  salientPhrase = null,
+  prefill = "",
+}) {
+  const decision = _defaultDecisionForBoot(identity);
+  // resolve skills 从 catalog 拿
+  const { getSkillById } = require("./dialogueSkillsCatalog");
+  const skills = decision.skill_ids
+    .map((id) => getSkillById(id, identity))
+    .filter(Boolean);
+
+  return composeForChatV3({
+    profile,
+    identity,
+    decision,
+    skills,
+    attention1h,
+    coreFacts,
+    retrievedMemories,
+    recentReflection,
+    activeEpisodes,
+    activeTopics,
+    salientPhrase,
+    prefill,
+  });
+}
+
 module.exports = {
-  composeForChat,
-  // chat building blocks
-  renderRoleSlot,
-  renderCharacterSlot,
-  renderBackgroundSlot,
-  renderConstraintsSlot,
+  // chat / boot 主入口（V3）
+  composeForChatV3,
+  composeForChatV3Default,
+  // 共享 slot renderer（V3 内部 + chat.js 用）
   renderFactsSlot,
   renderNarrativeSlot,
-  renderToolProtocolSlot,
-  mergeSlots,
-  // introspection building blocks (Phase 1b)
+  // introspection building blocks（episodeBuilder / catchupService / proactivePlanService 共享）
   clipText,
   renderBackgroundForIntrospection,
   // 常量
   SLOT_SOFT_LIMITS,
+  V3_SLOT_LIMITS,
+  SLOT_CANONICAL, // V3 slot 顺序，客户端可参考
 };

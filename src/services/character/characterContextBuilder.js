@@ -43,7 +43,7 @@ const { getLatestReflection } = require("./reflectionService");
 const { resolveEmotion } = require("../emotionTaxonomy");
 const { detectSalientPhrase } = require("./salientPhraseDetector");
 const { parsePronouns } = require("./identityVocab");
-const { composeForChat } = require("./promptComposer");
+const { composeForChatV3Default } = require("./promptComposer");
 
 // ── 预算 ─────────────────────────────────────────────────────────────
 //
@@ -209,11 +209,11 @@ function buildCharacterContext(assistantId, {
   });
   result.assistantPrefill = assistantPrefill;
 
-  // V_NEW_LEAN 8 段 slots（chat path 客户端按 canonical 顺序拼）
-  // 见 docs/api-redesign-plan.md §2.5 + docs/client-prompt-merge-protocol.md
-  // /api/chat/context 端点会再补 facts + retrievedMemories；这里 buildCharacterContext
-  // 主要给 admin / debug 用，先用空 facts/retrieved 占位渲染。
-  const composed = composeForChat({
+  // 2026-05-10: 改用 V3 default 渲染，输出 schema 跟 chat hot path 一致
+  // （含 <voice_skills> / <attention_1h>(空) / <avoid>），让 admin / boot cache 客户端
+  // 拿到的 fallback prompt 跟 hot path 同结构。chat path 仍走 composeForChatV3 + router
+  // 不受影响。
+  const composed = composeForChatV3Default({
     profile,
     identity,
     coreFacts: [],

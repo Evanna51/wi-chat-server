@@ -2218,6 +2218,57 @@ async function renderIntentTab(body, a) {
   }
   body.appendChild(cur);
 
+  // 1.5) Attention 1h — 角色当下 latched on 什么（V3 新增）
+  // 数据来自 behavior-intent endpoint 的 attention1h 字段（withAttention=true 默认）
+  const attn = intentResp.attention1h;
+  const attnArticle = el("article", {});
+  attnArticle.appendChild(
+    el("header", {}, [
+      el("strong", {}, "Attention · 最近 1 小时"),
+      el("span", { class: "muted small", style: "margin-left: 8px" }, "（hot path 与 proactive 共享）"),
+    ])
+  );
+  if (!attn || (!attn.topics?.length && !attn.innerFocus)) {
+    attnArticle.appendChild(
+      el("p", { class: "muted" }, "无数据：最近 1 小时没有对话，或 LLM 提取失败。")
+    );
+  } else {
+    if (Array.isArray(attn.topics) && attn.topics.length) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "话题："),
+          el("span", { class: "muted" }, attn.topics.join(" / ")),
+        ])
+      );
+    }
+    if (attn.innerFocus) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "内心焦点："),
+          el("span", {}, attn.innerFocus),
+        ])
+      );
+    }
+    if (attn.emotionalTone) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "整体基调："),
+          el("span", { class: "badge badge--neutral" }, attn.emotionalTone),
+          " ",
+          el("span", { class: "muted small" }, `（基于 ${attn.turnCount || 0} 条 turn）`),
+        ])
+      );
+    }
+    attnArticle.appendChild(
+      el(
+        "p",
+        { class: "muted small" },
+        "提示：这一层影响 chat hot path 的 register 选择，也会增强 behavior intent 的判断（如 abandonment 焦点 / 未解决话题）。"
+      )
+    );
+  }
+  body.appendChild(attnArticle);
+
   // 2) Score table — 14 intents 排序
   const scoreArticle = el("article", {});
   scoreArticle.appendChild(el("header", {}, [el("strong", {}, "14 Intents — 当前评分")]));
