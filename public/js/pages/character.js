@@ -6,7 +6,6 @@ const TABS = [
   { id: "overview", label: "概览" },
   { id: "manage", label: "角色设定" },
   { id: "conversation", label: "对话" },
-  { id: "identity", label: "Identity" },
   { id: "cognition", label: "认知" },
   { id: "intent", label: "意图" },
   { id: "memory", label: "记忆" },
@@ -116,10 +115,6 @@ export async function viewCharacter(assistantId, tabId = "overview") {
   if (tabId === "facts") {
     const m = await import("./character-facts.js");
     return m.renderFactsTab(body, a);
-  }
-  if (tabId === "identity") {
-    const m = await import("./character-identity.js");
-    return m.renderIdentityTab(body, a);
   }
   if (tabId === "cognition") {
     const m = await import("./character-cognition.js");
