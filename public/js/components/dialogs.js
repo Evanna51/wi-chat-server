@@ -89,7 +89,7 @@ export function showExtractPreviewDialog(a, result, onApplied) {
            "padding:12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; margin-top:8px;",
   }, lore || "(空)");
 
-  const applyBtn = el("button", {}, "应用并保存");
+  const applyBtn = el("button", {}, "确认");
   const cancelBtn = el("button", { class: "outline" }, "取消");
   cancelBtn.addEventListener("click", () => dlg.close());
   applyBtn.addEventListener("click", async () => {
@@ -108,7 +108,7 @@ export function showExtractPreviewDialog(a, result, onApplied) {
     }
   });
 
-  dlg.appendChild(el("h3", { style: "margin:0 0 12px 0" }, "🤖 AI 提炼结果"));
+  dlg.appendChild(el("h3", { style: "margin:0 0 12px 0" }, "确认更新角色identity吗"));
   dlg.appendChild(el("p", { class: "muted small", style: "margin:0 0 16px 0" },
     `提炼耗时 ${result.extractionMs} ms · 字段 ${Object.keys(id).length} 项 · lore ${lore.length} 字`));
   dlg.appendChild(el("h5", { style: "margin:8px 0 4px 0" }, "📋 Identity 字段"));
