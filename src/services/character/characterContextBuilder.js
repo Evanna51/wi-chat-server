@@ -225,7 +225,6 @@ function buildCharacterContext(assistantId, {
     prefill: assistantPrefill,
   });
   result.slots = composed.slots;
-  result.mergedSystem = composed.mergedSystem;
 
   return result;
 }

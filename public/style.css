@@ -1,11 +1,11 @@
-/* Character Visualizer — overlay on top of Pico */
+/* 角色管理台 — overlay on top of Pico */
 
 :root {
-  /* 主题色：暂定 #7caaff（柔和蓝），所有 hover / focus / 主按钮统一引用 */
-  --vis-primary: #7caaff;
-  --vis-primary-hover: #6093f5;
-  --vis-primary-shadow: rgba(124, 170, 255, 0.35);
-  --vis-primary-glow: rgba(124, 170, 255, 0.18);
+  /* 主题色：柔和紫罗兰，所有 hover / focus / 主按钮统一引用 */
+  --vis-primary: #8b78f0;
+  --vis-primary-hover: #7060d8;
+  --vis-primary-shadow: rgba(139, 120, 240, 0.35);
+  --vis-primary-glow: rgba(139, 120, 240, 0.15);
 
   /* 状态色（绿不动，是用户保留的语义色）*/
   --vis-on: #16a34a;
@@ -29,7 +29,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --vis-primary-shadow: rgba(124, 170, 255, 0.5);
+    --vis-primary-shadow: rgba(139, 120, 240, 0.5);
     --vis-bubble-user: #2a3a5c;
     --vis-bubble-assistant: #1f2937;
   }
@@ -630,11 +630,91 @@ th .th-zh {
   align-items: center;
   justify-content: space-between;
   gap: 0.6rem;
-  padding: 0.4rem 0;
-  border-bottom: 1px solid var(--card-border-color, rgba(0, 0, 0, 0.05));
+  padding: 0.55rem 0.75rem;
+  border-radius: var(--vis-radius);
+  margin-bottom: 0.35rem;
+  background: var(--card-background-color, #fff);
+  transition: border-color 0.15s;
 }
-.switch-row:last-child {
-  border-bottom: none;
+
+.switch-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin: 0;
+  cursor: pointer;
+}
+@media (prefers-color-scheme: dark) {
+  .switch-row { background: rgba(255, 255, 255, 0.03); }
+}
+
+/* Switch toggle：使用主题色覆盖 Pico 默认强调色 */
+[type="checkbox"][role="switch"]:checked {
+  background-color: var(--vis-primary) !important;
+  border-color: var(--vis-primary) !important;
+}
+[type="checkbox"][role="switch"]:focus-visible {
+  box-shadow: 0 0 0 2px var(--vis-primary-glow) !important;
+  border-color: var(--vis-primary) !important;
+  outline: none !important;
+}
+[type="checkbox"][role="switch"]:focus:not(:focus-visible) {
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* label + 操作按钮并排的字段容器（button 必须在 label 外，否则 label click 会 forward 到 button）*/
+.field-with-action {
+  margin-bottom: 1rem;
+}
+.field-with-action__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+.field-with-action__head label {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 全局 input / textarea hover & focus 颜色对齐主题色 */
+article input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):hover,
+article textarea:hover {
+  border-color: var(--vis-primary) !important;
+}
+article input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+article textarea:focus {
+  border-color: var(--vis-primary) !important;
+  box-shadow: 0 0 0 2px var(--vis-primary-glow) !important;
+  outline: none !important;
+}
+
+/* 行内小操作按钮（如 AI 分析），不参与全局 article button 规则 */
+.vis-btn-sm {
+  background: transparent;
+  border: 1px solid var(--card-border-color, rgba(0, 0, 0, 0.15));
+  border-radius: var(--vis-radius-sm);
+  color: var(--muted-color, #666);
+  font-size: 0.78rem;
+  padding: 0.2rem 0.65rem;
+  margin: 0;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.vis-btn-sm:hover {
+  border-color: var(--vis-primary);
+  color: var(--vis-primary-hover);
+  background: var(--vis-primary-glow);
+}
+.vis-btn-sm:active {
+  background: var(--vis-primary-glow);
+}
+@media (prefers-color-scheme: dark) {
+  .vis-btn-sm { border-color: rgba(255, 255, 255, 0.18); color: rgba(255, 255, 255, 0.55); }
 }
 .run-row {
   display: flex;
@@ -1313,4 +1393,44 @@ button.outline:hover {
 .vis-tags__suggest-chip .vis-tags__chip-zh { color: inherit; opacity: 0.7; }
 @media (prefers-color-scheme: dark) {
   .vis-tags__suggest-chip { background: rgba(255, 255, 255, 0.04); }
+}
+
+/* ─── 结果弹窗 vis-result-dialog ─── */
+.vis-result-dialog {
+  border: none;
+  border-radius: var(--vis-radius);
+  padding: 0;
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.vis-result-dialog > article {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+.vis-result-dialog > article > header {
+  flex-shrink: 0;
+}
+.vis-result-pre {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  padding: 0.75rem 1rem;
+  background: rgba(0, 0, 0, 0.02);
+  border-top: 1px solid var(--card-border-color, rgba(0, 0, 0, 0.06));
+}
+@media (prefers-color-scheme: dark) {
+  .vis-result-dialog { background: #1a2035; }
+  .vis-result-pre { background: rgba(255, 255, 255, 0.03); }
+}
+.vis-result-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
 }

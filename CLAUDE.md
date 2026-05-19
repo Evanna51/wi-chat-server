@@ -53,6 +53,16 @@ npm run test:clean:dry  # 仅预览不删
 - `scheduleNextPushPlan`（事件驱动 next_push）也已加 Jaccard dedup（与 long-term 对齐，阈值 0.55）
 - `markPlanSent` 同事务里会 upsert `character_state.last_proactive_at` —— 这是 `NEXT_PUSH_MIN_GAP_FROM_LAST_MS`（30min）和 `WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS`（1h）两道闸门生效的前提；改 `markPlanSent` 时别拆掉
 
+## 关联客户端
+
+Android 客户端位于 `../chatbox-android`（同级目录）。
+
+- hot path：`ChatSessionActivity.dispatchChatRequestWithRemoteContextIfEnabled()` → `POST /api/chat/context` → `ChatViewModel.doChatRequest(chatCtx)`
+- 降级链：`chat/context` 成功 → 存 `ChatContextCache`；失败 → 取 TTL 内缓存；无缓存 → boot cache（`character/context` slots 拼接）
+- `EffectivePromptStore`：进程内快照，记录每轮真实下发的 system prompt，供 `CharacterInfoActivity` 展示
+
+改 `chat/context` 响应 schema 时，同步检查 `sync/ChatDtos.kt` 的 `ChatContextResponse`。
+
 ## Git
 
 参见 `~/.claude/memory/feedback_git_rules.md`。重点：本地分支必须 tracking **同名** 远程分支，禁止 `git push origin HEAD:master`。

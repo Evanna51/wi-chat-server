@@ -5,6 +5,7 @@ const state = {
   stats: null,
 };
 
+
 function getApiKey() {
   try {
     return localStorage.getItem("apiKey") || DEFAULT_API_KEY;
@@ -2098,7 +2099,7 @@ function renderPromptPreview(parent, a, initialCtx) {
   const metricsBlock = el("p", { class: "muted small" }, "");
 
   function fillFromCtx(ctx) {
-    sysBlock.textContent = ctx.mergedSystem || "(无 mergedSystem 段)";
+    sysBlock.textContent = ctx.mergedSystem || "（请输入测试消息后点刷新，查看完整 system prompt）";
     userBlock.textContent = ctx.assistantPrefill || "(独白段为空 —— 当前角色无显著情绪/关系异常)";
     if (ctx.salientPhrase) {
       const sp = ctx.salientPhrase;
@@ -2112,19 +2113,25 @@ function renderPromptPreview(parent, a, initialCtx) {
     }
     const sysLen = (ctx.mergedSystem || "").length;
     const usrLen = (ctx.assistantPrefill || "").length;
-    metricsBlock.textContent = `mergedSystem ${sysLen} chars · assistantPrefill ${usrLen} chars · combined ${sysLen + usrLen}`;
+    metricsBlock.textContent = sysLen
+      ? `mergedSystem ${sysLen} chars · assistantPrefill ${usrLen} chars · combined ${sysLen + usrLen}`
+      : "";
   }
 
   fillFromCtx(initialCtx);
 
   debugBtn.addEventListener("click", async (ev) => {
     ev.preventDefault();
+    const userInput = debugInput.value.trim();
+    if (!userInput) {
+      showToast("请先输入一条测试消息", "warn");
+      return;
+    }
     debugBtn.setAttribute("aria-busy", "true");
     try {
-      const lastUserMessage = debugInput.value.trim() || undefined;
-      const newCtx = await api.post("/api/character/context", {
+      const newCtx = await api.post("/api/chat/context", {
         assistantId: a.assistantId,
-        lastUserMessage,
+        userInput,
       });
       fillFromCtx(newCtx);
     } catch (err) {
@@ -2313,12 +2320,38 @@ async function renderIntentTab(body, a) {
   body.appendChild(scoreArticle);
 }
 
+function showResultDialog(title, data) {
+  document.getElementById("vis-result-dialog")?.remove();
+  const dlg = document.createElement("dialog");
+  dlg.id = "vis-result-dialog";
+  dlg.className = "vis-result-dialog";
+
+  const closeBtn = el("button", { class: "vis-btn-sm" }, "关闭");
+  closeBtn.addEventListener("click", () => { dlg.close(); dlg.remove(); });
+
+  const pre = el("pre", { class: "vis-result-pre" }, JSON.stringify(data, null, 2));
+  dlg.appendChild(el("article", {}, [
+    el("header", { style: "display:flex; align-items:center; justify-content:space-between;" }, [
+      el("strong", {}, title),
+      closeBtn,
+    ]),
+    pre,
+  ]));
+
+  dlg.addEventListener("click", (ev) => { if (ev.target === dlg) { dlg.close(); dlg.remove(); } });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+}
+
 async function renderManageTab(body, a) {
   body.innerHTML = "";
 
   const isCharacterLike = isCharacterTypeLike(a.assistantType);
 
   if (isCharacterLike) {
+    const catchupBtn = el("button", { class: "vis-btn-sm" }, "立即补叙");
+    const proactiveBtn = el("button", { class: "vis-btn-sm" }, "立即消息");
+
     const togglesArticle = el("article", {}, [
       el("header", {}, [el("strong", {}, "自驱开关")]),
       el("p", { class: "muted" }, "切换后立即生效。控制本角色是否参与 lazy catchup 和 proactive plan 生成。"),
@@ -2330,8 +2363,9 @@ async function renderManageTab(body, a) {
             id: "tg-autolife",
             checked: a.allowAutoLife ? "checked" : false,
           }),
-          " 自驱生活记忆 (allow_auto_life)",
+          " 生活",
         ]),
+        catchupBtn,
       ]),
       el("div", { class: "switch-row" }, [
         el("label", {}, [
@@ -2341,8 +2375,9 @@ async function renderManageTab(body, a) {
             id: "tg-proactive",
             checked: a.allowProactiveMessage ? "checked" : false,
           }),
-          " 主动消息 (allow_proactive_message)",
+          " 主动消息",
         ]),
+        proactiveBtn,
       ]),
     ]);
     body.appendChild(togglesArticle);
@@ -2372,6 +2407,39 @@ async function renderManageTab(body, a) {
     tgPro.addEventListener("change", () =>
       patchFlags({ allowProactiveMessage: tgPro.checked })
     );
+
+    catchupBtn.addEventListener("click", async () => {
+      catchupBtn.setAttribute("aria-busy", "true");
+      try {
+        const resp = await api.post("/api/character/catchup", {
+          assistantId: a.assistantId,
+          lastInteractionAt: Date.now() - 6 * 3600 * 1000,
+          maxEvents: 5,
+        });
+        showResultDialog("补叙结果", resp);
+        showToast(`catchup 完成: generated=${resp.generated ?? 0}`, "ok");
+      } catch (err) {
+        showToast(`catchup 失败: ${err.message}`, "err");
+      } finally {
+        catchupBtn.removeAttribute("aria-busy");
+      }
+    });
+
+    proactiveBtn.addEventListener("click", async () => {
+      proactiveBtn.setAttribute("aria-busy", "true");
+      try {
+        const resp = await api.post("/api/proactive/regenerate-plans", {
+          assistantId: a.assistantId,
+          force: true,
+        });
+        showResultDialog("主动消息结果", resp);
+        showToast(`今日消息: generated=${resp.generated ?? 0}`, "ok");
+      } catch (err) {
+        showToast(`生成失败: ${err.message}`, "err");
+      } finally {
+        proactiveBtn.removeAttribute("aria-busy");
+      }
+    });
   } else {
     body.appendChild(
       el("article", { class: "muted" }, [
@@ -2385,40 +2453,52 @@ async function renderManageTab(body, a) {
     );
   }
 
-  const typeOptions = ["", "character", "writer", "default"];
-  const typeSelect = el(
-    "select",
-    { class: "vis-select", id: "edit-type" },
-    typeOptions.map((opt) =>
-      el(
-        "option",
-        {
-          value: opt,
-          ...(opt === (a.assistantType || "") ? { selected: "selected" } : {}),
-        },
-        opt === "" ? "（未指定）" : `${opt} — ${assistantTypeLabel(opt)}`
-      )
-    )
-  );
+  const typeCombo = makeCombo({
+    value: a.assistantType || "",
+    options: [
+      { value: "character", zh: "人物型陪伴角色" },
+      { value: "writer", zh: "写作助手" },
+      { value: "default", zh: "通用助手" },
+    ],
+    placeholder: "（未指定）",
+  });
+
+  const aiAnalyzeBtn = el("button", { class: "vis-btn-sm" }, "AI 分析");
+  aiAnalyzeBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    aiAnalyzeBtn.setAttribute("aria-busy", "true");
+    aiAnalyzeBtn.textContent = "分析中…";
+    try {
+      const result = await api.post("/api/character/extract", { assistantId: a.assistantId });
+      if (!result.ok) {
+        showToast(`提炼失败: ${result.error || "unknown"}`, "error");
+        return;
+      }
+      showExtractPreviewDialog(a, result, () => renderManageTab(body, a));
+    } catch (err) {
+      showToast(`请求失败: ${err.message}`, "error");
+    } finally {
+      aiAnalyzeBtn.removeAttribute("aria-busy");
+      aiAnalyzeBtn.textContent = "AI 分析";
+    }
+  });
 
   const profileForm = el("article", {}, [
     el("header", {}, [el("strong", {}, "Profile 编辑")]),
     el("label", {}, [
-      "characterName",
+      "角色名称",
       el("input", { id: "edit-name", value: a.characterName || "" }),
     ]),
-    el("label", {}, [
-      "characterBackground",
-      el("textarea", { id: "edit-bg", rows: "6" }, a.characterBackground || ""),
+    el("div", { class: "field-with-action" }, [
+      el("div", { class: "field-with-action__head" }, [
+        el("label", { for: "edit-bg" }, "初始设定"),
+        aiAnalyzeBtn,
+      ]),
+      el("textarea", { id: "edit-bg", rows: "6", style: "width:100%; margin:0;" }, a.characterBackground || ""),
     ]),
     el("label", {}, [
-      "assistantType",
-      typeSelect,
-      el(
-        "small",
-        { class: "muted" },
-        " 与 chatbox-Android `MyAssistant.type` 对齐；character 类型才显示自驱开关。"
-      ),
+      "类型",
+      el("div", { style: "margin-top: 0.3rem;" }, [typeCombo.root]),
     ]),
     el(
       "button",
@@ -2427,7 +2507,7 @@ async function renderManageTab(body, a) {
           ev.preventDefault();
           const name = document.getElementById("edit-name").value.trim();
           const bg = document.getElementById("edit-bg").value;
-          const newType = document.getElementById("edit-type").value;
+          const newType = typeCombo.getValue();
           try {
             const resp = await api.patch(
               `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/profile`,
@@ -2451,86 +2531,6 @@ async function renderManageTab(body, a) {
   ]);
   body.appendChild(profileForm);
 
-  const newOps = el("article", {}, [
-    el("header", {}, [el("strong", {}, "Catchup & Plans（推荐）")]),
-    el("p", { class: "muted" }, "lazy catchup 按需补叙生活记忆；force=true 模式立即合成一条今日消息（绕过 trigger 评估，2 分钟后派发）。"),
-    el("div", { class: "run-row" }, [
-      el("label", {}, [
-        "gap hours",
-        el("input", {
-          id: "catchup-gap-hours",
-          type: "number",
-          min: "1",
-          max: "240",
-          value: "6",
-          style: "width: 80px",
-        }),
-      ]),
-      el(
-        "button",
-        {
-          class: "outline",
-          onclick: async (ev) => {
-            ev.preventDefault();
-            const btn = ev.currentTarget;
-            const hours = Number(document.getElementById("catchup-gap-hours").value || "6");
-            const out = document.getElementById("ops-output");
-            out.textContent = "running…";
-            btn.setAttribute("aria-busy", "true");
-            try {
-              const now = Date.now();
-              const resp = await api.post("/api/character/catchup", {
-                assistantId: a.assistantId,
-                lastInteractionAt: now - hours * 3600 * 1000,
-                maxEvents: 5,
-              });
-              out.textContent = JSON.stringify(resp, null, 2);
-              showToast(`catchup 完成: generated=${resp.generated ?? 0}`, "ok");
-            } catch (err) {
-              out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
-              showToast(`catchup 失败: ${err.message}`, "err");
-            } finally {
-              btn.removeAttribute("aria-busy");
-            }
-          },
-        },
-        "立即补叙近期生活记忆"
-      ),
-    ]),
-    el("div", { class: "run-row" }, [
-      el(
-        "button",
-        {
-          class: "outline",
-          title: "force=true，绕过 trigger 评估，立即生成一条主动消息（2 分钟后派发）",
-          onclick: async (ev) => {
-            ev.preventDefault();
-            const btn = ev.currentTarget;
-            const out = document.getElementById("ops-output");
-            out.textContent = "running…";
-            btn.setAttribute("aria-busy", "true");
-            try {
-              const resp = await api.post("/api/proactive/regenerate-plans", {
-                assistantId: a.assistantId,
-                force: true,
-              });
-              out.textContent = JSON.stringify(resp, null, 2);
-              showToast(`今日消息: generated=${resp.generated ?? 0}`, "ok");
-            } catch (err) {
-              out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
-              showToast(`生成失败: ${err.message}`, "err");
-            } finally {
-              btn.removeAttribute("aria-busy");
-            }
-          },
-        },
-        "立即生成一条今日消息（强制）"
-      ),
-    ]),
-    el("h5", {}, "结果"),
-    el("pre", { id: "ops-output" }, "—"),
-  ]);
-  body.appendChild(newOps);
 }
 
 async function viewPlans() {

@@ -473,12 +473,12 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
   // 新结构：slots（V_NEW_LEAN 8 段 XML+JSON）+ assistantPrefill（独白片段）。
   assert(ctx.slots && typeof ctx.slots === "object", "slots present");
   assert(/<role>/.test(ctx.slots.role), "slots.role has <role> XML");
-  assert(/<character>/.test(ctx.slots.character), "slots.character has <character> XML");
-  assert(/<background>/.test(ctx.slots.background), "slots.background has <background> XML");
-  assert(/<constraints>/.test(ctx.slots.constraints), "slots.constraints has <constraints> XML");
-  assert(/<facts>/.test(ctx.slots.facts), "slots.facts has <facts> XML");
-  assert(/<narrative>/.test(ctx.slots.narrative), "slots.narrative has <narrative> XML");
-  assert(/<tool_protocol>/.test(ctx.slots.tool_protocol), "slots.tool_protocol has <tool_protocol> XML");
+  // 填充内容的 slot 检查其 XML tag；slot 为空时跳过（详细验证在 Suite 10）
+  if (ctx.slots.background) assert(/<background>/.test(ctx.slots.background), "slots.background has <background> XML");
+  if (ctx.slots.constraints) assert(/<constraints>/.test(ctx.slots.constraints), "slots.constraints has <constraints> XML");
+  if (ctx.slots.facts) assert(/<facts>/.test(ctx.slots.facts), "slots.facts has <facts> XML");
+  if (ctx.slots.narrative) assert(/<narrative>/.test(ctx.slots.narrative), "slots.narrative has <narrative> XML");
+  if (ctx.slots.tool_protocol) assert(/<tool_protocol>/.test(ctx.slots.tool_protocol), "slots.tool_protocol has <tool_protocol> XML");
   // 默认无 pronouns 配置 → fallback "they/them"；voice 内容现在合并在 <role> slot 里
   assert(/Speak as them, not about them/.test(ctx.slots.role), "default pronouns → 'them' in role slot voice anchor");
 
@@ -491,12 +491,13 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
   assert(ctx.promptFragment === undefined, "promptFragment field removed (Phase 2 cleanup)");
   assert(ctx.identity.characterBackground === undefined, "identity.characterBackground removed (dedup)");
 
-  // mergedSystem 是 server 端为方便调试拼好的完整 system（不含 <client> slot — 那是客户端职责）
-  assert(typeof ctx.mergedSystem === "string" && ctx.mergedSystem.length > 0, "mergedSystem present");
-  assert(ctx.mergedSystem.startsWith(ctx.slots.role), "mergedSystem starts with role slot");
+  // slots 各段存在（mergedSystem 已从 character/context 移除，客户端自己拼接）
+  assert(typeof ctx.slots?.role === "string" && ctx.slots.role.length > 0, "slots.role present");
+  assert(ctx.mergedSystem === undefined, "mergedSystem removed from character/context response");
 
   // 删除的段：socialMode prompt 段在 V_NEW_LEAN 里也不存在
-  assert(!/\[当前社交姿态\]/.test(ctx.mergedSystem), "socialMode prompt section absent");
+  const allSlots = Object.values(ctx.slots || {}).join("\n");
+  assert(!/\[当前社交姿态\]/.test(allSlots), "socialMode prompt section absent");
 
   // salient phrase 默认未传 lastUserMessage 时为 null
   assert(ctx.salientPhrase === null, "salientPhrase null without lastUserMessage");
@@ -537,10 +538,9 @@ console.log("\n[Suite 8] characterContextBuilder end-to-end");
     careLanguages: { give: ["quality_time"], receive: ["verbal_affirmation"] },
   });
   const ctxLong = buildCharacterContext(aidLong);
-  // V_NEW_LEAN: 检查 mergedSystem（server 拼好的完整 system，与旧 promptFragment 等价）budget
-  assert(ctxLong.mergedSystem.length > 0, "long bg: mergedSystem rendered");
-  // 重要：段级丢弃不切中文字符；不应该有"..."拼在汉字一半
-  assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.mergedSystem), "truncation does not splice mid-CJK");
+  // V_NEW_LEAN: background slot 有内容，且 truncation 不切中文字符
+  assert((ctxLong.slots?.background || "").length > 0, "long bg: background slot rendered");
+  assert(!/[一-龥]\.\.\.[一-龥]/.test(ctxLong.slots?.background || ""), "truncation does not splice mid-CJK");
 
   // Phase 1 review fix: onUserMessage 在无 assistant_profile 时跳过 dynamics（不抛错）
   const aidNoProfile = makeAid("no_profile");
@@ -710,8 +710,8 @@ console.log("\n[Suite 10] V_NEW_LEAN slots + assistantPrefill rendering");
   assert(ctxWithSalient.salientPhrase !== null, "lastUserMessage triggers salient detection");
   assert(ctxWithSalient.salientPhrase.triggerSource === "fear_of_losing_face", "East Asian wound triggers correctly");
   assert(/丢人现眼|丢人/.test(ctxWithSalient.assistantPrefill), "salient phrase appears in assistantPrefill");
-  // mergedSystem 是 server 拼好的完整 system（不含 <client> slot — 客户端职责）
-  assert(typeof ctxWithSalient.mergedSystem === "string" && ctxWithSalient.mergedSystem.length > 0, "mergedSystem is composed");
+  // slots 渲染正常（mergedSystem 由客户端自行拼接）
+  assert(typeof ctxWithSalient.slots?.role === "string" && ctxWithSalient.slots.role.length > 0, "slots composed");
 
   // 长 character_background：composeForChat 内部 background slot 自带 truncation
   const aidLong = makeAid("c_split_long");

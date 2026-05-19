@@ -297,6 +297,7 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       // ⭐ 主输出 — 直接当 system prompt 喂 LLM。99% 的客户端只用这个字段就够。
       mergedSystem: composed.mergedSystem,
       assistantPrefill: composed.assistantPrefill,
+      salientPhrase: ctx.salientPhrase || null,
 
       // router 决策结果：本轮要拼哪些 slot（按 canonical 顺序）。
       // 例 ["role", "style", "voice_skills", "constraints", "attention_1h", "avoid"]

@@ -302,12 +302,12 @@ console.log("\n[Suite 5] characterContextBuilder narrative + topics injection");
   assert(/左手协调/.test(ctx.assistantPrefill || ""), "unresolved thread content surfaced in assistantPrefill");
   assert(!/钢琴学习/.test(ctx.assistantPrefill || ""), "growing topic NOT in assistantPrefill (only unresolved+stale)");
 
-  // 低重要性 episode 不在 payload + 不在 prompt
+  // 低重要性 episode 不在 payload + 不在 narrative slot
   assert(!ctx.recentEpisodes.some((e) => e.title === "琐事"), "low-importance episode filtered from payload");
-  assert(!/琐事/.test(ctx.mergedSystem), "low-importance episode not in mergedSystem");
-  // dormant topic 不在 active 列表
+  assert(!/琐事/.test(ctx.slots?.narrative || ""), "low-importance episode not in narrative slot");
+  // dormant topic 不在 active 列表 + 不在 narrative slot
   assert(!ctx.activeTopics.some((t) => t.topic === "曾经的事"), "dormant topic filtered from activeTopics");
-  assert(!/曾经的事/.test(ctx.mergedSystem), "dormant topic not in mergedSystem");
+  assert(!/曾经的事/.test(ctx.slots?.narrative || ""), "dormant topic not in narrative slot");
 }
 
 // ── Suite 6: memoryRetrievalService episode-aware ────────────────

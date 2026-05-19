@@ -197,12 +197,19 @@ function startOfDayMs(now) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
 }
 
+// 0..maxMs 的随机毫秒（整均匀分布）
+function jitterMs(maxMs) {
+  return Math.floor(Math.random() * (maxMs + 1));
+}
+
 function nextQuietEndHourMs(now) {
-  // Push to next non-quiet integer hour.
+  // 推到下一个非静默整点，再加 0~20 min jitter，避免所有消息堆在整点。
   for (let i = 0; i < 24; i += 1) {
     const candidate = new Date(now + i * 60 * 60 * 1000);
     candidate.setMinutes(0, 0, 0);
-    if (!isInQuietHours(candidate, QUIET_HOURS)) return candidate.getTime();
+    if (!isInQuietHours(candidate, QUIET_HOURS)) {
+      return candidate.getTime() + jitterMs(20 * 60 * 1000);
+    }
   }
   return now;
 }
@@ -235,7 +242,8 @@ function evaluateDailyGreeting({ assistantId, now, profile }) {
   const elapsed = now - startOfDay;
   let scheduledAt;
   if (elapsed < 9 * 60 * 60 * 1000) {
-    scheduledAt = startOfDay + 9 * 60 * 60 * 1000; // today 09:00
+    // 09:00 ± 20 min，避免所有角色同一时刻问候
+    scheduledAt = startOfDay + 9 * 60 * 60 * 1000 + jitterMs(20 * 60 * 1000);
   } else {
     return null;
   }
