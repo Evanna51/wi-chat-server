@@ -22,6 +22,7 @@
 const { v7: uuidv7 } = require("uuid");
 const { getProvider } = require("../../llm");
 const { db, getRecentMemoryItems, getAssistantProfile } = require("../../db");
+const { renderBackgroundForIntrospection } = require("./promptComposer");
 const {
   listAllTopics,
   recordMention,
@@ -123,7 +124,7 @@ function buildPrompt({ characterBackground, memories, knownTopics }) {
     `所有输出里用"你"指代角色、用"ta"指代用户，不要写具体名字。`,
     "",
     "── 角色档案 ──",
-    clipText(characterBackground || "无", 400),
+    renderBackgroundForIntrospection(characterBackground, 400),
     "",
     "── 已知长期话题（识别 mention 用） ──",
     topicLines,
@@ -256,7 +257,13 @@ async function buildEpisodesFor(assistantId, { now = Date.now(), source = "cron"
 
   let parsed;
   try {
-    parsed = await callLlmForEpisodes(prompt);
+    parsed = await callLlmForEpisodes(prompt, {
+      callOpts: {
+        kind: "episode_build",
+        scopeKey: assistantId,
+        summary: `episodes for ${assistantId} (${memories.length} memories)`,
+      },
+    });
   } catch (err) {
     console.warn(`[episodeBuilder] LLM call failed for ${assistantId}: ${err.message}`);
     return { skipped: true, reason: "llm_error", error: err.message, memoriesScanned: memories.length };

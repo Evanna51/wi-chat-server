@@ -162,7 +162,7 @@ function recentTrustDelta(assistantId, windowMs, now) {
  *
  * 没有数据时返回 { intent: 'none', ... }，调用方决定是否真的发。
  */
-function evaluate(assistantId, { now = Date.now() } = {}) {
+function evaluate(assistantId, { now = Date.now(), attention1h = null } = {}) {
   const characterState = readCharacterState(assistantId);
   if (!characterState) return null;
 
@@ -331,12 +331,69 @@ function evaluate(assistantId, { now = Date.now() } = {}) {
     );
   }
 
-  // 13. quiet hours / 极短 silence → none（即使有信号也最好不发）
-  if (silenceHours < 0.5) {
-    // 用户半小时内刚发过 → 别打扰
+  // —— attention 1h 增强（2026-05-10 加入）——
+  // 当 caller 传了 attention1h（chat path 已 await 过；proactive path 自己 await）
+  // 用 LLM 提炼的"现场感"补强启发式判断。这一段不会反转已经命中的高优先级 intent，
+  // 但会在原本只有低优先级（life_check_in/none）时引入新候选，或把模糊信号说清楚。
+  if (attention1h) {
+    const focus = (attention1h.innerFocus || "").toString();
+    const tone = attention1h.emotionalTone;
+    const topicsArr = Array.isArray(attention1h.topics) ? attention1h.topics : [];
+
+    // a) attention.innerFocus 含 abandonment 模式 → 强化 reassure_abandonment_fear
+    if (/(被?(抛弃|离开|远去|消失|不在了|不要)|怕(失去|走|丢))/.test(focus)) {
+      consider("reassure_abandonment_fear",
+        { attentionFocus: focus.slice(0, 60) },
+        `你内里的焦点："${focus.slice(0, 50)}"——里面有"被抛弃"的隐忧。`
+      );
+    }
+
+    // b) attention.innerFocus 含 vulnerable / unfinished 模式 → reciprocate / inquisitive
+    if (/(脆弱|袒露|崩溃|哭|说不出口|没说完)/.test(focus)) {
+      consider("inquisitive_followup",
+        { attentionFocus: focus.slice(0, 60) },
+        `从最近 1 小时看出 ta 还没把话说完。你想接着追问。`
+      );
+    }
+
+    // c) attention.topics 含 "未解决/挂着/没说开" → follow_up_unresolved_topic
+    for (const t of topicsArr) {
+      if (/(未解决|没说开|挂着|搁着|未化解|没说完)/.test(t)) {
+        consider("follow_up_unresolved_topic",
+          { attentionTopic: t },
+          `1 小时焦点提到"${t}"——这是悬着的点。`
+        );
+        break;
+      }
+    }
+
+    // d) tone=tense / heavy + 沉默期≥4h → reassure_after_conflict（弱信号补强）
+    if ((tone === "tense" || tone === "heavy") && silenceHours >= 4) {
+      consider("reassure_after_conflict",
+        { tone, silenceHours: Math.round(silenceHours) },
+        `1 小时基调是 ${tone}，已沉默 ${Math.round(silenceHours)}h——可能要主动安抚。`
+      );
+    }
+
+    // e) tone=intimate / reconnecting + closeness 高 → reciprocate_vulnerable_share（即使 dynamics 没记录）
+    if (
+      (tone === "intimate" || tone === "reconnecting") &&
+      (dynamics?.emotional_closeness ?? 0) > 0.5 &&
+      !dynamics?.last_vulnerable_share_at
+    ) {
+      consider("reciprocate_vulnerable_share",
+        { tone, attentionFocus: focus.slice(0, 60) },
+        `1 小时 tone=${tone}，closeness 高——这次的亲密往来值得回应。`
+      );
+    }
+  }
+
+  // 13. 极短 silence → none（即使有信号也最好不发）
+  // 2026-05-10: 0.5h → 1h（30 分钟太严，把刚开始的对话也卡住）
+  if (silenceHours < 1) {
     topIntent = "none";
     topDriver = { silenceHours };
-    topContentHint = "用户刚说过话，不要主动插一条。";
+    topContentHint = "用户 1 小时内刚说过话，让 ta 喘口气。";
   }
 
   const def = INTENT_DEFINITIONS[topIntent];

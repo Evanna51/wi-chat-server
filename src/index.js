@@ -8,6 +8,7 @@ const apiRouter = require("./routes/api");
 const adminRouter = require("./routes/admin");
 const browseRouter = require("./routes/browse");
 const syncRouter = require("./routes/sync");
+const chatRouter = require("./routes/chat");
 const { startScheduler } = require("./scheduler");
 const { startMemoryIndexer } = require("./workers/memoryIndexer");
 const { attachWebSocketServer } = require("./ws/server");
@@ -34,6 +35,9 @@ if (config.debugHttpLog) {
 
 app.use("/api/sync", syncRouter);
 app.use("/api", apiRouter);
+// chat router 必须在 apiRouter 之后挂 —— 它的 GET /character/:id 是 catch-all，
+// 让具体路径（/character/identity / /character/episodes 等）先在 apiRouter 命中。
+app.use("/api", chatRouter);
 app.use("/api/browse", browseRouter);
 app.use("/admin", adminRouter);
 app.use(express.static(path.join(__dirname, "..", "public")));

@@ -2,6 +2,7 @@ const { v7: uuidv7 } = require("uuid");
 const config = require("../config");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+const { renderBackgroundForIntrospection } = require("./character/promptComposer");
 // T-CC-08: identity + dynamics 注入
 const {
   getCharacterIdentity,
@@ -13,6 +14,8 @@ const {
   evaluate: evaluateBehaviorIntent,
   buildIntentPromptFragment,
 } = require("./character/behaviorPlanner");
+// 2026-05-10: 让 intent 启发式可读 1h 现场感
+const { buildAttention1h } = require("./character/attentionWindow");
 const {
   db,
   getAssistantProfile,
@@ -77,7 +80,7 @@ function parseStrictJsonObject(text = "") {
   return parsed;
 }
 
-async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600 } = {}) {
+async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600, assistantId } = {}) {
   const { content } = await getProvider().complete({
     messages: [
       { role: "system", content: "你是角色主动消息生成器。以角色身份写一条自然的主动消息。输出严格 JSON，不要 markdown 代码块。" },
@@ -86,6 +89,11 @@ async function callLlmForPlanDraft(prompt, { temperature = 0.75, maxTokens = 600
     temperature,
     maxTokens,
     responseFormat: "json",
+    callOpts: {
+      kind: "proactive_plan",
+      scopeKey: assistantId || null,
+      summary: `proactive ${(prompt || "").slice(0, 30)}`,
+    },
   });
   return parseStrictJsonObject(content);
 }
@@ -146,7 +154,7 @@ function buildPlanPrompt({
     `触发：${triggerReason} — ${triggerExplanation}`,
     "",
     "角色档案：",
-    clipText(characterBackground || "无", 800),
+    renderBackgroundForIntrospection(characterBackground, 800),
     "",
     "最近 6 条对话：",
     turnLines || "- 无",
@@ -189,12 +197,19 @@ function startOfDayMs(now) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
 }
 
+// 0..maxMs 的随机毫秒（整均匀分布）
+function jitterMs(maxMs) {
+  return Math.floor(Math.random() * (maxMs + 1));
+}
+
 function nextQuietEndHourMs(now) {
-  // Push to next non-quiet integer hour.
+  // 推到下一个非静默整点，再加 0~20 min jitter，避免所有消息堆在整点。
   for (let i = 0; i < 24; i += 1) {
     const candidate = new Date(now + i * 60 * 60 * 1000);
     candidate.setMinutes(0, 0, 0);
-    if (!isInQuietHours(candidate, QUIET_HOURS)) return candidate.getTime();
+    if (!isInQuietHours(candidate, QUIET_HOURS)) {
+      return candidate.getTime() + jitterMs(20 * 60 * 1000);
+    }
   }
   return now;
 }
@@ -227,7 +242,8 @@ function evaluateDailyGreeting({ assistantId, now, profile }) {
   const elapsed = now - startOfDay;
   let scheduledAt;
   if (elapsed < 9 * 60 * 60 * 1000) {
-    scheduledAt = startOfDay + 9 * 60 * 60 * 1000; // today 09:00
+    // 09:00 ± 20 min，避免所有角色同一时刻问候
+    scheduledAt = startOfDay + 9 * 60 * 60 * 1000 + jitterMs(20 * 60 * 1000);
   } else {
     return null;
   }
@@ -379,15 +395,47 @@ function findPlanById(id) {
   return db.prepare("SELECT * FROM proactive_plans WHERE id = ?").get(id);
 }
 
+/**
+ * 标记 plan 已派发，并把 character_state.last_proactive_at 推到 now —— 让
+ * scheduleNextPushPlan / runProactiveWatchdogOnce 里那俩 gap 闸门
+ * （NEXT_PUSH_MIN_GAP_FROM_LAST_MS / WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS）真正生效。
+ *
+ * 之前 last_proactive_at 字段没人写，闸门永远 falsy → option A 自递归循环没人拦
+ * → 每 30~40min 重复推同一条 LLM 输出。
+ *
+ * 把两步包进 SQLite 事务：plan 没 marked sent（已 sent / cancelled）就不动 state。
+ */
 function markPlanSent(planId, now = Date.now()) {
-  const result = db
-    .prepare(
-      `UPDATE proactive_plans
-       SET status = 'sent', sent_at = ?, updated_at = ?
-       WHERE id = ? AND status = 'pending'`
-    )
-    .run(now, now, planId);
-  return result.changes || 0;
+  const tx = db.transaction(() => {
+    const result = db
+      .prepare(
+        `UPDATE proactive_plans
+         SET status = 'sent', sent_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`
+      )
+      .run(now, now, planId);
+    if (result.changes && result.changes > 0) {
+      // 取 assistant_id 顺手 upsert character_state.last_proactive_at
+      const row = db
+        .prepare("SELECT assistant_id FROM proactive_plans WHERE id = ?")
+        .get(planId);
+      if (row?.assistant_id) {
+        // 不强行 require characterStateService（避免循环依赖）；直接 SQL upsert。
+        // character_state 表至少有 (assistant_id PK, last_proactive_at, updated_at,
+        // created_at)，由 ensureDefaultState 初始化。如果还没初始化（理论上派 plan
+        // 前已经 onUserMessage 过），fall back 用 INSERT OR IGNORE 兜一道。
+        db.prepare(
+          `INSERT INTO character_state (assistant_id, last_proactive_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(assistant_id) DO UPDATE SET
+             last_proactive_at = excluded.last_proactive_at,
+             updated_at = excluded.updated_at`
+        ).run(row.assistant_id, now, now, now);
+      }
+    }
+    return result.changes || 0;
+  });
+  return tx();
 }
 
 function cancelPlanById(planId, reason = "manual") {
@@ -509,7 +557,7 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
       });
       let raw;
       try {
-        raw = await callLlmForPlanDraft(prompt, { temperature: params.temperature });
+        raw = await callLlmForPlanDraft(prompt, { temperature: params.temperature, assistantId });
       } catch (error) {
         lastErr = error;
         continue;
@@ -719,6 +767,24 @@ function cancelExistingNextPushPlans(assistantId, reason = "replaced_by_new_turn
     .run(reason, now, assistantId, NEXT_PUSH_TRIGGER_REASON).changes || 0;
 }
 
+// ── 时间段分桶（基于 24h 制本地小时数）──
+function _timeBucket(hour) {
+  if (hour >= 0 && hour < 6) return "深夜（0-6 点）";
+  if (hour >= 6 && hour < 9) return "早晨（6-9 点 — 适合发早安）";
+  if (hour >= 9 && hour < 12) return "上午";
+  if (hour >= 12 && hour < 14) return "中午（12-14 点 — 适合关心吃饭）";
+  if (hour >= 14 && hour < 18) return "下午";
+  if (hour >= 18 && hour < 21) return "傍晚（18-21 点 — 适合关心晚餐 / 一天总结）";
+  if (hour >= 21 && hour < 24) return "晚上（21-24 点 — 适合睡前问候）";
+  return "未知";
+}
+function _weekdayLabel(date) {
+  const d = date.getDay(); // 0=Sun..6=Sat
+  const isWeekend = d === 0 || d === 6;
+  const map = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  return `${map[d]}（${isWeekend ? "周末" : "工作日"}）`;
+}
+
 function buildNextPushPrompt({
   characterBackground,
   recentTurns,
@@ -733,6 +799,7 @@ function buildNextPushPrompt({
   intentFragment,
   nowIso,
   hoursSinceLastUserReply,
+  nowDate, // 新增：本地 Date 对象，用来抽时间段
 }) {
   const turnLines = recentTurns
     .slice(0, 6)
@@ -759,6 +826,12 @@ function buildNextPushPrompt({
     `你是这个角色。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
     `输出里用"你"自指、用"ta"指代用户，不要写具体名字。`,
     "",
+    "**事实边界（强制遵守）**：",
+    "- 只有【关键 facts】和【用户事实】两段里出现过的事实，你才能在消息里以『已知』语气提及（『你爱吃 X』『你做 Y 工作』『你住 Z』等用户偏好/属性）",
+    "- 【你最近的生活/心境】是你的内心独白和行为日志 —— 里面『我做了 X』是你的行为可以引用；但里面如果出现『你爱 X / 你喜欢 X / 你习惯 X』这种**对用户的预设**，那只是你脑里的假设，**不是已确认的事实**，主动消息里不要把它当事实重复给 ta",
+    "- 不确定时用试探语气（『是不是』『还记得吗』），不要用断言（『你爱的』『你最喜欢的』）",
+    "- 反例：life event 写『我买了你爱吃的黑巧克力』——不要在主动消息里说『我买了你爱吃的黑巧克力』，可以说『我买了点黑巧克力』或『超市看到黑巧克力，想起你』",
+    "",
     // T-CC-08 注入：identity → state → dynamics
     ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
@@ -766,7 +839,7 @@ function buildNextPushPrompt({
     // T-CC4-02 注入：本次主动消息的意图（behaviorPlanner 决策）
     ...(intentFragment ? [intentFragment, ""] : []),
     "角色档案：",
-    clipText(characterBackground || "无", 600),
+    renderBackgroundForIntrospection(characterBackground, 600),
     "",
     "关键 facts：",
     coreFactLines || "- 无",
@@ -786,6 +859,16 @@ function buildNextPushPrompt({
     myMsgLines || "- 无",
     "",
     `当前时间：${nowIso}（距用户上次回复约 ${hoursSinceLastUserReply.toFixed(1)} 小时）`,
+    nowDate ? `时间段：${_timeBucket(nowDate.getHours())}，${_weekdayLabel(nowDate)}` : "",
+    "",
+    "时间敏感判断（按角色 + 关系亲密度调整，仅当符合时才参考）：",
+    "- 早晨 6-9 点 + 关系密切（intimacyLevel ≥ 3）→ 倾向发早安/天气/早餐关心，不要 skip",
+    "- 中午 12-14 / 傍晚 18-21 + 之前聊过吃饭 → 可以发吃没吃饭",
+    "- 晚上 21-24 + 之前聊过失眠 / 工作累 → 倾向轻问候 / 睡前关心",
+    "- 深夜 0-6：除非角色或 ta 明确是夜猫子，否则保守 skip（让 ta 睡）",
+    "- 周末早晨：可以更松弛、生活化（『周末了 / 睡晚一点』）",
+    "- 工作日早晨：可以鼓励性的简短一句",
+    "- 已经超过 4h 没主动发 + 时段合适 → 即使没强信号也可以发『我在』或简短问候",
     "",
     `delayMs ∈ [${NEXT_PUSH_MIN_DELAY_MS}, 72h]，要不发则 skip=true 配 skipReason（任意理由）。`,
     "频率完全自由，按角色 + 当下情境自己定。亲密关系想几分钟一条就几分钟一条，想隔半天就隔半天；普通关系自然拉长；不需要任何\"标准节奏\"。",
@@ -899,8 +982,15 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       try { return buildRelationshipFragment(assistantId); } catch { return ""; }
     })();
     // T-CC4-02: behaviorPlanner 决策本次推送意图。intent='none' 时早 return，不发。
+    // 2026-05-10: 加 attention_1h 入参 — 让启发式判断能用上 LLM 提炼的"现场感"。
+    let attention1h = null;
+    try {
+      attention1h = await buildAttention1h(assistantId, { now });
+    } catch (err) {
+      console.warn(`[proactive] attention_1h failed: ${err.message}`);
+    }
     const intentResult = (() => {
-      try { return evaluateBehaviorIntent(assistantId, { now }); } catch (err) {
+      try { return evaluateBehaviorIntent(assistantId, { now, attention1h }); } catch (err) {
         console.warn(`[proactive] intent eval failed: ${err.message}`);
         return null;
       }
@@ -924,12 +1014,13 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       intentFragment,
       // 显式给 LLM 看本地时间（上海时间），不用 toISOString —— 那是 UTC，LLM 会按字面值解读，时间错位 8h
       nowIso: formatLocalTs(now),
+      nowDate: new Date(now), // 用来在 prompt 里渲染时间段 / 工作日
       hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });
 
     let raw;
     try {
-      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800 });
+      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800, assistantId });
     } catch (e) {
       return { ok: false, skipped: "llm_unreachable", error: e.message };
     }
@@ -953,6 +1044,46 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
 
     if (!draft.body || draft.body.length < 2) {
       return { ok: false, skipped: "empty_body" };
+    }
+
+    // Jaccard dedup —— 与 generatePlanForAssistant 对齐。低温 + 同上下文下 LLM 会
+    // 反复吐同一句话，没拦截就 30min 一条循环推送给用户。> 0.55 视为雷同直接 skip。
+    // 语料取最近 6 条 sent / pending 的 next_push body（同一 assistant）。
+    try {
+      const corpusRows = db
+        .prepare(
+          `SELECT draft_body FROM proactive_plans
+            WHERE assistant_id = ?
+              AND trigger_reason = ?
+              AND status IN ('sent', 'pending')
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 6`
+        )
+        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 24 * 60 * 60 * 1000);
+      const corpus = corpusRows.map((r) => r.draft_body || "").filter(Boolean);
+      const score = maxJaccardAgainst(draft.body, corpus);
+      if (score > 0.55) {
+        insertBehaviorJournalEntry({
+          runType: "next_push_schedule",
+          assistantId,
+          sessionId: profile.last_session_id || null,
+          shouldPushMessage: false,
+          status: "skipped",
+          reason: "duplicate_against_recent_drafts",
+          input: { sinceLastUserMs, jaccardScore: Number(score.toFixed(2)) },
+          result: { draftBody: clipText(draft.body, 120) },
+          createdAt: now,
+        });
+        return {
+          ok: true,
+          skipped: "duplicate_against_recent_drafts",
+          jaccardScore: Number(score.toFixed(2)),
+        };
+      }
+    } catch (e) {
+      // dedup 失败不阻塞主流程（最多就是退化到没有 dedup，由 30min gap 闸门兜底）
+      console.warn(`[proactive] next_push jaccard dedup failed: ${e.message}`);
     }
 
     const scheduledAt = now + draft.delayMs;
@@ -995,6 +1126,104 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
   }
 }
 
+// ─────────────────────────── Proactive Watchdog ─────────────────────────
+//
+// 2026-05-10: 解决"AI 一次 ai_chose_skip → 整个 next_push 链断了"死链问题。
+// 之前只有用户发消息或 plan 派发后才 schedule —— 如果 AI 说 skip 后用户也没动作，
+// 就再也不会有触发点。watchdog 周期性扫所有 active assistant，超过阈值就重新调
+// scheduleNextPushPlan 给 AI 重新判断的机会（AI 可能因为 attention/intent 变化而改变决定）。
+//
+// 触发条件（通用）：
+//   - profile.allow_proactive_message=1
+//   - 离上次用户消息 30min ~ 72h（30min 内别打扰，72h 外让 long-term trigger 接管）
+//   - 离上次主动消息 ≥ 1h（用户说的"超过 1 小时就问一下"）
+//
+// 触发条件（life event 加速）：
+//   - 最近 1h 内有 life_event / work_event 写入（可能是用户刚分享了重要事件）
+//   - 此时 sinceLastProactive 阈值放宽到 30min（更积极反应）
+
+const WATCHDOG_INTERVAL_MS = 30 * 60 * 1000;          // cron 30 min
+const WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS = 60 * 60 * 1000;  // 默认 1h
+const WATCHDOG_LIFE_EVENT_FAST_GAP_MS = 30 * 60 * 1000;     // 有新 life event 时 30min
+const WATCHDOG_LIFE_EVENT_FRESHNESS_MS = 60 * 60 * 1000;    // life event 1h 内算"新鲜"
+const WATCHDOG_MIN_GAP_FROM_USER_MS = 30 * 60 * 1000;       // 离用户消息 < 30min 别打扰
+
+function _hasFreshLifeEvent(assistantId, now) {
+  try {
+    const events = getRecentMemoryItems({
+      assistantId,
+      memoryTypes: ["life_event", "work_event"],
+      limit: 3,
+    });
+    return events.some((e) => {
+      const ts = e.created_at || e.createdAt || 0;
+      return ts && now - ts < WATCHDOG_LIFE_EVENT_FRESHNESS_MS;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 跑一次 watchdog 扫描。返回 { scanned, triggered, skipped: {...}, results: [...] }。
+ * 内部调用 scheduleNextPushPlan，scheduleNextPushPlan 自己会做 LLM 决策（也可能再 skip）。
+ *
+ * 暴露给 scheduler 跑 cron，也可独立 invoke 做 debug。
+ */
+async function runProactiveWatchdogOnce({ now = Date.now() } = {}) {
+  const profiles = db
+    .prepare("SELECT assistant_id FROM assistant_profile WHERE allow_proactive_message = 1")
+    .all();
+
+  const summary = {
+    scanned: 0,
+    triggered: 0,
+    skipped: {},
+    results: [],
+  };
+  const incSkip = (k) => { summary.skipped[k] = (summary.skipped[k] || 0) + 1; };
+
+  for (const { assistant_id: assistantId } of profiles) {
+    summary.scanned++;
+
+    const lastUserAt = getLastUserMessageAt(assistantId);
+    if (!lastUserAt) { incSkip("no_user_history"); continue; }
+
+    const sinceLastUser = now - lastUserAt;
+    if (sinceLastUser > NEXT_PUSH_FRESHNESS_WINDOW_MS) { incSkip("past_72h"); continue; }
+    if (sinceLastUser < WATCHDOG_MIN_GAP_FROM_USER_MS) { incSkip("user_too_recent"); continue; }
+
+    const lastProactiveAt = getLastProactiveAt(assistantId);
+    const sinceLastProactive = lastProactiveAt ? now - lastProactiveAt : Infinity;
+
+    const hasLifeEvent = _hasFreshLifeEvent(assistantId, now);
+    const minGap = hasLifeEvent ? WATCHDOG_LIFE_EVENT_FAST_GAP_MS : WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS;
+
+    if (sinceLastProactive < minGap) {
+      incSkip(hasLifeEvent ? "fast_gap_not_yet" : "min_gap_not_yet");
+      continue;
+    }
+
+    // 调 scheduleNextPushPlan — 它内部还会做更多 gate（24h cap / intent='none' / LLM skip）
+    try {
+      const result = await scheduleNextPushPlan({ assistantId, now });
+      summary.triggered++;
+      summary.results.push({
+        assistantId,
+        triggeredBy: hasLifeEvent ? "life_event" : "regular",
+        sinceLastProactive: Number.isFinite(sinceLastProactive)
+          ? Math.round(sinceLastProactive / (60 * 1000)) + "min"
+          : "never",
+        ...result,
+      });
+    } catch (e) {
+      summary.results.push({ assistantId, error: e.message });
+    }
+  }
+
+  return summary;
+}
+
 module.exports = {
   generatePlans,
   cancelPendingPlansForAssistant,
@@ -1007,6 +1236,8 @@ module.exports = {
   fetchDuePendingPlans,
   scheduleNextPushPlan,
   cancelExistingNextPushPlans,
+  runProactiveWatchdogOnce,
   NEXT_PUSH_TRIGGER_REASON,
   NEXT_PUSH_FRESHNESS_WINDOW_MS,
+  WATCHDOG_INTERVAL_MS,
 };

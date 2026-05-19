@@ -1,5 +1,5 @@
 const config = require("../config");
-const { fetchWithTimeout } = require("../utils/fetchWithTimeout");
+const { registeredFetch } = require("../utils/registeredFetch");
 const { ILLMProvider } = require("./ILLMProvider");
 const { recordProviderCall } = require("./callLogger");
 
@@ -29,7 +29,7 @@ class QwenProvider extends ILLMProvider {
     return (config.embedBaseUrl || "").replace(/\/$/, "");
   }
 
-  async complete({ messages, temperature, maxTokens, responseFormat } = {}) {
+  async complete({ messages, temperature, maxTokens, responseFormat, callOpts } = {}) {
     const endpoint = `${this._baseUrl}/chat/completions`;
     const effectiveTemp = responseFormat === "json" ? 0 : (temperature ?? config.qwenTemperature);
     const effectiveMax = maxTokens ?? config.qwenMaxTokens;
@@ -42,7 +42,7 @@ class QwenProvider extends ILLMProvider {
     };
 
     const startMs = Date.now();
-    const res = await fetchWithTimeout(
+    const res = await registeredFetch(
       endpoint,
       {
         method: "POST",
@@ -52,7 +52,13 @@ class QwenProvider extends ILLMProvider {
         },
         body: JSON.stringify(body),
       },
-      CHAT_TIMEOUT_MS
+      {
+        timeoutMs: CHAT_TIMEOUT_MS,
+        kind: callOpts?.kind || "llm.complete",
+        scopeKey: callOpts?.scopeKey ?? null,
+        summary: callOpts?.summary || `qwen.complete msgs=${messages?.length ?? 0}`,
+        supersede: callOpts?.supersede,
+      }
     );
 
     if (!res.ok) {
@@ -78,14 +84,14 @@ class QwenProvider extends ILLMProvider {
     return { content, inputTokens, outputTokens, model: config.qwenModel };
   }
 
-  async embed(text) {
+  async embed(text, callOpts) {
     if (!this._embedBaseUrl) {
       return deterministicEmbedding(text || "");
     }
     const endpoint = `${this._embedBaseUrl}/embeddings`;
     const startMs = Date.now();
     try {
-      const res = await fetchWithTimeout(
+      const res = await registeredFetch(
         endpoint,
         {
           method: "POST",
@@ -95,7 +101,13 @@ class QwenProvider extends ILLMProvider {
           },
           body: JSON.stringify({ model: config.embedModel, input: text }),
         },
-        EMBED_TIMEOUT_MS
+        {
+          timeoutMs: EMBED_TIMEOUT_MS,
+          kind: callOpts?.kind || "embed",
+          scopeKey: callOpts?.scopeKey ?? null,
+          summary: callOpts?.summary || `qwen.embed len=${(text || "").length}`,
+          supersede: callOpts?.supersede,
+        }
       );
       if (!res.ok) throw new Error(`embed http ${res.status}`);
       const data = await res.json();
@@ -121,10 +133,10 @@ class QwenProvider extends ILLMProvider {
 
   async healthCheck() {
     try {
-      const res = await fetchWithTimeout(
+      const res = await registeredFetch(
         `${this._baseUrl}/models`,
         { headers: { Authorization: `Bearer ${config.qwenApiKey}` } },
-        5000
+        { timeoutMs: 5000, kind: "http", summary: "qwen.healthcheck" }
       );
       return res.ok;
     } catch {

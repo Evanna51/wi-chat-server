@@ -32,6 +32,7 @@ const {
   fetchDuePendingPlans,
   markPlanSent,
   scheduleNextPushPlan,
+  runProactiveWatchdogOnce,
   NEXT_PUSH_TRIGGER_REASON,
 } = require("./services/proactivePlanService");
 const {
@@ -43,29 +44,52 @@ const infoLog = (...args) => {
   if (config.infoLogEnabled) console.log(...args);
 };
 
-function scheduleIfEnabled(cronExpr, label, runner) {
+/**
+ * Cron tick wrapper —— 加 leader lock 防多 instance 重复触发。
+ *
+ * @param {string} cronExpr
+ * @param {string} label       内部日志用，也是 lock_name
+ * @param {function} runner    async () => {} cron tick 实际工作
+ * @param {object} [opts]
+ * @param {number} [opts.lockTtlMs=600000]   锁 TTL，默认 10 分钟。需 > 预计 tick 执行
+ *                                            时间（带余量），且 < cron 间隔。
+ */
+function scheduleIfEnabled(cronExpr, label, runner, { lockTtlMs = 10 * 60 * 1000 } = {}) {
   if (!cronExpr || String(cronExpr).toLowerCase() === "off") {
     infoLog(`[scheduler] ${label} disabled`);
     return;
   }
+  const { tryAcquireLock, releaseLock } = require("./services/schedulerLock");
+
   let runVersion = 0;
   cron.schedule(
     cronExpr,
-    () => {
+    async () => {
       runVersion += 1;
       const currentRun = runVersion;
       const shouldStop = () => currentRun !== runVersion;
-      runner({ shouldStop }).catch((error) => {
+
+      // Leader lock：抢不到说明其它 instance 在跑（PM2 restart 期 / dev 副本），skip。
+      if (!tryAcquireLock(label, lockTtlMs, label)) {
+        infoLog(`[scheduler] ${label} lock held by other instance, skip`);
+        return;
+      }
+
+      try {
+        await runner({ shouldStop });
+      } catch (error) {
         if (error && error.code === "SCHEDULER_RUN_PREEMPTED") {
           infoLog(`[scheduler] ${label} preempted by newer run`);
-          return;
+        } else {
+          console.error(`[scheduler] ${label} error:`, error);
         }
-        console.error(`[scheduler] ${label} error:`, error);
-      });
+      } finally {
+        releaseLock(label, label);
+      }
     },
     { timezone: config.timezone }
   );
-  infoLog(`[scheduler] ${label} cron = ${cronExpr} (${config.timezone})`);
+  infoLog(`[scheduler] ${label} cron = ${cronExpr} (${config.timezone}, lock_ttl=${lockTtlMs}ms)`);
 }
 
 async function runDailyBackupTick() {
@@ -214,6 +238,25 @@ async function runDeadLetterMonitorTick() {
   } catch (error) {
     console.error("[scheduler] dead-letter monitor failed:", error.message);
     return { error: error.message };
+  }
+}
+
+/**
+ * Proactive watchdog tick — 周期性给所有 active assistant 重新机会决定要不要主动发。
+ * 之前只有 turn.user.batch + plan 派发后会 schedule —— AI 一次 ai_chose_skip 就死链。
+ * 详见 src/services/proactivePlanService.js#runProactiveWatchdogOnce
+ */
+async function runProactiveWatchdogTick() {
+  try {
+    const result = await runProactiveWatchdogOnce();
+    console.log(
+      `[proactive-watchdog] scanned=${result.scanned} triggered=${result.triggered} ` +
+      `skipped=${JSON.stringify(result.skipped)}`
+    );
+    return result;
+  } catch (err) {
+    console.error("[proactive-watchdog] failed:", err.message);
+    throw err;
   }
 }
 
@@ -378,17 +421,30 @@ function startPlanExecutorLoop() {
 }
 
 function startScheduler() {
-  scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick);
-  scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick);
-  scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick);
-  scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick);
-  scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick);
-  scheduleIfEnabled(config.deadLetterMonitorCron, "dead-letter-monitor", runDeadLetterMonitorTick);
+  // ttl 必须 > 预计 tick 执行时间（带余量），且 < cron 间隔。
+  // LLM 任务（episode/reflection/plan）需要更长 ttl（4 角色串行 × LLM 30s+）。
+  const SHORT_TTL = 5 * 60 * 1000;      // 5 min — 轻量任务（sweep / classify / monitor）
+  const MEDIUM_TTL = 30 * 60 * 1000;    // 30 min — backup（VACUUM 大 db）
+  const LLM_TTL = 60 * 60 * 1000;       // 1h — LLM 重任务（episode / reflection / plan）
+
+  scheduleIfEnabled(config.retentionSweepCron, "retention-sweep", runRetentionSweepTick, { lockTtlMs: SHORT_TTL });
+  scheduleIfEnabled(config.planGenerationCron, "plan-generation", runPlanGenerationTick, { lockTtlMs: LLM_TTL });
+  // 2026-05-10: proactive watchdog — 周期性给 AI 重新决定主动消息的机会
+  scheduleIfEnabled(
+    config.proactiveWatchdogCron || "*/30 * * * *", // 默认每 30 min
+    "proactive-watchdog",
+    runProactiveWatchdogTick,
+    { lockTtlMs: LLM_TTL }
+  );
+  scheduleIfEnabled(config.backupDailyCron, "backup-daily", runDailyBackupTick, { lockTtlMs: MEDIUM_TTL });
+  scheduleIfEnabled(config.backupWeeklyCron, "backup-weekly", runWeeklyBackupTick, { lockTtlMs: MEDIUM_TTL });
+  scheduleIfEnabled(config.memoryClassifyCron, "memory-classify-backfill", runMemoryClassifyBackfillTick, { lockTtlMs: SHORT_TTL });
+  scheduleIfEnabled(config.deadLetterMonitorCron, "dead-letter-monitor", runDeadLetterMonitorTick, { lockTtlMs: SHORT_TTL });
   // T-CC2-07: Phase 2 narrative + topic 后台维护
-  scheduleIfEnabled(config.episodeBuilderCron, "episode-builder", runEpisodeBuilderTick);
-  scheduleIfEnabled(config.topicDormantSweepCron, "topic-dormant-sweep", runTopicDormantSweepTick);
+  scheduleIfEnabled(config.episodeBuilderCron, "episode-builder", runEpisodeBuilderTick, { lockTtlMs: LLM_TTL });
+  scheduleIfEnabled(config.topicDormantSweepCron, "topic-dormant-sweep", runTopicDormantSweepTick, { lockTtlMs: SHORT_TTL });
   // T-CC3-03: Phase 3 weekly reflection
-  scheduleIfEnabled(config.reflectionWeeklyCron, "reflection-weekly", runReflectionTickWeekly);
+  scheduleIfEnabled(config.reflectionWeeklyCron, "reflection-weekly", runReflectionTickWeekly, { lockTtlMs: LLM_TTL });
   startPlanExecutorLoop();
 }
 
@@ -397,6 +453,7 @@ module.exports = {
   runRetentionSweepTick,
   runPlanGenerationTick,
   runPlanExecutorOnce,
+  runProactiveWatchdogTick,
   runDailyBackupTick,
   runWeeklyBackupTick,
   runMemoryClassifyBackfillTick,

@@ -514,6 +514,9 @@ curl -sS -X POST "$API/api/tool/memory-correct" \
 
 ### 7.1 `POST /api/tool/knowledge-add` — AI 主动写入
 
+> ⚠️ **当前 dormant**（[api.md §3](api.md)）：knowledge-add tool 未在客户端 ToolBridge 启用，
+> 服务端端点保留。下面是未来启用时的协议。
+
 ```json
 {
   "assistantId": "...",
@@ -524,7 +527,7 @@ curl -sS -X POST "$API/api/tool/memory-correct" \
 }
 ```
 
-返回 `{ ok, id, created }`。已有同 id 时传 id 走 `/api/knowledge/upsert` 更新。
+返回 `{ ok, id, created }`。已有同 id 时传 id 走 `/api/knowledge/upsert` 更新（也 dormant）。
 
 ### 7.2 在知识库内搜
 

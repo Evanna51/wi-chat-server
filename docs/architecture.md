@@ -1,12 +1,14 @@
 # wi-chat-server 架构总览
 
-> 写给不下载代码也能彻底理解本项目的人。本文不重复 README 已有的 API 用法，专注**内部机制 / 数据流 / 关键不变量**。
+> 写给不下载代码也能彻底理解本项目的人。本文专注**内部机制 / 数据流 / 关键不变量**，
+> API 清单见 [docs/api.md](api.md)。
 >
 > 配套阅读：
-> - `README.md` — 端到端 API 参考
+> - `docs/api.md` — **当前在线 API 权威清单**（客户端用 / 内部用 / dormant / 已删除）
+> - `docs/client-prompt-merge-protocol.md` — V_NEW_LEAN 8 slot canonical merge 顺序
 > - `docs/offline-sync-plan.md` — sync 幂等设计
 > - `docs/character-cognition-architecture.md` — 7 层角色认知架构（设计与心智模型）
-> - `docs/character-system.md` — 角色系统 API + 运维手册（接入与 cron）
+> - `docs/character-system.md` — 角色系统运维手册（cron / 触发器）
 > - `docs/ai-tool-memory-recall-and-correct.md` — 客户端 LLM 工具集成手册
 > - `docs/ws-client-integration.md` — WebSocket 客户端接入
 > - `docs/android-sync-integration.md` — Android 离线同步对接
@@ -14,7 +16,7 @@
 > - `docs/client-release-required.md` — 需客户端配合发版的事项
 > - `docs/known-issues.md` — 已知存在但暂不修的问题（鉴权 / 写回竞态等）
 > - `docs/EXECUTION-PROGRESS.md` — 三阶段改造的"驾驶舱"，含 Phase A/B/C/D 与 Phase CC-1~4
-> - `docs/archive/` — 已交付或已归档的设计 / 路线图 / 阅读笔记
+> - `docs/archive/` — 已交付或已归档的设计 / 路线图（含 [api-redesign-plan.md](archive/api-redesign-plan.md) 历史决策记录）
 > - `tests/retrieval/fixtures/README.md` — 检索回归 fixture 格式说明
 
 ---
@@ -752,7 +754,7 @@ SELECT * FROM proactive_plans
 > 完整的角色认知层（identity / 12 维 dynamics / 叙事记忆 / 长期话题 / 反思 / 行为决策）见
 > [character-cognition-architecture.md](./character-cognition-architecture.md) +
 > [character-system.md](./character-system.md)。
-> 客户端要拼 system prompt，调 `POST /api/character/context` 即可拿到 7 层聚合 + promptFragment，**不必**再单独读 `/api/relationship/state`。
+> 客户端要拼 system prompt，hot path 调 `POST /api/chat/context`，boot 缓存调 `POST /api/character/context`（admin/debug/boot）。两个端点的响应都带 `characterState` payload，**不必**再单独读 `/api/relationship/state`（dormant，见 [api.md §3](api.md)）。
 
 ### 10.1 三层数据
 
@@ -807,12 +809,16 @@ energy        → 0.7，半衰期 8h（仅在 >60s idle 后开始恢复）
 
 ### 10.4 客户端拉取
 
-`/api/relationship/state` 和 `/api/character/bootstrap` 都返回 `relationshipState` payload（同 schema）。`character_state` 行不存在时 `ensureDefaultState` 自动以默认值（calm / 陌生人 / energy 0.7）填一行，永不返回 404。
+客户端实际从 `POST /api/character/context`（boot cache）和 `POST /api/chat/context`（hot path）的响应里 fan-out `characterState` 字段——schema 与下面 `relationshipState` 等价。`character_state` 行不存在时 `ensureDefaultState` 自动以默认值（calm / 陌生人 / energy 0.7）填一行，永不返回 404。
+
+`GET /api/relationship/state` 端点保留但 dormant（见 [api.md §3](api.md)）—— 未来如果要"只刷新状态"轻量端点会复用。debug 时可以直接调：
 
 ```bash
 curl -H 'x-api-key: dev-local-key' \
   'http://127.0.0.1:8787/api/relationship/state?assistantId=asst-jasmine'
 ```
+
+返回 payload 形如：
 
 ```json
 {
@@ -846,14 +852,14 @@ curl -H 'x-api-key: dev-local-key' \
 - `kb_name` 字段标识所属知识空间，`kb_tags_json` 存标签
 - `confidence=1.0` / `quality_grade='A'`，retrieval recency 永不衰减
 - 由 `knowledgeService.upsertKnowledgeItem` 写入（[knowledgeService.js](../src/services/knowledgeService.js)）
-- API：`POST /api/knowledge/upsert` / `GET /api/knowledge/:kbName/items`
+- API：`POST /api/knowledge/upsert` / `GET /api/knowledge/list` / `GET /api/knowledge/bases` —— **当前 dormant**（admin UI 未做编辑页，AI 也未启用 knowledge-add tool），见 [api.md §3](api.md)
 - `kbName` 参数可在 retrieval 阶段过滤，把检索范围锁死在某个知识空间里
 
 ### 11.2 关键记忆（is_pinned）
 
 - `memory_items.is_pinned = 1` + `pinned_at` 时间戳
 - 任何 memory_type 都可 pin
-- `/api/character/bootstrap` 的 `coreMemories[]` 字段：返回 pinned=1 的 memory_items，按 `(salience DESC, pinned_at DESC)` 排，最多 8 条
+- `POST /api/character/context` / `POST /api/chat/context` 响应里的 `coreMemories[]` 字段：返回 pinned=1 的 memory_items，按 `(salience DESC, pinned_at DESC)` 排，最多 8 条
 - 客户端把这些原文 + `coreFacts` 注入 system prompt，让 AI 永远"记得"
 
 ### 11.3 coreFacts 评分
@@ -872,7 +878,9 @@ limit:  15
 - `importance` = "对角色行为影响多大"（健康/重大身份 0.9+，偏好兴趣 0.3-0.5）
 - `confidence` = "提取得准不准"（来自 LLM classify 输出）
 
-### 11.4 知识库 API 示例
+### 11.4 知识库 API 示例（dormant — 仅供未来启用时参考）
+
+> 当前这组端点 dormant（[api.md §3](api.md)）。schema 稳定，未来 admin UI 做知识库编辑页或 AI 启用 knowledge-add tool 时直接用。
 
 ```bash
 # 写入一条知识
@@ -889,7 +897,7 @@ curl -X POST http://127.0.0.1:8787/api/knowledge/upsert \
 
 # 列出某 kb 下所有条目
 curl -H 'x-api-key: dev-local-key' \
-  'http://127.0.0.1:8787/api/knowledge/company-onboarding/items?assistantId=asst-jasmine'
+  'http://127.0.0.1:8787/api/knowledge/list?assistantId=asst-jasmine&kbName=company-onboarding'
 ```
 
 检索时把范围锁死在某 kb：

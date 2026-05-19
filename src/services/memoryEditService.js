@@ -355,6 +355,23 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
   }
 
   db.transaction(() => {
+    // 删 turn 前先快照：哪些 assistant 的 user-role turn 即将消失。
+    // 用于事后递减 character_state.total_turns —— 防 message_delete / sync
+    // logical-dup replace 永久虚高 total_turns 进而导致 familiarity 飘高。
+    // 见 backfill 历史：4 个角色 over-count 5~31 都是这条路径累积出来的。
+    let userTurnByAssistant = new Map();
+    if (turnIds.length > 0) {
+      const ph = turnIds.map(() => "?").join(",");
+      const rows = db
+        .prepare(
+          `SELECT assistant_id, COUNT(*) AS n FROM conversation_turns
+             WHERE id IN (${ph}) AND role = 'user' AND assistant_id IS NOT NULL
+             GROUP BY assistant_id`
+        )
+        .all(...turnIds);
+      for (const r of rows) userTurnByAssistant.set(r.assistant_id, r.n);
+    }
+
     if (memoryIds.length > 0) {
       const ph = memoryIds.map(() => "?").join(",");
       deleted.facts = db
@@ -384,6 +401,29 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
       deleted.turn = db
         .prepare(`DELETE FROM conversation_turns WHERE id IN (${ph})`)
         .run(...turnIds).changes;
+    }
+
+    // 递减 character_state.total_turns / familiarity（公式与
+    // characterStateUpdater 写入路径一致：floor(total/3) capped 100）。
+    // 取 floor 0 防漂负。character_state 不存在的 assistant 跳过（不会有 user
+    // turn 计数，删完也无可减）。
+    if (userTurnByAssistant.size > 0) {
+      const now = Date.now();
+      const upd = db.prepare(
+        `UPDATE character_state
+           SET total_turns = ?, familiarity = ?, updated_at = ?
+           WHERE assistant_id = ?`
+      );
+      const sel = db.prepare(
+        "SELECT total_turns FROM character_state WHERE assistant_id = ?"
+      );
+      for (const [assistantId, n] of userTurnByAssistant) {
+        const row = sel.get(assistantId);
+        if (!row) continue;
+        const newTotal = Math.max(0, (row.total_turns || 0) - n);
+        const newFam = Math.min(100, Math.floor(newTotal / 3));
+        upd.run(newTotal, newFam, now, assistantId);
+      }
     }
   })();
 

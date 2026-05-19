@@ -32,17 +32,14 @@
   - `scripts/db-query.js` 同步移除该表 + 顺带把 migration 015 已删的 `local_subscribers` 也清掉（断引用）
 - **验收**：migration 已执行，`SELECT name FROM sqlite_master WHERE name='proactive_message_log'` 返回空 ✅
 
-### T-02 删除 `push_token` 表 + FCM 残留 ⏸ 等客户端
+### T-02 删除 `push_token` 表 + FCM 残留 🟡 部分完成
 
 - **动机**：WS 离线兜底已用 `local_outbox_messages`，FCM 链路是死代码。
-- **关联**：[CR-01](./client-release-required.md#cr-01-移除-fcm-推送注册对应服务端-t-02)
-- **改动**（客户端发版后再合）：
-  - 新 migration（编号顺延）：`DROP TABLE push_token`
-  - 删 `src/services/fcm.js`
-  - 删 `POST /api/register-push-token`（[api.js:63](../src/routes/api.js#L63)）
-  - 删 `routes/admin.js` 里 FCM 通知路径
-  - 删 `package.json` 里 firebase-admin 依赖（如有）
-  - 删 env：`FCM_*`
+- **关联**：[CR-01](client-release-required.md#cr-01-移除-fcm-推送注册对应服务端-t-02)
+- **完成情况**：
+  - ✅ 删 `POST /api/register-push-token`（2026-05-10）
+  - ⏳ `DROP TABLE push_token` migration（待跑）
+  - ⏳ 删 `src/services/fcm.js` / admin.js FCM 路径 / firebase-admin 依赖 / `FCM_*` env
 - **验收**：`grep -rni 'fcm\|push_token\|sendFcmMessage' src/` 为空。
 
 ### T-03 删除 `character_state.familiarity` 字段 ⏸ 等客户端

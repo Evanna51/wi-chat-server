@@ -359,11 +359,11 @@ connect();
 | 场景 | 走 WS | 走 HTTP |
 |---|---|---|
 | 用户发消息（在线） | ✅ `message_create`（低延迟） | ⛔ |
-| 用户离线缓存批量补 | ⛔ | ✅ `POST /api/sync/push` |
+| 用户离线缓存批量补 | ⛔ | ✅ `POST /api/chat/turn` |
 | 接收 server 主动推 | ✅ `proactive` 帧 | ⛔（HTTP 轮询通道已废） |
 | 编辑既有消息 | ✅ `message_update` | ⛔（无 HTTP 等价 endpoint） |
-| 拉取关系状态/记忆 | ⛔ | ✅ `GET /api/relationship/state` 等 |
-| Bootstrap 单次拉所有静态 | ⛔ | ✅ `GET /api/character/bootstrap` |
+| 拉取关系状态/记忆 | ⛔ | ✅ `POST /api/character/context`（含 characterState）/ `POST /api/tool/memory-recall` |
+| Bootstrap 单次拉所有静态 | ⛔ | ✅ `GET /api/character/:id` |
 
 **经验法则**：实时双向 → WS；查询 / 大批量 / 离线后补齐 → HTTP。两者**复用**同一鉴权 + 同一数据库，client 不需要做"只走 WS"或"只走 HTTP"的取舍。
 

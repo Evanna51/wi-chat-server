@@ -1,7 +1,9 @@
 # 客户端配合事项
 
-> 服务端重构（见 [refactor-plan.md](./refactor-plan.md)）中需要客户端发版同步的改动。
-> 每条事项的处理顺序：**客户端先发版 → 服务端再合 PR**，避免线上 4xx / 字段缺失。
+> **本文是历史 CR 清单**（每条变更需要客户端做什么）。当前 API 现状见 [api.md](api.md)。
+>
+> 项目无向后兼容期 —— 服务端改动直接生效，客户端必须同步。本文条目按时间留作参考。
+> 服务端重构总进度见 [refactor-plan.md](refactor-plan.md)。
 
 ---
 
@@ -13,8 +15,8 @@
   2. 移除 FCM SDK 集成（如果离线消息已完全走 WS + `local_outbox_messages`，FCM 已无作用）。
   3. 确认 push 通知统一走 WS `proactive` op + `queued_batch` 重连兜底。
 - **影响**：
-  - 调用 `POST /api/register-push-token` 服务端会返回 404；客户端如未删除会反复打错 → 监控告警。
-- **状态**：⏳ 待客户端发版
+  - 调用 `POST /api/register-push-token` 服务端会返回 404。
+- **状态**：✅ 服务端端点已删除（2026-05-10）。客户端如还有调用代码请尽快移除。
 
 ---
 
@@ -51,43 +53,22 @@
 > 接入手册见 [character-system.md](./character-system.md)。
 > 本条 CR 拆 4 节，前 3 节是**新增能力**（客户端可按需接），第 4 节是 **deprecated 窗口提醒**。
 
-### CR-04.1 新增主入口端点 `POST /api/character/context`（推荐替代 bootstrap）
+### CR-04.1 主入口端点 `POST /api/character/context`（已落地，bootstrap 已删除）
 
-- **服务端动作**：新增聚合端点，一次返回 7 层完整 payload + 拼好的 `promptFragment`（≤1500 中文字）。
-- **客户端建议做**（**非强制**，旧路径仍能用 1 个 release）：
-  1. 替换 `GET /api/character/bootstrap` + `GET /api/relationship/state` 调用 → `POST /api/character/context`，body：
-     ```json
-     { "assistantId": "...", "includePromptFragment": true }
-     ```
-  2. 直接把响应里的 `promptFragment` 拼进 system prompt，不再自己拼 identity / state / dynamics 三段。
-  3. 如果想要更精细的控制（比如只展示 mood / 不要 dynamics），用结构化字段：
-     `identity / characterState / emotion / relationshipDynamics / socialMode / activeTopics / recentEpisodes / latestReflection`
-- **影响**：
-  - 旧客户端继续走 `/relationship/state` + `/character/bootstrap` 不会断（payload schema 不动）。
-  - 新客户端用 `/character/context` 拿到的 system prompt 上下文更完整、token 更省（重复字段不再每次重发）。
-- **状态**：⏳ 待客户端按需迁移
+- **当前状态**：boot cache / admin / debug 端点。`GET /api/character/bootstrap` 已物理删除，客户端必须用本端点；hot path 已进一步演进到 `POST /api/chat/context`（CR-06）。
+- **服务端动作**：聚合端点一次返回 7 层 payload + V_NEW_LEAN 8 个 slot + mergedSystem + assistantPrefill（不带本轮 user 上下文）。
+- **客户端用法**：
+  1. boot 时调一次缓存进 `CharacterBootstrapStore`，让首条消息延迟低
+  2. 每轮发消息走 `POST /api/chat/context`（带 facts + narrative）
+  3. 不再自己拼 identity / state / dynamics 三段
+- **状态**：✅ 落地，bootstrap 已删除，relationship/state 已 dormant
 
-### CR-04.2 新增 admin / debug 端点（无需客户端集成，可选）
+### CR-04.2 admin / debug 端点
 
-| 端点 | 用途 |
-|------|------|
-| `GET /api/character/identity?assistantId=` | 读人格 21 字段 |
-| `POST /api/character/identity/upsert` | 写人格 |
-| `GET /api/character/identity/vocab` | 拉受控词表（trait / mode / care_language / tension）|
-| `GET /api/character/episodes?assistantId=&limit=&minImportance=` | 叙事段时间线 |
-| `GET /api/character/episodes/:id` | 叙事段详情 |
-| `POST /api/admin/character/build-episodes` | 手动触发 LLM 聚合 |
-| `GET /api/character/topics?assistantId=&status=&limit=&includeInactive=` | 长期话题 |
-| `POST /api/character/topics/upsert` | 手动创建话题 |
-| `POST /api/character/topics/:id/status` | 7 状态机转换 |
-| `POST /api/character/topics/:id/importance` | 调 importance |
-| `GET /api/character/reflection?assistantId=` | 最新一条关系反思 |
-| `GET /api/character/reflections?assistantId=&type=&limit=` | 反思时间线 |
-| `POST /api/admin/character/reflect` | 手动触发反思 |
-| `GET /api/character/behavior-intent?assistantId=` | 当前推荐意图（debug）|
-| `GET /api/character/behavior-intent/vocab` | 14 个 intent 定义 |
+> 完整列表见 [api.md §2](api.md)。其中 `episodes/:id` / `topics/upsert` / `topics/:id/status` /
+> `topics/:id/importance` / `reflection`（单数）当前 dormant，标在 [api.md §3](api.md)。
 
-- **客户端需要做**：**没有**。这些端点服务端 admin UI（`public/`）已用，移动端按需而定。
+- **客户端需要做**：**没有**。这些端点服务端 admin UI（`public/`）按需调用。
 - **状态**：✅ 不阻塞客户端发版
 
 ### CR-04.3 LLM 生成内容风格变化（draft_title / proactive body / 反思文案）
@@ -104,14 +85,11 @@
   - `memory_facts.fact_value` **仍然使用具体角色名**（设计选择，因为事实需要 anchor —— "ta 握过我的手"里的 ta 失锚）。改名时需要服务端跑批量字符串替换工具，不需重跑 LLM。
 - **状态**：⏳ 客户端自检后可标记 OK
 
-### CR-04.4 老端点 deprecated 窗口提醒（下个 release 移除）
+### CR-04.4 旧端点处理（已完成）
 
-- **将被移除**：
-  - `GET /api/relationship/state` → 用 `POST /api/character/context`
-  - `GET /api/character/bootstrap` → 用 `POST /api/character/context`
-- **窗口长度**：1 个 release（具体日期看你们发版节奏）
-- **客户端需要做**：在下次发版时迁移到 `/api/character/context`
-- **状态**：⏳ 待客户端发版迁移
+- `GET /api/character/bootstrap` → ✅ **已物理删除**。客户端用 `GET /api/character/:id`（静态 slots）+ `POST /api/character/context`（boot cache）+ `POST /api/chat/context`（hot path）。
+- `GET /api/relationship/state` → ✅ **dormant**（保留端点，未来轻量刷新状态用）。客户端从 `/api/character/context` / `/api/chat/context` 响应里 fan-out `characterState`，无需独立调用。
+- **状态**：✅ 落地
 
 ---
 
@@ -126,6 +104,145 @@
   2. 文件已改：`app/src/main/java/com/example/aichat/sync/ToolBridge.kt`
 - **影响**：修复 LLM 误选 `source='character'` 导致用户相关记忆查不到（count=0）的问题。
 - **状态**：✅ 客户端已改（需发版生效）
+
+---
+
+## CR-06 V_NEW_LEAN structured chat slot + Phase 2 端点（对应服务端 Phase 1a + 1b + 2）
+
+> 历史决策记录见 [archive/api-redesign-plan.md](archive/api-redesign-plan.md)；当前协议看 [client-prompt-merge-protocol.md](client-prompt-merge-protocol.md)；当前端点状态看 [api.md](api.md)。
+
+### 服务端动作
+
+1. **Prompt 渲染重构（Phase 1a + 1b）**
+   - V_NEW_LEAN：`<character>` JSON 删 4 个心理深度字段（insecurities / core_wounds /
+     desires / tensions）+ 3 个数值字段（emotional_sensitivity / empathy_level /
+     expressiveness）—— 这些已通过 server introspection → reflection.summary →
+     `<narrative>` slot 间接传递
+   - 新增 `<narrative>` slot：reflection / episodes / topics 完整下放（之前压缩到 1 行
+     独白片段就丢失了大量上下文）
+   - 新增 `<facts>` slot：coreFacts + retrieved memories（之前完全没拼）
+   - `<tool_protocol>` 占 recency bias 黄金位
+   - 删除 chat 端 voice 例句（不固化句子，靠 speaking_style 描述让 LLM 自己生成）
+   - `buildCharacterContext` 输出 `slots / mergedSystem / assistantPrefill`
+
+2. **端点变化（Phase 2 — 已完成）**
+   - 新增 `GET /api/character/{id}` — 静态 slots（profile + identity + 5 个 rendered slot + etag）
+   - 新增 `POST /api/chat/context` — hot path 端点（每轮发消息前调）
+   - 新增 `POST /api/chat/turn` 取代 `/api/sync/push`（**已物理删除旧路径**）
+   - 新增 `DELETE /api/chat/turn/{turnId}` — cascade 衍生数据 + WS 推 turn_deleted
+
+3. **删除端点（已完成）**
+   - `POST /api/chat-with-memory` — 已删除
+   - `GET /api/character/bootstrap` — 已删除
+   - `POST /api/tool/memory-context` — 已删除
+   - `POST /api/sync/push` — 已删除
+
+### 客户端需要做
+
+1. 新增方法已加：[ChatServerApi.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatServerApi.kt)
+   - `getCharacter(assistantId)` → ChatCharacterResponse
+   - `chatContext(ChatContextRequest)` → ChatContextResponse
+   - `chatTurn(ChatTurnRequest)` → ChatTurnResponse
+   - `deleteChatTurn(turnId)` → DeleteTurnResponse
+   - 新 DTO：[ChatDtos.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatDtos.kt)
+
+2. 旧方法已物理删除（`syncPush` / `characterBootstrap`）；`characterContext` 保留作 admin/debug/boot cache 端点。当前 [ChatServerApi.kt](../../chatbox-Android/app/src/main/java/com/example/aichat/sync/ChatServerApi.kt) 只剩活跃方法。
+
+3. 实现 system prompt **canonical merge 顺序**：
+   - 详细伪代码 + slot 顺序 + `<client>` slot 嵌入位置见 [client-prompt-merge-protocol.md](./client-prompt-merge-protocol.md)
+   - 8 段顺序：role / character / background / constraints / facts / narrative /
+     **&lt;client&gt;** / tool_protocol，末尾 assistantPrefill
+   - `<client>` slot 由客户端拼，注入：`current_time` / `user_locale` /
+     `device_platform` / 用户在 app 设置里写的 personalization
+
+4. **tool 循环 UX**：
+   - DeepSeek-V3 调 search_memory 时**默认 content 为空**（OpenAI 标准）；客户端
+     SDK 必须实现 stage1 + stage2 两阶段（见 protocol 文档 §5）
+   - stage1 没 content 时 UI 显示伪造占位 "正在查找相关记忆..."
+
+### 影响
+
+- 老路径全部物理删除（`/api/sync/push` / `/api/character/bootstrap` / `/api/tool/memory-context` / `/api/chat-with-memory`）— 调用 → 404
+- 客户端用 `chatContext` 拿到结构化 slots → system prompt 更精准（V_NEW_LEAN 实测 tool 触发率 72% → 92%，正确跳过 80% → 90%）
+
+### 状态
+
+- ✅ 服务端落地（Phase 1a / 1b / 2 + cleanup 共 7 个 commit on dev branch）
+- ✅ Android API 客户端方法 + DTO 已加
+- ✅ **Android 现有 caller 完整迁移**：
+  - `SyncQueueDrainer.kt` syncPush → chatTurn（字段映射 ingested/deduped/rejected）
+  - `CharacterBootstrapStore.kt` 缓存 schema `promptFragment` → `mergedSystem`，doRefresh
+    fallback 路径删除（仅走 `/api/character/context`）
+  - `CharacterMemoryService.kt` getMemoryContext 改用 `/api/chat/context`
+  - `CharacterMemoryApi.kt` 删 PATH_MEMORY_CONTEXT + MemoryContextRequest
+  - `ChatServerApi.kt` 删 syncPush / characterBootstrap 旧方法；保留 characterContext 作
+    admin/debug/boot cache 用
+  - `ChatViewModel.kt` buildBootstrapPrefixIfAny 改用 cache.mergedSystem
+
+---
+
+## CR-07 setup_prompt + lore + LLM-assisted persona extraction（Phase 3）
+
+### 服务端动作
+
+1. **Schema migration 032**：assistant_profile 加 4 列
+   - `setup_prompt` — 用户原始输入（archive，不直接进 prompt）
+   - `lore` — LLM 提炼后的纯叙事段（渲染进 `<background>` slot）
+   - `extraction_status` — pending / ready / failed / skipped
+   - `extraction_error` / `extracted_at`
+   - 老 `character_background` 保留作 fallback；写入时 dual-write
+
+2. **新增端点**：
+   - `POST /api/character/extract` — dry-run preview（接受 setupPrompt 或 assistantId）
+   - `POST /api/character/lore/save` — 保存修改后的 lore
+
+3. **异步触发**：assistant-profile/upsert 后，setup_prompt 改了 + character/空 type
+   → emit `profile.setup_prompt.changed` event → personaExtraction subscriber
+   `setImmediate` 跑 LLM 提炼 → 更新 identity + lore + status
+
+4. **promptComposer.renderBackgroundSlot** 优先用 `profile.lore`，fallback `character_background`
+
+5. **admin UI** identity tab 加 "🤖 AI 分析 setup_prompt" 按钮 + preview dialog
+   （在 [public/app.js](public/app.js) `renderIdentityTab` + `showExtractPreviewDialog`）
+
+### 客户端需要做
+
+1. **`assistant-profile/upsert` 响应**新增字段（不破坏旧结构，仅新增）：
+   - `setupPrompt` / `lore` / `extractionStatus` / `extractedAt`
+   - 旧客户端忽略即可（仍能读 characterBackground）
+
+2. **新角色编辑流程**（Android EditMyAssistantActivity 或 web）：
+   - 用户填 setup_prompt（沿用现 characterBackground 字段提交即可，server 端 dual-write）
+   - 提交后异步触发 LLM 提炼（用户感知不到延迟）
+   - 编辑入口可加 "AI 分析" 按钮调 `/api/character/extract` 看 preview
+   - apply 调 `/api/character/identity/upsert` + `/api/character/lore/save`
+
+3. **chatbox-Android caller 适配**（visible 字段，可选）：
+   - `CharacterBootstrapStore` 缓存 etag 同时记 `extractionStatus`
+   - 显示"角色分析中…"占位（status='pending' 时）
+
+### 影响
+
+- 老调用 `assistant-profile/upsert` 完全兼容（多了字段）
+- Phase 1a `<background>` slot 内容会变化：
+  - LLM 提炼跑过 → 显示净化后的 lore（更短、更聚焦）
+  - 提炼失败 / pending → 显示原始 character_background（fallback）
+
+### 设计意图
+
+用户写的 setup_prompt 是混合体（lore + 风格 + 系统指令）。三类分离后：
+- 风格指令 → identity.speaking_style 字段（结构化）
+- 边界 → identity.hardBoundaries / softBoundaries
+- 系统指令 → 删除（应该升格成 system-level rule）
+- lore → 纯叙事段进 `<background>` slot
+
+零重复 → 降低 LLM 注意力稀释（之前 ab-prompt-test 证明的问题）。
+
+### 状态
+
+- ✅ 服务端落地（migration + service + endpoints + subscriber + admin UI 按钮）
+- ⏳ 现有 5 角色 batch re-extract（等本地 Qwen 在线时跑：在 admin UI identity tab 点"AI 分析"）
+- ⏳ chatbox-Android EditMyAssistantActivity 适配（视产品需求）
 
 ---
 

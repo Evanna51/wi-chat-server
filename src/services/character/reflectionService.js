@@ -249,7 +249,7 @@ function buildReflectionPrompt({
   ].join("\n");
 }
 
-async function callLlmForReflection(prompt) {
+async function callLlmForReflection(prompt, { assistantId } = {}) {
   const provider = getProvider();
   const result = await provider.complete({
     messages: [
@@ -259,6 +259,11 @@ async function callLlmForReflection(prompt) {
     temperature: 0.5,
     maxTokens: 800,
     responseFormat: "json",
+    callOpts: {
+      kind: "reflect",
+      scopeKey: assistantId || null,
+      summary: `reflect for ${assistantId || "unknown"}`,
+    },
   });
   return parseStrictJsonObject(result?.content);
 }
@@ -373,7 +378,7 @@ async function reflectFor(assistantId, {
 
   let parsed;
   try {
-    parsed = await callLlmForReflection(prompt);
+    parsed = await callLlmForReflection(prompt, { assistantId });
   } catch (err) {
     console.warn(`[reflection] LLM failed for ${assistantId}: ${err.message}`);
     return { skipped: true, reason: "llm_error", error: err.message };
@@ -418,6 +423,10 @@ async function reflectFor(assistantId, {
 /**
  * weekly cron：每周日 03:30 给所有 character 类 assistant 跑一次。
  */
+// Weekly tick 的 dedup 窗口：同一 assistant 24h 内已经跑过 weekly 就 skip。
+// 防多 instance（PM2 restart 期间双进程 / dev + prod 并存）重复写。
+const WEEKLY_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 async function runReflectionTickWeekly({ now = Date.now() } = {}) {
   const assistants = db.prepare(
     `SELECT assistant_id FROM assistant_profile
@@ -426,6 +435,22 @@ async function runReflectionTickWeekly({ now = Date.now() } = {}) {
 
   const results = [];
   for (const a of assistants) {
+    // dedup：24h 内已跑 weekly 则 skip
+    const recent = db.prepare(
+      `SELECT created_at FROM relationship_reflection
+       WHERE assistant_id = ? AND reflection_type = 'weekly'
+       ORDER BY created_at DESC LIMIT 1`
+    ).get(a.assistant_id);
+    if (recent && now - recent.created_at < WEEKLY_DEDUP_WINDOW_MS) {
+      results.push({
+        assistantId: a.assistant_id,
+        skipped: true,
+        reason: "dedup_within_24h",
+        previousAt: recent.created_at,
+      });
+      continue;
+    }
+
     try {
       const r = await reflectFor(a.assistant_id, { reflectionType: "weekly", now });
       results.push({ assistantId: a.assistant_id, ...r });

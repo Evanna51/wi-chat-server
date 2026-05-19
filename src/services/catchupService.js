@@ -1,6 +1,7 @@
 const { v7: uuidv7 } = require("uuid");
 const { getProvider } = require("../llm");
 const { buildStatePromptFragment } = require("./characterStateService");
+const { renderBackgroundForIntrospection } = require("./character/promptComposer");
 // T-CC-08: 注入结构化 identity + 多维 dynamics 体感到 catchup prompt
 const {
   getCharacterIdentity,
@@ -135,7 +136,7 @@ function buildCatchupPrompt({
     `跨度：${durationHours} 小时`,
     "",
     "【角色档案】",
-    clipText(characterBackground || "无", 800),
+    renderBackgroundForIntrospection(characterBackground, 800),
     "",
     "【最近 6 条对话】",
     turnLines || "- 无",
@@ -154,6 +155,8 @@ function buildCatchupPrompt({
     "5. **禁止**出现以下空话：\"思考人生\"\"享受时光\"\"感受美好\"\"内心平静\"\"微笑了\"\"陷入回忆\"\"若有所思\"",
     "6. **禁止**与\"已经发生过的事情\"列表中任何一条主题/动作重复：如果之前已经\"喝咖啡\"过，本次不能再写\"喝咖啡\"，要换具体动作",
     "7. 风格语气与角色背景一致",
+    "8. **禁止凭空假设用户偏好**：除非【已知用户事实】里出现，否则不要写\"ta 爱 X / ta 喜欢 X / ta 习惯 X / 给 ta 买 ta 爱吃的 Y\"。可以写\"我去买了 X\"\"我准备了 Y 想给 ta\"——但**不要在事件里设定 ta 的喜好**。这种事实只能由 ta 自己告诉，不能由你想象。",
+    "9. 角色行为可以包括\"我打开了书\"\"我抽了根烟\"\"我走在路上想 ta\"——但描述自己的动作和心理，不要描述\"ta 的喜好/ta 的习惯/ta 现在在 X\"（你不知道）",
     "",
     `【random_seed】 ${seed}`,
     "",
@@ -187,7 +190,7 @@ function parseStrictJsonObject(text = "") {
   return parsed;
 }
 
-async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } = {}) {
+async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900, assistantId } = {}) {
   const { content } = await getProvider().complete({
     messages: [
       { role: "system", content: "你是角色生活事件生成器。以角色身份写离线期间发生的具体事件。输出严格 JSON，不要 markdown 代码块。" },
@@ -196,6 +199,11 @@ async function callLlmForCatchup(prompt, { temperature = 0.8, maxTokens = 900 } 
     temperature,
     maxTokens,
     responseFormat: "json",
+    callOpts: {
+      kind: "catchup",
+      scopeKey: assistantId || null,
+      summary: `catchup ${(prompt || "").slice(0, 30)}`,
+    },
   });
   return parseStrictJsonObject(content);
 }
@@ -333,6 +341,7 @@ async function runCatchup({
         temperature: params.temperature,
         topP: params.top_p,
         maxTokens: 900,
+        assistantId,
       });
     } catch (error) {
       lastError = error;
@@ -342,6 +351,7 @@ async function runCatchup({
           temperature: params.temperature,
           topP: params.top_p,
           maxTokens: 900,
+          assistantId,
         });
         lastError = null;
       } catch (error2) {

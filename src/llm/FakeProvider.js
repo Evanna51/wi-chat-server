@@ -35,12 +35,13 @@ class FakeProvider extends ILLMProvider {
 
   async complete(req) {
     const content = this._responses.length ? this._responses.shift() : this._defaultContent;
-    this._callLog.push({ type: "chat", req, content });
+    // callOpts 透传记录，方便测试断言 callRegistry 接入
+    this._callLog.push({ type: "chat", req, content, callOpts: req?.callOpts });
     return { content, inputTokens: 10, outputTokens: 5, model: "fake" };
   }
 
-  async embed(text) {
-    this._callLog.push({ type: "embed", text });
+  async embed(text, callOpts) {
+    this._callLog.push({ type: "embed", text, callOpts });
     return this._defaultVector.slice();
   }
 

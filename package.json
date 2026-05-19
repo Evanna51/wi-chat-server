@@ -24,7 +24,10 @@
     "vectors:backfill": "node scripts/migrate-vectors-to-blob.js",
     "backup:monthly": "node scripts/backup.js monthly",
     "sync:replay": "node scripts/sync-replay.js",
-    "ws:test": "node scripts/ws-test-client.js"
+    "ws:test": "node scripts/ws-test-client.js",
+    "test": "node --test tests/",
+    "test:clean": "node scripts/clean-test-data.js --apply",
+    "test:clean:dry": "node scripts/clean-test-data.js"
   },
   "engines": {
     "node": ">=22.0.0"

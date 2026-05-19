@@ -34,6 +34,13 @@ const config = {
   qwenModel: process.env.QWEN_MODEL || "qwen2.5:7b-instruct",
   qwenTemperature: Number(process.env.QWEN_TEMPERATURE || 0.7),
   qwenMaxTokens: Number(process.env.QWEN_MAX_TOKENS || 200),
+  // DeepSeek（云端备选；server-side LLM 调用切换）
+  deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1",
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
+  deepseekModel: process.env.DEEPSEEK_MODEL || "deepseek-chat",
+  // server-side LLM 调用走哪家 (qwen=本地 LM Studio / deepseek=云端).
+  // 影响：attentionWindow / registerRouter / langchainQwenService。
+  serverLlmProvider: (process.env.SERVER_LLM_PROVIDER || "qwen").toLowerCase(),
   memoryRetrievalEnabled: (process.env.MEMORY_RETRIEVAL_ENABLED || "1") === "1",
   retrievalTopK: Number(process.env.RETRIEVAL_TOP_K || 8),
   retrievalWindowDays: Number(process.env.RETRIEVAL_WINDOW_DAYS || 30),
@@ -104,4 +111,25 @@ const config = {
   reflectionWeeklyCron: process.env.REFLECTION_WEEKLY_CRON || "30 4 * * 0",     // 每周日 04:30
 };
 
-module.exports = config;
+/**
+ * 返回 server-side LLM (attention / router / etc) 当前应该用的 endpoint 配置。
+ * 由 SERVER_LLM_PROVIDER env 切换：qwen (默认, 本地 LM Studio) / deepseek (云端).
+ */
+function getServerLlmConfig() {
+  if (config.serverLlmProvider === "deepseek") {
+    return {
+      provider: "deepseek",
+      model: config.deepseekModel,
+      baseUrl: config.deepseekBaseUrl,
+      apiKey: config.deepseekApiKey,
+    };
+  }
+  return {
+    provider: "qwen",
+    model: config.qwenModel,
+    baseUrl: config.qwenBaseUrl,
+    apiKey: config.qwenApiKey,
+  };
+}
+
+module.exports = Object.assign(config, { getServerLlmConfig });

@@ -5,6 +5,7 @@ const state = {
   stats: null,
 };
 
+
 function getApiKey() {
   try {
     return localStorage.getItem("apiKey") || DEFAULT_API_KEY;
@@ -161,6 +162,11 @@ const ZH = {
     avoidant: "回避型",
     disorganized: "混乱型",
   },
+  pronoun: {
+    "she/her": "她（she/her）",
+    "he/him": "他（he/him）",
+    "they/them": "ta（they/them，gender-neutral）",
+  },
   socialStrategy: {
     casual: "日常闲聊",
     defensive: "自我保护",
@@ -180,19 +186,24 @@ const ZH = {
     avoidant_attachment: "回避依恋", disorganized_attachment: "混乱依恋",
     rational_suppressive: "理性压抑情绪", emotionally_expressive: "情绪外放",
     melancholic: "易陷低落", even_keeled: "情绪平稳", volatile: "起伏剧烈",
+    stoic: "坚忍内敛",
     high_sensitivity: "高度敏感", low_sensitivity: "低敏感",
     thin_skinned: "易受伤", thick_skinned: "不易受伤",
     people_pleasing: "讨好倾向", defensive_aloof: "防御性疏离",
     controlling: "控制欲", submissive: "顺从",
     playful_teasing: "嬉戏调侃", withdrawn: "退缩",
+    blunt: "直率", dry_witted: "反讽倾向",
     high_empathy: "高共情", low_empathy: "低共情",
     selective_empathy: "选择性共情",
     easily_jealous: "易嫉妒", possessive: "占有欲", non_possessive: "不占有",
+    vindictive: "记仇",
     perfectionist: "完美主义", self_critical: "自我批判",
     self_accepting: "自我接纳", self_aggrandizing: "自我膨胀",
+    prideful: "高自尊", shame_prone: "羞耻倾向", brooding: "反复反刍",
     romantic_idealist: "浪漫理想化", cynical_realist: "愤世现实",
     intellectually_romantic: "智性浪漫",
     verbose: "话多", taciturn: "寡言", eloquent: "善表达",
+    theatrical: "戏剧化",
   },
   careLanguage: {
     verbal_affirmation: "言语肯定",
@@ -212,6 +223,7 @@ const ZH = {
     vulnerability_vs_pride: "示弱 vs 自尊",
   },
   insecurity: {
+    // 西方个体化
     fear_of_abandonment: "害怕被抛弃",
     fear_of_being_boring: "害怕无趣",
     fear_of_being_replaced: "害怕被取代",
@@ -232,8 +244,18 @@ const ZH = {
     fear_of_vulnerability: "害怕脆弱",
     fear_of_disappointing_others: "害怕让人失望",
     fear_of_aging: "害怕衰老",
+    // 东亚 / 中文文化语境
+    fear_of_losing_face: "怕丢面子",
+    fear_of_burdening_others: "怕给人添麻烦",
+    fear_of_disappointing_family: "怕让家人失望",
+    fear_of_being_compared_unfavorably: "怕'别人家的孩子'",
+    fear_of_standing_out: "怕出头",
+    fear_of_being_unfilial: "怕被说不孝",
+    fear_of_being_left_behind_socially: "怕掉队",
+    fear_of_emotional_exposure: "怕情绪外露",
   },
   wound: {
+    // 西方个体化
     childhood_neglect: "童年忽视",
     betrayal_trauma: "背叛创伤",
     performance_conditional_love: "表现换爱",
@@ -251,6 +273,40 @@ const ZH = {
     emotional_incest: "情感越界",
     public_humiliation: "公开羞辱",
     religious_or_cultural_trauma: "宗教 / 文化创伤",
+    // 东亚 / 中文文化语境
+    academic_pressure_trauma: "升学 / 成绩压力创伤",
+    chronic_comparison_to_peers: "长期被比较",
+    emotional_suppression_household: "家中情绪压抑",
+    only_child_loneliness: "独生子女孤独",
+    left_behind_child: "留守儿童",
+    patriarchal_devaluation: "重男轻女",
+    discipline_through_shame: "羞辱式管教",
+    parents_loveless_marriage_witnessing: "见证父母无爱婚姻",
+  },
+  skill: {
+    // 智性表达
+    literary_allusion: "文学引用",
+    philosophical_volley: "哲思辩驳",
+    code_switching: "中英 / 方言切换",
+    scientific_reference: "科学 / 数据引用",
+    // 玩闹
+    meme_literacy: "玩梗",
+    verbal_sparring: "怼人 / 嘴硬",
+    dark_humor: "黑色幽默",
+    self_deprecation_as_art: "自嘲艺术化",
+    // 情感
+    coquettish_baby_talk: "撒娇",
+    wordless_affection: "无言示意（嗯 / 表情 / 小动作）",
+    indirect_love_letter: "借物喻情",
+    // 防御
+    topic_pivot: "主动转移话题",
+    playing_dumb: "装糊涂",
+    selective_silence: "战略性沉默",
+    // 节奏
+    fragmented_speech: "片段化表达",
+    ritual_phrases: "仪式感套话（早 / 晚安）",
+    netspeak: "网络用语",
+    particles_register: "语气词体系（嘛 / 哟 / 鸭）",
   },
   dynamicDim: {
     trust: "信任",
@@ -848,14 +904,14 @@ async function viewSearch() {
 
 const TABS = [
   { id: "overview", label: "概览" },
+  { id: "manage", label: "角色设定" },
   { id: "conversation", label: "对话" },
-  { id: "memory", label: "记忆" },
-  { id: "journal", label: "行为日志" },
-  { id: "facts", label: "事实" },
   { id: "identity", label: "Identity" },
   { id: "cognition", label: "认知" },
   { id: "intent", label: "意图" },
-  { id: "manage", label: "管理" },
+  { id: "memory", label: "记忆" },
+  { id: "facts", label: "事实" },
+  { id: "journal", label: "行为日志" },
 ];
 
 async function viewCharacter(assistantId, tabId = "overview") {
@@ -1520,9 +1576,33 @@ async function renderIdentityTab(body, a) {
 
   // 渲染表单：每个字段一行，受控词表用 multi-checkbox / select；0-1 floats 用 number input
   const form = el("article", {});
+  const aiExtractBtn = el("button", {
+    class: "outline secondary small",
+    style: "margin-left: 12px; font-size: 12px; padding: 4px 12px;",
+  }, "🤖 AI 分析 setup_prompt");
+  aiExtractBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    aiExtractBtn.setAttribute("aria-busy", "true");
+    aiExtractBtn.textContent = "分析中（本地 LLM 跑约 10-30s）...";
+    try {
+      const result = await api.post("/api/character/extract", { assistantId: a.assistantId });
+      if (!result.ok) {
+        showToast(`提炼失败: ${result.error || "unknown"}`, "error");
+        return;
+      }
+      // 把 identity 字段 + lore 显示出来给 admin 看，提供"应用"按钮一键写入
+      showExtractPreviewDialog(a, result, () => renderIdentityTab(body, a));
+    } catch (err) {
+      showToast(`请求失败: ${err.message}`, "error");
+    } finally {
+      aiExtractBtn.removeAttribute("aria-busy");
+      aiExtractBtn.textContent = "🤖 AI 分析 setup_prompt";
+    }
+  });
   form.appendChild(el("header", {}, [
     el("strong", {}, "Identity (21 fields)"),
     el("small", { class: "muted" }, id.identityVersion ? `  v${id.identityVersion}` : "  尚未配置"),
+    aiExtractBtn,
   ]));
 
   const grid = el("div", { class: "identity-grid" });
@@ -1539,8 +1619,23 @@ async function renderIdentityTab(body, a) {
   // 基本属性
   row("ageYears", "年龄（岁）",
     el("input", { id: "id-age", type: "number", value: id.ageYears ?? "", style: "width: 100px" }));
-  row("genderExpression", "性别表达",
+  row("genderExpression", "性别表达（自由文本，如 feminine / masculine / androgynous）",
     el("input", { id: "id-gender", value: id.genderExpression || "" }));
+
+  // pronouns: input + datalist（3 preset 自动补全 + 允许自定义如 xe/xem）
+  // 这是 system <role> "Speak as <obj>" 的代词来源 —— 留空会默认 they/them
+  const pronounsList = el("datalist", { id: "pronoun-presets" });
+  for (const p of vocab.pronounPresets || ["she/her", "he/him", "they/them"]) {
+    pronounsList.appendChild(el("option", { value: p }));
+  }
+  const pronounsInput = el("input", {
+    id: "id-pronouns",
+    list: "pronoun-presets",
+    value: id.pronouns || "",
+    placeholder: "she/her | he/him | they/them（留空 → they/them）",
+  });
+  row("pronouns", "英文人称代词（驱动 voice anchor 渲染，避免错称）",
+    el("div", {}, [pronounsInput, pronounsList]));
   row("speakingStyle", "说话风格",
     el("textarea", { id: "id-speaking", rows: 3 }, id.speakingStyle || ""));
   row("worldview", "世界观 / 人生观",
@@ -1601,7 +1696,7 @@ async function renderIdentityTab(body, a) {
     const tname = e.target?.dataset?.tension;
     if (tname) document.getElementById(`tv-${tname}`).textContent = e.target.value;
   });
-  row(`tensions`, `内在张力（${vocab.tensions.length} 个维度，值靠近 1 偏向左项）`, tensionsBox);
+  row(`tensions`, `内在张力（${vocab.tensions.length} 个维度）`, tensionsBox);
 
   // careLanguages: give / receive 各 5 个 checkbox — 带中文
   const careGive = new Set((id.careLanguages?.give) || []);
@@ -1641,6 +1736,20 @@ async function renderIdentityTab(body, a) {
   tagField("coreWounds", "核心创伤", id.coreWounds, vocab.commonCoreWounds, ZH.wound);
   tagField("desires", "深层渴望", id.desires, vocab.commonDesires, ZH.desire);
 
+  // CC-5.B: skills 字段。后端支持 string | { name, examples } 两种格式。
+  // UI 用 tags 编辑名字（多选 / 自定义），保存时智能 merge：
+  //   - 名字仍在新 tag 列表 → 保留原 object（不丢 examples）
+  //   - 名字被删 → 整条丢
+  //   - 新名字 → string 形式加进去（暂无 examples，需要 examples 走 API）
+  const originalSkills = id.skills || [];
+  const skillNamesNow = originalSkills.map((s) => (typeof s === "string" ? s : s.name));
+  const skillsHasExamples = originalSkills.some((s) => typeof s === "object" && Array.isArray(s.examples) && s.examples.length);
+  tagField("skills", "表达招式", skillNamesNow, vocab.commonSkills || [], ZH.skill);
+  if (skillsHasExamples) {
+    // 提示有现存 examples，删除某 skill 名时 examples 也会丢
+    grid.lastChild.appendChild(el("p", { class: "muted small" }, "（部分招式带角色专属 example，删除该招式名会一并丢失）"));
+  }
+
   form.appendChild(grid);
 
   const saveBtn = el("button", {
@@ -1657,6 +1766,7 @@ async function renderIdentityTab(body, a) {
       const fields = {
         ageYears: parseInt(document.getElementById("id-age").value, 10) || null,
         genderExpression: document.getElementById("id-gender").value,
+        pronouns: document.getElementById("id-pronouns").value.trim(),
         speakingStyle: document.getElementById("id-speaking").value,
         worldview: document.getElementById("id-worldview").value,
         personalityTraits: collectChecked("traits"),
@@ -1675,6 +1785,19 @@ async function renderIdentityTab(body, a) {
         desires: tagInputs.desires.getValues(),
         careLanguages: { give: collectChecked("care-give"), receive: collectChecked("care-recv") },
         tensions,
+        // skills: 把 tag input 的字符串名字映射回原始 object（保留 examples）
+        skills: (() => {
+          const editedNames = tagInputs.skills.getValues();
+          return editedNames.map((name) => {
+            const orig = originalSkills.find((s) =>
+              typeof s === "string" ? s === name : s.name === name
+            );
+            // 原本是 object 形态（带 examples）→ 保留整个 object
+            if (orig && typeof orig === "object") return orig;
+            // 原本是 string，或 UI 新加的 → 用 string 形态
+            return name;
+          });
+        })(),
       };
       try {
         const resp = await api.post("/api/character/identity/upsert", { assistantId: a.assistantId, ...fields });
@@ -1691,6 +1814,70 @@ async function renderIdentityTab(body, a) {
   form.appendChild(saveBtn);
 
   body.appendChild(form);
+}
+
+// ─── AI 提炼 preview dialog ─────────────────────────────────────────
+//
+// 给 identity tab 的"AI 分析"按钮用。展示 LLM 提炼出的 identity 字段 + 净化 lore，
+// 让 admin review；点"应用"调 identity/upsert + lore/save 落库。
+function showExtractPreviewDialog(a, result, onApplied) {
+  const dlg = document.createElement("dialog");
+  dlg.style.cssText =
+    "max-width:680px; width:92%; padding:20px; border-radius:12px; border:0; " +
+    "background:white; box-shadow:0 8px 32px rgba(0,0,0,0.15);";
+
+  const id = result.identity || {};
+  const lore = result.lore || "";
+
+  // 字段行
+  const idLines = [];
+  for (const [k, v] of Object.entries(id)) {
+    const displayV = typeof v === "string" ? v : JSON.stringify(v);
+    idLines.push(`${k}: ${displayV}`);
+  }
+  const idPre = el("pre", {
+    style: "max-height:280px; overflow:auto; font-size:11px; background:#f5f5f7; " +
+           "padding:12px; border-radius:8px; white-space:pre-wrap; word-break:break-word;",
+  }, idLines.join("\n") || "(无字段)");
+
+  const lorePre = el("pre", {
+    style: "max-height:200px; overflow:auto; font-size:12px; background:#f5f5f7; " +
+           "padding:12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; margin-top:8px;",
+  }, lore || "(空)");
+
+  const applyBtn = el("button", {}, "应用并保存");
+  const cancelBtn = el("button", { class: "outline" }, "取消");
+  cancelBtn.addEventListener("click", () => dlg.close());
+  applyBtn.addEventListener("click", async () => {
+    applyBtn.setAttribute("aria-busy", "true");
+    try {
+      if (Object.keys(id).length > 0) {
+        await api.post("/api/character/identity/upsert", { assistantId: a.assistantId, ...id });
+      }
+      await api.post("/api/character/lore/save", { assistantId: a.assistantId, lore });
+      showToast("已应用并保存（identity + lore）", "success");
+      dlg.close();
+      if (typeof onApplied === "function") onApplied();
+    } catch (err) {
+      showToast(`保存失败: ${err.message}`, "error");
+      applyBtn.removeAttribute("aria-busy");
+    }
+  });
+
+  dlg.appendChild(el("h3", { style: "margin:0 0 12px 0" }, "🤖 AI 提炼结果"));
+  dlg.appendChild(el("p", { class: "muted small", style: "margin:0 0 16px 0" },
+    `提炼耗时 ${result.extractionMs} ms · 字段 ${Object.keys(id).length} 项 · lore ${lore.length} 字`));
+  dlg.appendChild(el("h5", { style: "margin:8px 0 4px 0" }, "📋 Identity 字段"));
+  dlg.appendChild(idPre);
+  dlg.appendChild(el("h5", { style: "margin:12px 0 4px 0" }, "📖 Lore（净化后）"));
+  dlg.appendChild(lorePre);
+  dlg.appendChild(el("div", { style: "display:flex; gap:12px; justify-content:flex-end; margin-top:16px;" },
+    [cancelBtn, applyBtn]));
+
+  document.body.appendChild(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", ""); // fallback for older browsers
 }
 
 // ─── Cognition tab (Phase CC-2 / CC-3) ─────────────────────────────
@@ -1883,6 +2070,86 @@ async function renderCognitionTab(body, a) {
     }
   }
   body.appendChild(topicArticle);
+
+  // 5) Prompt 预览（V_NEW_LEAN）—— 让 admin 看到 server 渲染好的 8 段 slots + assistantPrefill
+  // 含一个简易 salient phrase 调试器：输入用户消息 → 看哪个 wound 被勾住
+  renderPromptPreview(body, a, ctx);
+}
+
+// V_NEW_LEAN Prompt 预览组件 —— 显示 mergedSystem + assistantPrefill + 选择性注意调试。
+function renderPromptPreview(parent, a, initialCtx) {
+  const article = el("article", {});
+  article.appendChild(el("header", {}, [
+    el("strong", {}, "Prompt 预览（V_NEW_LEAN）"),
+    el("small", { class: "muted" }, "  server 渲染好的 8 段 slots + assistantPrefill。输入测试消息看 salient phrase 触发。"),
+  ]));
+
+  // 调试输入框：用户消息 → 触发 salient phrase
+  const debugInput = el("input", {
+    type: "text",
+    placeholder: "输入一条用户消息试一下（如：算了，随便吧）",
+    style: "margin-bottom: 0.5rem",
+  });
+  const debugBtn = el("button", { class: "outline secondary" }, "刷新预览");
+
+  // 三个段落容器
+  const sysBlock = el("pre", { class: "wrap-pre prompt-block" }, "");
+  const userBlock = el("pre", { class: "wrap-pre prompt-block" }, "");
+  const salientBlock = el("div", { class: "muted small" }, "");
+  const metricsBlock = el("p", { class: "muted small" }, "");
+
+  function fillFromCtx(ctx) {
+    sysBlock.textContent = ctx.mergedSystem || "（请输入测试消息后点刷新，查看完整 system prompt）";
+    userBlock.textContent = ctx.assistantPrefill || "(独白段为空 —— 当前角色无显著情绪/关系异常)";
+    if (ctx.salientPhrase) {
+      const sp = ctx.salientPhrase;
+      salientBlock.innerHTML = "";
+      salientBlock.appendChild(el("strong", {}, "选择性注意命中："));
+      salientBlock.appendChild(document.createTextNode(` "${sp.phrase}" `));
+      salientBlock.appendChild(el("span", { class: "badge badge--neutral" }, sp.triggerSource));
+      salientBlock.appendChild(document.createTextNode(` → ${zhOf("insecurity", sp.triggerSource) || zhOf("wound", sp.triggerSource) || ""}`));
+    } else {
+      salientBlock.textContent = "选择性注意：未触发（输入测试消息可调试）";
+    }
+    const sysLen = (ctx.mergedSystem || "").length;
+    const usrLen = (ctx.assistantPrefill || "").length;
+    metricsBlock.textContent = sysLen
+      ? `mergedSystem ${sysLen} chars · assistantPrefill ${usrLen} chars · combined ${sysLen + usrLen}`
+      : "";
+  }
+
+  fillFromCtx(initialCtx);
+
+  debugBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const userInput = debugInput.value.trim();
+    if (!userInput) {
+      showToast("请先输入一条测试消息", "warn");
+      return;
+    }
+    debugBtn.setAttribute("aria-busy", "true");
+    try {
+      const newCtx = await api.post("/api/chat/context", {
+        assistantId: a.assistantId,
+        userInput,
+      });
+      fillFromCtx(newCtx);
+    } catch (err) {
+      showToast(`预览失败: ${err.message}`, "error");
+    } finally {
+      debugBtn.removeAttribute("aria-busy");
+    }
+  });
+
+  article.appendChild(el("div", { class: "prompt-debug-row" }, [debugInput, debugBtn]));
+  article.appendChild(salientBlock);
+  article.appendChild(el("h5", { class: "muted small" }, "完整 system（mergedSystem，含 8 个 slot）"));
+  article.appendChild(sysBlock);
+  article.appendChild(el("h5", { class: "muted small" }, "assistantPrefill（[此刻] 独白段，每条消息变）"));
+  article.appendChild(userBlock);
+  article.appendChild(metricsBlock);
+
+  parent.appendChild(article);
 }
 
 // ─── Intent tab (Phase CC-4) ──────────────────────────────────────
@@ -1958,6 +2225,57 @@ async function renderIntentTab(body, a) {
   }
   body.appendChild(cur);
 
+  // 1.5) Attention 1h — 角色当下 latched on 什么（V3 新增）
+  // 数据来自 behavior-intent endpoint 的 attention1h 字段（withAttention=true 默认）
+  const attn = intentResp.attention1h;
+  const attnArticle = el("article", {});
+  attnArticle.appendChild(
+    el("header", {}, [
+      el("strong", {}, "Attention · 最近 1 小时"),
+      el("span", { class: "muted small", style: "margin-left: 8px" }, "（hot path 与 proactive 共享）"),
+    ])
+  );
+  if (!attn || (!attn.topics?.length && !attn.innerFocus)) {
+    attnArticle.appendChild(
+      el("p", { class: "muted" }, "无数据：最近 1 小时没有对话，或 LLM 提取失败。")
+    );
+  } else {
+    if (Array.isArray(attn.topics) && attn.topics.length) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "话题："),
+          el("span", { class: "muted" }, attn.topics.join(" / ")),
+        ])
+      );
+    }
+    if (attn.innerFocus) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "内心焦点："),
+          el("span", {}, attn.innerFocus),
+        ])
+      );
+    }
+    if (attn.emotionalTone) {
+      attnArticle.appendChild(
+        el("p", {}, [
+          el("strong", {}, "整体基调："),
+          el("span", { class: "badge badge--neutral" }, attn.emotionalTone),
+          " ",
+          el("span", { class: "muted small" }, `（基于 ${attn.turnCount || 0} 条 turn）`),
+        ])
+      );
+    }
+    attnArticle.appendChild(
+      el(
+        "p",
+        { class: "muted small" },
+        "提示：这一层影响 chat hot path 的 register 选择，也会增强 behavior intent 的判断（如 abandonment 焦点 / 未解决话题）。"
+      )
+    );
+  }
+  body.appendChild(attnArticle);
+
   // 2) Score table — 14 intents 排序
   const scoreArticle = el("article", {});
   scoreArticle.appendChild(el("header", {}, [el("strong", {}, "14 Intents — 当前评分")]));
@@ -2002,12 +2320,38 @@ async function renderIntentTab(body, a) {
   body.appendChild(scoreArticle);
 }
 
+function showResultDialog(title, data) {
+  document.getElementById("vis-result-dialog")?.remove();
+  const dlg = document.createElement("dialog");
+  dlg.id = "vis-result-dialog";
+  dlg.className = "vis-result-dialog";
+
+  const closeBtn = el("button", { class: "vis-btn-sm" }, "关闭");
+  closeBtn.addEventListener("click", () => { dlg.close(); dlg.remove(); });
+
+  const pre = el("pre", { class: "vis-result-pre" }, JSON.stringify(data, null, 2));
+  dlg.appendChild(el("article", {}, [
+    el("header", { style: "display:flex; align-items:center; justify-content:space-between;" }, [
+      el("strong", {}, title),
+      closeBtn,
+    ]),
+    pre,
+  ]));
+
+  dlg.addEventListener("click", (ev) => { if (ev.target === dlg) { dlg.close(); dlg.remove(); } });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+}
+
 async function renderManageTab(body, a) {
   body.innerHTML = "";
 
   const isCharacterLike = isCharacterTypeLike(a.assistantType);
 
   if (isCharacterLike) {
+    const catchupBtn = el("button", { class: "vis-btn-sm" }, "立即补叙");
+    const proactiveBtn = el("button", { class: "vis-btn-sm" }, "立即消息");
+
     const togglesArticle = el("article", {}, [
       el("header", {}, [el("strong", {}, "自驱开关")]),
       el("p", { class: "muted" }, "切换后立即生效。控制本角色是否参与 lazy catchup 和 proactive plan 生成。"),
@@ -2019,8 +2363,9 @@ async function renderManageTab(body, a) {
             id: "tg-autolife",
             checked: a.allowAutoLife ? "checked" : false,
           }),
-          " 自驱生活记忆 (allow_auto_life)",
+          " 生活",
         ]),
+        catchupBtn,
       ]),
       el("div", { class: "switch-row" }, [
         el("label", {}, [
@@ -2030,8 +2375,9 @@ async function renderManageTab(body, a) {
             id: "tg-proactive",
             checked: a.allowProactiveMessage ? "checked" : false,
           }),
-          " 主动消息 (allow_proactive_message)",
+          " 主动消息",
         ]),
+        proactiveBtn,
       ]),
     ]);
     body.appendChild(togglesArticle);
@@ -2061,6 +2407,39 @@ async function renderManageTab(body, a) {
     tgPro.addEventListener("change", () =>
       patchFlags({ allowProactiveMessage: tgPro.checked })
     );
+
+    catchupBtn.addEventListener("click", async () => {
+      catchupBtn.setAttribute("aria-busy", "true");
+      try {
+        const resp = await api.post("/api/character/catchup", {
+          assistantId: a.assistantId,
+          lastInteractionAt: Date.now() - 6 * 3600 * 1000,
+          maxEvents: 5,
+        });
+        showResultDialog("补叙结果", resp);
+        showToast(`catchup 完成: generated=${resp.generated ?? 0}`, "ok");
+      } catch (err) {
+        showToast(`catchup 失败: ${err.message}`, "err");
+      } finally {
+        catchupBtn.removeAttribute("aria-busy");
+      }
+    });
+
+    proactiveBtn.addEventListener("click", async () => {
+      proactiveBtn.setAttribute("aria-busy", "true");
+      try {
+        const resp = await api.post("/api/proactive/regenerate-plans", {
+          assistantId: a.assistantId,
+          force: true,
+        });
+        showResultDialog("主动消息结果", resp);
+        showToast(`今日消息: generated=${resp.generated ?? 0}`, "ok");
+      } catch (err) {
+        showToast(`生成失败: ${err.message}`, "err");
+      } finally {
+        proactiveBtn.removeAttribute("aria-busy");
+      }
+    });
   } else {
     body.appendChild(
       el("article", { class: "muted" }, [
@@ -2074,40 +2453,52 @@ async function renderManageTab(body, a) {
     );
   }
 
-  const typeOptions = ["", "character", "writer", "default"];
-  const typeSelect = el(
-    "select",
-    { class: "vis-select", id: "edit-type" },
-    typeOptions.map((opt) =>
-      el(
-        "option",
-        {
-          value: opt,
-          ...(opt === (a.assistantType || "") ? { selected: "selected" } : {}),
-        },
-        opt === "" ? "（未指定）" : `${opt} — ${assistantTypeLabel(opt)}`
-      )
-    )
-  );
+  const typeCombo = makeCombo({
+    value: a.assistantType || "",
+    options: [
+      { value: "character", zh: "人物型陪伴角色" },
+      { value: "writer", zh: "写作助手" },
+      { value: "default", zh: "通用助手" },
+    ],
+    placeholder: "（未指定）",
+  });
+
+  const aiAnalyzeBtn = el("button", { class: "vis-btn-sm" }, "AI 分析");
+  aiAnalyzeBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    aiAnalyzeBtn.setAttribute("aria-busy", "true");
+    aiAnalyzeBtn.textContent = "分析中…";
+    try {
+      const result = await api.post("/api/character/extract", { assistantId: a.assistantId });
+      if (!result.ok) {
+        showToast(`提炼失败: ${result.error || "unknown"}`, "error");
+        return;
+      }
+      showExtractPreviewDialog(a, result, () => renderManageTab(body, a));
+    } catch (err) {
+      showToast(`请求失败: ${err.message}`, "error");
+    } finally {
+      aiAnalyzeBtn.removeAttribute("aria-busy");
+      aiAnalyzeBtn.textContent = "AI 分析";
+    }
+  });
 
   const profileForm = el("article", {}, [
     el("header", {}, [el("strong", {}, "Profile 编辑")]),
     el("label", {}, [
-      "characterName",
+      "角色名称",
       el("input", { id: "edit-name", value: a.characterName || "" }),
     ]),
-    el("label", {}, [
-      "characterBackground",
-      el("textarea", { id: "edit-bg", rows: "6" }, a.characterBackground || ""),
+    el("div", { class: "field-with-action" }, [
+      el("div", { class: "field-with-action__head" }, [
+        el("label", { for: "edit-bg" }, "初始设定"),
+        aiAnalyzeBtn,
+      ]),
+      el("textarea", { id: "edit-bg", rows: "6", style: "width:100%; margin:0;" }, a.characterBackground || ""),
     ]),
     el("label", {}, [
-      "assistantType",
-      typeSelect,
-      el(
-        "small",
-        { class: "muted" },
-        " 与 chatbox-Android `MyAssistant.type` 对齐；character 类型才显示自驱开关。"
-      ),
+      "类型",
+      el("div", { style: "margin-top: 0.3rem;" }, [typeCombo.root]),
     ]),
     el(
       "button",
@@ -2116,7 +2507,7 @@ async function renderManageTab(body, a) {
           ev.preventDefault();
           const name = document.getElementById("edit-name").value.trim();
           const bg = document.getElementById("edit-bg").value;
-          const newType = document.getElementById("edit-type").value;
+          const newType = typeCombo.getValue();
           try {
             const resp = await api.patch(
               `/api/browse/assistants/${encodeURIComponent(a.assistantId)}/profile`,
@@ -2140,86 +2531,6 @@ async function renderManageTab(body, a) {
   ]);
   body.appendChild(profileForm);
 
-  const newOps = el("article", {}, [
-    el("header", {}, [el("strong", {}, "Catchup & Plans（推荐）")]),
-    el("p", { class: "muted" }, "lazy catchup 按需补叙生活记忆；force=true 模式立即合成一条今日消息（绕过 trigger 评估，2 分钟后派发）。"),
-    el("div", { class: "run-row" }, [
-      el("label", {}, [
-        "gap hours",
-        el("input", {
-          id: "catchup-gap-hours",
-          type: "number",
-          min: "1",
-          max: "240",
-          value: "6",
-          style: "width: 80px",
-        }),
-      ]),
-      el(
-        "button",
-        {
-          class: "outline",
-          onclick: async (ev) => {
-            ev.preventDefault();
-            const btn = ev.currentTarget;
-            const hours = Number(document.getElementById("catchup-gap-hours").value || "6");
-            const out = document.getElementById("ops-output");
-            out.textContent = "running…";
-            btn.setAttribute("aria-busy", "true");
-            try {
-              const now = Date.now();
-              const resp = await api.post("/api/character/catchup", {
-                assistantId: a.assistantId,
-                lastInteractionAt: now - hours * 3600 * 1000,
-                maxEvents: 5,
-              });
-              out.textContent = JSON.stringify(resp, null, 2);
-              showToast(`catchup 完成: generated=${resp.generated ?? 0}`, "ok");
-            } catch (err) {
-              out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
-              showToast(`catchup 失败: ${err.message}`, "err");
-            } finally {
-              btn.removeAttribute("aria-busy");
-            }
-          },
-        },
-        "立即补叙近期生活记忆"
-      ),
-    ]),
-    el("div", { class: "run-row" }, [
-      el(
-        "button",
-        {
-          class: "outline",
-          title: "force=true，绕过 trigger 评估，立即生成一条主动消息（2 分钟后派发）",
-          onclick: async (ev) => {
-            ev.preventDefault();
-            const btn = ev.currentTarget;
-            const out = document.getElementById("ops-output");
-            out.textContent = "running…";
-            btn.setAttribute("aria-busy", "true");
-            try {
-              const resp = await api.post("/api/proactive/regenerate-plans", {
-                assistantId: a.assistantId,
-                force: true,
-              });
-              out.textContent = JSON.stringify(resp, null, 2);
-              showToast(`今日消息: generated=${resp.generated ?? 0}`, "ok");
-            } catch (err) {
-              out.textContent = `error: ${err.message}\n${JSON.stringify(err.payload || {}, null, 2)}`;
-              showToast(`生成失败: ${err.message}`, "err");
-            } finally {
-              btn.removeAttribute("aria-busy");
-            }
-          },
-        },
-        "立即生成一条今日消息（强制）"
-      ),
-    ]),
-    el("h5", {}, "结果"),
-    el("pre", { id: "ops-output" }, "—"),
-  ]);
-  body.appendChild(newOps);
 }
 
 async function viewPlans() {
