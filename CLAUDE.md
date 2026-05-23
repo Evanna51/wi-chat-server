@@ -2,6 +2,8 @@
 
 针对本仓库（character push server）的项目级约束。全局规则见 `~/.claude/CLAUDE.md`。
 
+**新会话先读 `docs/CODEMAP.md`** —— 项目结构 / 关键表 / cron 一览表 / Gotchas 都在那，避免反复 grep。本文件只放"协作流程 + 必须知道的约束"。
+
 ---
 
 ## 测试残留数据 — 跑完测试必须清
@@ -49,9 +51,27 @@ npm run test:clean:dry  # 仅预览不删
 
 ## 主动消息 (proactive plan)
 
-- `generatePlanForAssistant`（long-term cron）有 Jaccard dedup
-- `scheduleNextPushPlan`（事件驱动 next_push）也已加 Jaccard dedup（与 long-term 对齐，阈值 0.55）
-- `markPlanSent` 同事务里会 upsert `character_state.last_proactive_at` —— 这是 `NEXT_PUSH_MIN_GAP_FROM_LAST_MS`（30min）和 `WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS`（1h）两道闸门生效的前提；改 `markPlanSent` 时别拆掉
+代码在 `src/services/proactive/`（2026-05-23 从单体 1430 行 `proactivePlanService.js` 拆出来）：
+
+- `longTerm.js` — `generatePlanForAssistant` / `generatePlans`（plan-generation cron 走这里）
+- `nextPush.js` — `scheduleNextPushPlan`（事件驱动 72h 链；**改这里必先读文件顶部 + 函数头注释**，watchdog 死循环坑就在这）
+- `watchdog.js` — `runProactiveWatchdogOnce`（proactive-watchdog cron）
+- `store.js` — `proactive_plans` 表所有读写 + `markPlanSent`（含 character_state 事务）
+
+**绝对别忘的点**（详见 `docs/CODEMAP.md` Gotchas）：
+- `scheduleNextPushPlan` 必须传 `reason` 参数（`user_event` / `watchdog` / `post_dispatch`），watchdog 路径有 pending 必须 skip，否则 30min 自己 cancel 自己造死链
+- `markPlanSent` 写 `character_state.last_proactive_at` 是两道 gap gate 生效的前提，**不能拆事务**
+- `scheduledAt` 必须加 jitter，dedup corpus 不能过滤 status，窗口 ≥ 48h
+
+## 日记 / 周记 (character journal)
+
+代码：`src/services/character/journalService.js`，表 `character_journal`（migration 034）。
+
+- daily-journal cron 每天 10:30 写昨日，weekly-journal 周一 00:30 写上周
+- 开关挂 `assistant_profile.enable_daily_journal` / `enable_weekly_journal`
+- 素材取 conversation_turns + narrative_episode（周记另吃 relationship_reflection）
+- `UNIQUE(assistant_id, period_type, period_start)` 防重复；**force generate 也不能覆盖已有 entry**，想重写先 SQL DELETE
+- API：`/api/character/journal*`（settings / generate / list / detail），看 `routes/api/journal.js`
 
 ## 关联客户端
 

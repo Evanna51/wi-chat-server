@@ -1,0 +1,130 @@
+# wi-chat-server CODEMAP
+
+新会话 Claude 进来先读这里，避免反复 grep。**只放稳定结构信息**，业务行为细节看 `CLAUDE.md`，单文件注释看头部。
+
+---
+
+## 目录速查
+
+```
+src/
+  index.js              启动入口（router 挂载、scheduler、ws server）
+  config.js             所有 env 配置 + cron expressions（getServerLlmConfig / getIntrospectionLlmConfig）
+  db.js                 better-sqlite3 instance + 所有 prepared statement helpers（700+ 行单体，待拆）
+  scheduler.js          所有 cron 注册 + plan-executor setInterval loop
+  llm/                  Provider 抽象（getProvider / getEmbedProvider / getIntrospectionProvider）
+  db/migrations/        按编号顺序自动执行的 SQL（启动时跑，见 db.js 顶部）
+  ws/                   WebSocket 派发
+  events/               EventEmitter 桥（turnEvents / profileEvents）
+  subscribers/          事件订阅者（scheduleNextPush / cancelPendingPlans / personaExtraction）
+  workers/              retentionSweeper / memoryIndexer
+  routes/
+    api.js              slim mount → api/* sub-routers（21 行）
+    api/
+      _middleware.js    authMiddleware（REQUIRE_API_KEY env）
+      meta.js           /health、/assistant-profile、/relationship/state
+      character.js      /character/identity*、episodes*、topics*、reflection*、behavior-intent、attention-1h、context、catchup、extract、lore、/admin/character/*
+      journal.js        /character/journal/*（日记 / 周记）
+      memory.js         /tool/memory-recall、memory-correct、/admin/search-fts
+      knowledge.js      /knowledge/*、/tool/knowledge-add（dormant）
+      proactive.js      /proactive/plans CRUD + regenerate
+    chat.js             POST /api/chat/context（chat hot path，给客户端拼 prompt slots）
+    sync.js             客户端 turn 同步（/api/sync/push、/api/sync/pull）
+    admin.js            /admin/* — calls / metrics / debug
+    browse.js           admin UI 浏览
+  services/
+    proactive/          主动消息子系统（拆自原 1430 行 proactivePlanService.js）
+      shared.js         工具 + LLM 调用 + 跨模块常量
+      store.js          proactive_plans 表所有 prepared statement + markPlanSent 事务
+      longTerm.js       inactive_7d / daily_greeting trigger + generatePlans
+      nextPush.js       72h 事件驱动 + scheduleNextPushPlan
+      watchdog.js       runProactiveWatchdogOnce
+      index.js          重新导出 15 个公开 API
+    character/          角色认知层（identity / state / dynamics / episodes / topics / reflection / behavior / journal / persona / attention / promptComposer / characterContextBuilder）
+    memoryRetrievalService / memoryEditService / memoryIngestService / memoryClassificationService
+    catchupService / characterStateService / knowledgeService / characterEngine / textDedupService
+tests/                  jest 测试，直连真 DB（清理脚本：npm run test:clean，见 CLAUDE.md）
+scripts/                ad-hoc 脚本（dead-letter-replay / run-plan-generator / clean-test-data 等）
+```
+
+## 关键表（`data/character-behavior.db`, SQLite WAL）
+
+| 表 | 用途 | migration |
+|---|---|---|
+| `conversation_turns` | 聊天回合（assistant/user role + content + session） | 001 |
+| `memory_items` / `memory_facts` / `memory_edges` | 记忆三层（atomic / 抽取 facts / 关联） | 001, 013 |
+| `memory_audit_log` | memory 修正动作日志 | 014 |
+| `assistant_profile` | 角色配置 + 开关（`allow_proactive_message` / `enable_daily_journal` / `enable_weekly_journal` 等） | 004, 016, 032, 034 |
+| `character_identity` / `character_state` | 角色身份 + 实时状态（mood / energy / intimacy / last_proactive_at） | 025, 027 |
+| `narrative_episode` + `episode_memory_link` / `persistent_topic` | 叙事段 + 长期话题 | 028 |
+| `relationship_reflection` | 周关系反思 | 029 |
+| `proactive_plans` | 主动消息计划（pending/sent/cancelled） | 010 |
+| `character_journal` | 日记 / 周记（period_type=daily\|weekly） | 034 |
+| `character_behavior_journal` | 所有 service 调度日志（debug 必看） | - |
+| `scheduler_lock` | cron leader lock 防多实例 | 033 |
+| `outbox_events` / `local_outbox_messages` / `dead_letter_events` | 消息派发 | - |
+| `provider_call_log` | LLM 调用统计 | - |
+
+下个 migration 编号：**035**。
+
+## cron 任务（`config.js` *Cron env，`scheduler.js` 注册）
+
+| label | 默认 | 干嘛 |
+|---|---|---|
+| `plan-generation` | `0 6 * * *` | inactive_7d / daily_greeting 长期 plan |
+| `proactive-watchdog` | `*/30 * * * *` | next_push 链断了帮忙续上 |
+| `daily-journal` | `30 10 * * *` | 角色日记（10:30 写昨日） |
+| `weekly-journal` | `30 0 * * 1` | 角色周记（周一 00:30 写上周） |
+| `episode-builder` | `30 3 * * *` | memory_items → narrative_episode |
+| `topic-dormant-sweep` | `0 4 * * *` | 21 天没提的 topic 转 dormant |
+| `reflection-weekly` | `30 4 * * 0` | 周关系反思 |
+| `memory-classify-backfill` | `*/10 * * * *` | user_turn 分类 + 抽 facts（高频，看清成本） |
+| `retention-sweep` | `30 3 * * *` | 清 outbox / 过期 |
+| `backup-daily` / `backup-weekly` | `0 3 * * *` / `30 2 * * 0` | DB 备份 |
+| `dead-letter-monitor` | `0 9 * * *` | 死信监控 |
+
+`plan-executor` 不是 cron，是 `setInterval` loop（默认 60s，`config.planExecutorIntervalMs`）。
+
+所有 cron 都包了 `scheduleIfEnabled` + `scheduler_lock` 防多实例。`lockTtlMs` 三档：
+- **SHORT_TTL** 5min — sweep / classify / monitor
+- **MEDIUM_TTL** 30min — backup
+- **LLM_TTL** 1h — episode / reflection / journal / plan
+
+## 路由 mounting（`src/index.js`）
+
+| 路径前缀 | router | 文件 |
+|---|---|---|
+| `/api` | apiRouter | `routes/api.js` → `routes/api/*` |
+| `/api/chat` | chatRouter | `routes/chat.js` |
+| `/api/sync` | syncRouter | `routes/sync.js` |
+| `/admin` | adminRouter | `routes/admin.js` |
+| `/` | browseRouter | `routes/browse.js` |
+
+API 端点风格统一：`authMiddleware`（REQUIRE_API_KEY env）+ zod schema 校验 + `{ ok: bool, ... }` 返回。
+
+## 改 X 的时候要看 Y
+
+| 任务 | 文件 |
+|---|---|
+| 加新 LLM-heavy cron | `scheduler.js`（scheduleIfEnabled + LLM_TTL）+ `config.js`（cron env） |
+| 加新表 | `db/migrations/035_xxx.sql`；schema 字段同步加到 `db.js` prepared statements |
+| 加新角色开关 | ALTER TABLE assistant_profile + `listProactiveAssistantProfiles` 这类 list fn 加 filter |
+| 改 proactive 触发链 | `services/proactive/{longTerm,nextPush,watchdog,store}.js`，**永远先看 nextPush.js 顶部 + scheduleNextPushPlan 头部注释** |
+| 加新 API endpoint | `routes/api/<domain>.js`（按业务选 meta/character/journal/memory/knowledge/proactive 之一） |
+| 改 chat 上下文 | `routes/chat.js` + `services/character/characterContextBuilder.js` + Android `sync/ChatDtos.kt`（同步检查） |
+| 改 system prompt 渲染 | `services/character/promptComposer.js` |
+| 切换 LLM provider | `.env` 改 `SERVER_LLM_PROVIDER` / `INTROSPECTION_LLM_PROVIDER`（fallback 链：INTROSPECTION → SERVER → qwen） |
+
+## Gotchas（fix 过的坑别再踩）
+
+- **watchdog 不能无脑调 `scheduleNextPushPlan`**：`reason` 参数区分 `user_event` / `watchdog` / `post_dispatch`。watchdog / post_dispatch 路径如果还有 pending 必须 skip，否则死链（每 30min 自己 cancel 自己刚生成的 plan）。见 `services/proactive/nextPush.js` 顶部 + 函数头注释。
+- **`last_proactive_at` 只在 `markPlanSent` 时更新**，且必须**同 SQLite 事务**，否则 `NEXT_PUSH_MIN_GAP_FROM_LAST_MS` / `WATCHDOG_MIN_GAP_FROM_PROACTIVE_MS` 两道 gate 失效。改 markPlanSent 时别拆 transaction。
+- **next_push `scheduledAt` 必须加 jitter**（±10min），否则全部落 cron tick 准点（:00 / :30），观感像机器人定时发。`evaluateDailyGreeting` 同理（5~25min）。
+- **dedup corpus 别只看 `status='sent'/'pending'`**，cancelled 也要看，否则 watchdog cancel 掉的同 body 没人拦。窗口 ≥ 48h，24h 会让边界 body 复活。
+- **TZ**：DB 时间戳是 ms epoch；prompt / UI 显示要用本地时间。`process.env.TZ=Asia/Shanghai` 已在 `ecosystem.config.js` 强制，所以 `Date.getX` 都按上海时间，但 `toISOString()` 仍是 UTC（错位 8h）。给 LLM 看时间用 `formatLocalTs(now)`，别用 toISOString。
+- **Express 路由顺序敏感**：`/character/journal/settings` 必须在 `/character/journal/:id` 之前注册，否则被 `:id` 通配吞掉。同理 `/generate`。
+- **测试中途崩 → fixture 泄漏**：跑完 `npm test` 必须 `npm run test:clean`。看到 DB 有 `t_cc_*` / `__t*` 等条目立刻清。详见 `CLAUDE.md`。
+- **PM2 双实例时**：`scheduler_lock` 防 cron 重复触发，但订阅者 / API 调用没锁。靠业务层 UNIQUE 约束 / dedup 兜底（如 `character_journal` 的 UNIQUE(assistant_id, period_type, period_start)）。
+- **`.claude/worktrees/*` 是临时 worktree，绝对不能 commit**。`git add -A` / `git add .` 容易把它扫进来。逐个 `git add <file>`。
+- **`memory-classify-backfill` 默认 10min 一跑 50+20 行**，走 introspection provider。`.env` 设 `INTROSPECTION_LLM_PROVIDER=qwen` 走本地否则跟 `SERVER_LLM_PROVIDER` 走（云端有调用量成本）。
+- **journal entry 默认不可覆盖**：`UNIQUE(assistant_id, period_type, period_start)` + service 层不删旧。force generate 也会被 UNIQUE 拦，想重写得先 SQL DELETE。
