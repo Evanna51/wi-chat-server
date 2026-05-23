@@ -112,6 +112,9 @@ const config = {
   topicDormantSweepCron: process.env.TOPIC_DORMANT_SWEEP_CRON || "0 4 * * *",   // 每天 04:00
   // Phase 3 weekly relationship reflection
   reflectionWeeklyCron: process.env.REFLECTION_WEEKLY_CRON || "30 4 * * 0",     // 每周日 04:30
+  // 角色日记 / 周记（journalService）
+  dailyJournalCron: process.env.DAILY_JOURNAL_CRON || "30 10 * * *",            // 每天 10:30 写昨天
+  weeklyJournalCron: process.env.WEEKLY_JOURNAL_CRON || "30 0 * * 1",           // 周一 00:30 写上周
 };
 
 /**

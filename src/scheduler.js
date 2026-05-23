@@ -156,6 +156,32 @@ async function runTopicDormantSweepTick() {
   }
 }
 
+async function runDailyJournalTick() {
+  // 每天 10:30 跑：所有 enable_daily_journal=1 的角色，写昨日日记
+  try {
+    const { runDailyJournalTick: tick } = require("./services/character/journalService");
+    const result = await tick();
+    infoLog(`[scheduler] daily-journal: scanned=${result.scanned} generated=${result.generated}`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] daily-journal failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+async function runWeeklyJournalTick() {
+  // 周一 00:30 跑：所有 enable_weekly_journal=1 的角色，写上周周记
+  try {
+    const { runWeeklyJournalTick: tick } = require("./services/character/journalService");
+    const result = await tick();
+    infoLog(`[scheduler] weekly-journal: scanned=${result.scanned} generated=${result.generated}`);
+    return result;
+  } catch (error) {
+    console.error("[scheduler] weekly-journal failed:", error.message);
+    return { error: error.message };
+  }
+}
+
 async function runReflectionTickWeekly() {
   // T-CC3-03: 每周给所有 character 类 assistant 跑 weekly reflection
   try {
@@ -445,6 +471,9 @@ function startScheduler() {
   scheduleIfEnabled(config.topicDormantSweepCron, "topic-dormant-sweep", runTopicDormantSweepTick, { lockTtlMs: SHORT_TTL });
   // T-CC3-03: Phase 3 weekly reflection
   scheduleIfEnabled(config.reflectionWeeklyCron, "reflection-weekly", runReflectionTickWeekly, { lockTtlMs: LLM_TTL });
+  // 角色日记 / 周记
+  scheduleIfEnabled(config.dailyJournalCron, "daily-journal", runDailyJournalTick, { lockTtlMs: LLM_TTL });
+  scheduleIfEnabled(config.weeklyJournalCron, "weekly-journal", runWeeklyJournalTick, { lockTtlMs: LLM_TTL });
   startPlanExecutorLoop();
 }
 
@@ -461,4 +490,6 @@ module.exports = {
   runEpisodeBuilderTick,
   runTopicDormantSweepTick,
   runReflectionTickWeekly,
+  runDailyJournalTick,
+  runWeeklyJournalTick,
 };
