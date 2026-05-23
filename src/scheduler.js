@@ -400,7 +400,7 @@ async function runPlanExecutorOnce() {
   // AI 自己决定 delayMs，可能 30 min、几小时，也可能直接 skip（"用户在忙"）。
   for (const aid of nextPushAssistants) {
     setImmediate(() => {
-      scheduleNextPushPlan({ assistantId: aid }).catch((e) => {
+      scheduleNextPushPlan({ assistantId: aid, reason: "post_dispatch" }).catch((e) => {
         console.error("[scheduler] post-send scheduleNextPush failed:", aid, e.message);
       });
     });

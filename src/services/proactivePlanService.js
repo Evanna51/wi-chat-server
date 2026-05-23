@@ -242,8 +242,9 @@ function evaluateDailyGreeting({ assistantId, now, profile }) {
   const elapsed = now - startOfDay;
   let scheduledAt;
   if (elapsed < 9 * 60 * 60 * 1000) {
-    // 09:00 ± 20 min，避免所有角色同一时刻问候
-    scheduledAt = startOfDay + 9 * 60 * 60 * 1000 + jitterMs(20 * 60 * 1000);
+    // 09:05 ~ 09:25，避免随机到 0 落在 09:00 整点，给用户准点推送的观感
+    scheduledAt =
+      startOfDay + 9 * 60 * 60 * 1000 + 5 * 60 * 1000 + jitterMs(20 * 60 * 1000);
   } else {
     return null;
   }
@@ -793,6 +794,7 @@ function buildNextPushPrompt({
   lifeEvents,
   lastUserMessage,
   recentAssistantMessages,
+  recentProactiveDrafts, // 含 sent / cancelled / pending 的最近 proactive 草稿，避免 LLM 重复同一句
   stateFragment,
   identityFragment,
   dynamicsFragment,
@@ -820,6 +822,20 @@ function buildNextPushPrompt({
   const myMsgLines = (recentAssistantMessages || [])
     .slice(0, 3)
     .map((t) => `- ${clipText(t.content, 140)}`)
+    .join("\n");
+  // 把最近的 proactive 草稿（不分 status）也铺给 LLM 看 —— 之前 watchdog 30min
+  // 一遍循环生成同一句 body，LLM 看不到自己 cancelled 的旧草稿，只看 conversation_turns
+  // 里没有的"自言自语"，所以反复重复同一句。把 status / 时间也一起给，让 LLM 知道
+  // "这句你已经说过 / 计划过 N 次了，换个角度或者干脆 skip"。
+  const draftLines = (recentProactiveDrafts || [])
+    .slice(0, 6)
+    .map((d) => {
+      const ageMin = d.created_at
+        ? Math.max(0, Math.round((Date.now() - d.created_at) / 60000))
+        : null;
+      const ageStr = ageMin == null ? "" : `${ageMin}min 前`;
+      return `- [${d.status || "?"}${ageStr ? "/" + ageStr : ""}] ${clipText(d.draft_body || "", 120)}`;
+    })
     .join("\n");
 
   return [
@@ -857,6 +873,16 @@ function buildNextPushPrompt({
     "",
     "你最近发过的话（避免角度雷同）：",
     myMsgLines || "- 无",
+    "",
+    "你最近主动发过 / 计划过的消息（按时间倒序，含未派发的草稿）：",
+    draftLines || "- 无",
+    "",
+    "**主动消息连续性原则**（仔细看上面那段，按情况选）：",
+    "- 上一条已发出 + ta 还没回：**绝对不要重复同一句 / 同一个关心点**。要么换完全不同的话题（『对了，今天 X 怎么样』），要么直接 skip 让 ta 喘口气",
+    "- 上一条是几小时前发的早安/吃饭类问候，现在又到了相邻时段：可以承接（『早上那杯茶喝了吗』『中午吃了没』），但**承接句要明显引用上一条的具体内容**，不能再说一遍开场白",
+    "- 上一条是 cancelled 的草稿（说明系统判断过不合适没派发）：把它当作『试过这个角度但被否了』，换角度",
+    "- 几条草稿都是同一句或同一角度：强烈建议 skip，避免你看起来像复读机",
+    "- 这条要明显能让 ta 感受到『你记得自己上一条说过什么』，不要给 ta 一种『每条消息都是独立的、互不相关的』机器人观感",
     "",
     `当前时间：${nowIso}（距用户上次回复约 ${hoursSinceLastUserReply.toFixed(1)} 小时）`,
     nowDate ? `时间段：${_timeBucket(nowDate.getHours())}，${_weekdayLabel(nowDate)}` : "",
@@ -903,14 +929,27 @@ function normalizeNextPushDraft(raw = {}) {
 
 /**
  * 给 (assistantId, userId) 排下一次推送计划。事件驱动，调用方：
- *   - HTTP /api/sync/push 收到 user-role turn 后
- *   - WS message_create 收到消息后（同样路径）
- *   - plan-executor 派发完一条 next_push 后（option A）
+ *   - HTTP /api/sync/push 收到 user-role turn 后        → reason='user_event'
+ *   - WS message_create 收到消息后（同样路径）           → reason='user_event'
+ *   - plan-executor 派发完一条 next_push 后（option A） → reason='post_dispatch'
+ *   - proactive-watchdog cron                            → reason='watchdog'
+ *
+ * reason 语义：
+ *   - 'user_event'：用户刚动作，上下文已变 → 总是 cancel 旧 pending 重排
+ *   - 'post_dispatch' / 'watchdog'：被动续链 → **如果还有 pending 就跳过，让它派发**
+ *
+ * 此前 watchdog 每 30 min 调一次本函数 → 函数内部 cancelExistingNextPushPlans
+ * 把还没到 scheduled_at 的 pending plan 砍掉 → 派出去的概率永远是 0，链路死锁。
  *
  * 返回 { ok, planId? , skipped? , reason? }；不抛错（内部 try/catch）让调用方放心
  * 在事件 hook 里直接调。
  */
-async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now() } = {}) {
+async function scheduleNextPushPlan({
+  assistantId,
+  userId = null,
+  now = Date.now(),
+  reason = "user_event",
+} = {}) {
   if (!assistantId) return { ok: false, skipped: "no_assistant_id" };
 
   try {
@@ -927,6 +966,30 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       // 顺带 cancel 任何残留 pending（理论上不会有）
       cancelExistingNextPushPlans(assistantId, "past_72h_handover_to_long_term");
       return { ok: false, skipped: "past_72h_handover_to_long_term" };
+    }
+
+    // 被动续链路径（watchdog / post_dispatch）：如果已有 pending next_push，就让它走完，
+    // 不要 cancel + 重排，否则 watchdog 每 30min 自己把刚生成的 plan 砍掉，永远派不出去。
+    // user_event 路径才需要刷新上下文（用户刚发了消息，AI 上一份草稿可能已经过时）。
+    if (reason !== "user_event") {
+      const existingPending = db
+        .prepare(
+          `SELECT id, scheduled_at, draft_body FROM proactive_plans
+            WHERE assistant_id = ?
+              AND trigger_reason = ?
+              AND status = 'pending'
+            ORDER BY scheduled_at ASC
+            LIMIT 1`
+        )
+        .get(assistantId, NEXT_PUSH_TRIGGER_REASON);
+      if (existingPending) {
+        return {
+          ok: false,
+          skipped: "has_active_pending",
+          pendingPlanId: existingPending.id,
+          pendingScheduledAt: existingPending.scheduled_at,
+        };
+      }
     }
 
     // T-15 限流闸门 1：距离上一条主动消息不能太近，防自递归冲量
@@ -1000,6 +1063,22 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
     }
     const intentFragment = intentResult ? buildIntentPromptFragment(intentResult) : "";
 
+    // 最近 48h 内的 next_push 草稿（含 cancelled），喂给 LLM 让它看见自己重复 —— 否则
+    // conversation_turns 里没有 watchdog cancelled 那批，LLM 永远以为这是"第一次说"。
+    let recentProactiveDrafts = [];
+    try {
+      recentProactiveDrafts = db
+        .prepare(
+          `SELECT draft_body, status, created_at FROM proactive_plans
+            WHERE assistant_id = ?
+              AND trigger_reason = ?
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 6`
+        )
+        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 48 * 60 * 60 * 1000);
+    } catch (e) { /* ignore */ }
+
     const prompt = buildNextPushPrompt({
       characterBackground: profile.character_background || "",
       recentTurns,
@@ -1008,6 +1087,7 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       lifeEvents,
       lastUserMessage: lastUserTurn?.content || "",
       recentAssistantMessages,
+      recentProactiveDrafts,
       stateFragment,
       identityFragment,
       dynamicsFragment,
@@ -1048,19 +1128,21 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
 
     // Jaccard dedup —— 与 generatePlanForAssistant 对齐。低温 + 同上下文下 LLM 会
     // 反复吐同一句话，没拦截就 30min 一条循环推送给用户。> 0.55 视为雷同直接 skip。
-    // 语料取最近 6 条 sent / pending 的 next_push body（同一 assistant）。
+    //
+    // 语料：最近 48h 内同一 assistant 的所有 next_push 草稿（含 cancelled），不限 status。
+    // 之前过滤 status IN ('sent','pending') 会把 watchdog 死循环里被 cancel 的同 body
+    // 排除在 corpus 外，dedup 形同虚设。窗口拉到 48h 防止"24h 边界滑出"导致同 body 复活。
     try {
       const corpusRows = db
         .prepare(
           `SELECT draft_body FROM proactive_plans
             WHERE assistant_id = ?
               AND trigger_reason = ?
-              AND status IN ('sent', 'pending')
               AND created_at >= ?
             ORDER BY created_at DESC
-            LIMIT 6`
+            LIMIT 12`
         )
-        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 24 * 60 * 60 * 1000);
+        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 48 * 60 * 60 * 1000);
       const corpus = corpusRows.map((r) => r.draft_body || "").filter(Boolean);
       const score = maxJaccardAgainst(draft.body, corpus);
       if (score > 0.55) {
@@ -1086,7 +1168,15 @@ async function scheduleNextPushPlan({ assistantId, userId = null, now = Date.now
       console.warn(`[proactive] next_push jaccard dedup failed: ${e.message}`);
     }
 
-    const scheduledAt = now + draft.delayMs;
+    // 抖动：watchdog cron 在 :00/:30 fires，LLM 又稳定返回 1800000ms (=30min) 这种整数 delay，
+    // 直接 now + delayMs 会让所有 next_push 都落在 :00 / :30 准点，观感像机器人定时发。
+    // ±10min 均匀抖动后再 clamp 回 [MIN_DELAY, 72h 窗口]。
+    const NEXT_PUSH_JITTER_BAND_MS = 10 * 60 * 1000;
+    const jitter = Math.floor((Math.random() - 0.5) * 2 * NEXT_PUSH_JITTER_BAND_MS);
+    let scheduledAt = now + draft.delayMs + jitter;
+    if (scheduledAt < now + NEXT_PUSH_MIN_DELAY_MS) {
+      scheduledAt = now + NEXT_PUSH_MIN_DELAY_MS;
+    }
     if (scheduledAt - lastUserAt > NEXT_PUSH_FRESHNESS_WINDOW_MS) {
       // delay 超出 72h 窗口边界 → 让 long-term 接管
       return { ok: false, skipped: "scheduled_beyond_72h_window" };
@@ -1205,8 +1295,9 @@ async function runProactiveWatchdogOnce({ now = Date.now() } = {}) {
     }
 
     // 调 scheduleNextPushPlan — 它内部还会做更多 gate（24h cap / intent='none' / LLM skip）
+    // reason='watchdog'：若已有 pending plan 在排队，跳过；避免 watchdog 自己 cancel 自己刚生成的 plan
     try {
-      const result = await scheduleNextPushPlan({ assistantId, now });
+      const result = await scheduleNextPushPlan({ assistantId, now, reason: "watchdog" });
       summary.triggered++;
       summary.results.push({
         assistantId,
