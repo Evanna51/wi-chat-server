@@ -20,7 +20,7 @@
  */
 
 const { v7: uuidv7 } = require("uuid");
-const { getProvider } = require("../../llm");
+const { getIntrospectionProvider } = require("../../llm");
 const { db, getRecentMemoryItems, getAssistantProfile } = require("../../db");
 const { renderBackgroundForIntrospection } = require("./promptComposer");
 const {
@@ -164,7 +164,7 @@ function buildPrompt({ characterBackground, memories, knownTopics }) {
 }
 
 async function callLlmForEpisodes(prompt, opts = {}) {
-  const provider = getProvider();
+  const provider = getIntrospectionProvider();
   const result = await provider.complete({
     messages: [
       { role: "system", content: "你是叙事记忆聚合助手。输出严格 JSON，不要 markdown 代码块。" },

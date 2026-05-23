@@ -28,7 +28,7 @@
  */
 
 const { v7: uuidv7 } = require("uuid");
-const { getProvider } = require("../../llm");
+const { getIntrospectionProvider } = require("../../llm");
 const { db, getAssistantProfile, getRecentTurnsAcrossSessions } = require("../../db");
 // 注意：不 require characterStateService —— 那会形成 reflection ↔ characterState 循环依赖
 // （characterStateService.onUserMessage 已 require reflectionService.maybeTriggerEventReflection）。
@@ -250,7 +250,7 @@ function buildReflectionPrompt({
 }
 
 async function callLlmForReflection(prompt, { assistantId } = {}) {
-  const provider = getProvider();
+  const provider = getIntrospectionProvider();
   const result = await provider.complete({
     messages: [
       { role: "system", content: "你是关系反思助手。输出严格 JSON，不要 markdown。" },

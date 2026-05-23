@@ -41,6 +41,9 @@ const config = {
   // server-side LLM 调用走哪家 (qwen=本地 LM Studio / deepseek=云端).
   // 影响：attentionWindow / registerRouter / langchainQwenService。
   serverLlmProvider: (process.env.SERVER_LLM_PROVIDER || "qwen").toLowerCase(),
+  // introspection-side LLM：memory_classify / persona_extract / episode_build / reflect。
+  // 默认继承 SERVER_LLM_PROVIDER（通常是本地小模型），可单独覆盖。
+  introspectionLlmProvider: (process.env.INTROSPECTION_LLM_PROVIDER || process.env.SERVER_LLM_PROVIDER || "qwen").toLowerCase(),
   memoryRetrievalEnabled: (process.env.MEMORY_RETRIEVAL_ENABLED || "1") === "1",
   retrievalTopK: Number(process.env.RETRIEVAL_TOP_K || 8),
   retrievalWindowDays: Number(process.env.RETRIEVAL_WINDOW_DAYS || 30),
@@ -115,8 +118,8 @@ const config = {
  * 返回 server-side LLM (attention / router / etc) 当前应该用的 endpoint 配置。
  * 由 SERVER_LLM_PROVIDER env 切换：qwen (默认, 本地 LM Studio) / deepseek (云端).
  */
-function getServerLlmConfig() {
-  if (config.serverLlmProvider === "deepseek") {
+function _buildLlmConfig(providerName) {
+  if (providerName === "deepseek") {
     return {
       provider: "deepseek",
       model: config.deepseekModel,
@@ -132,4 +135,12 @@ function getServerLlmConfig() {
   };
 }
 
-module.exports = Object.assign(config, { getServerLlmConfig });
+function getServerLlmConfig() {
+  return _buildLlmConfig(config.serverLlmProvider);
+}
+
+function getIntrospectionLlmConfig() {
+  return _buildLlmConfig(config.introspectionLlmProvider);
+}
+
+module.exports = Object.assign(config, { getServerLlmConfig, getIntrospectionLlmConfig });

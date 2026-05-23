@@ -13,7 +13,7 @@
  * 异步触发（subscriber 监听 setup_prompt.changed 事件）。
  */
 
-const { getProvider } = require("../../llm");
+const { getIntrospectionProvider } = require("../../llm");
 const {
   PERSONALITY_TRAITS,
   ATTACHMENT_STYLES,
@@ -59,7 +59,7 @@ function buildExtractionPrompt(setupPrompt) {
     '    "ageYears": 35,                              // integer 或 null（推断不出留 null）',
     '    "genderExpression": "男性，克制干练",        // 自由文本，描述性别表达',
     `    "pronouns": "${pronounList} 或自定义",       // 英文人称代词`,
-    '    "speakingStyle": "...",                      // 100-200 字描述说话风格',
+    '    "speakingStyle": "...",                      // 用角色自己的口吻写：口头禅、典型短句、停顿习惯。不要写"他说话如何"的第三人称描述',
     '    "worldview": "...",                          // 50-150 字描述世界观',
     `    "personalityTraits": ["..."],                 // 从 vocab 选 3-8 项`,
     `    "attachmentStyle": "secure|anxious|avoidant|disorganized",`,
@@ -78,7 +78,8 @@ function buildExtractionPrompt(setupPrompt) {
     `    "careLanguages": { "give": ["..."], "receive": ["..."] },`,
     '    "tensions": { "intimacy_vs_independence": 0.5, ... },  // 0-1，8 个 tension',
     '    "skills": [',
-    '      { "name": "...", "examples": ["短句1", "短句2"] }',
+    '      { "name": "...", "examples": ["角色实际会发出的文字片段，如：就这样吧 / 嗯 / 你说"] }',
+    '      // examples 必须是角色可能打出来的话，不能是对角色行为的描述',
     '    ]',
     "  },",
     '  "lore": "..."',
@@ -103,6 +104,7 @@ function buildExtractionPrompt(setupPrompt) {
     "- 价值观描述（如「你认为 X 比 Y 重要」）→ 进 values 字段",
     "- 边界描述（如「你不接受 X」「你回避 Y」）→ 进 hardBoundaries / avoidanceTopics 字段",
     "- 系统指令（如「必须调 search_memory」「禁止编造」）→ **完全删除**（这是 system rule，不是 lore）",
+    "- 行为预测句式（如「遇到 X 时你会 Y」「你习惯用 Z 表达」）→ 改成叙事：发生了什么、存在于哪里，不要预测行为",
     "lore 字数：50-400 字。如果原 setup_prompt 没有叙事性背景，lore 返回空字符串。",
     "",
     "── 输出要求 ──",
@@ -130,7 +132,7 @@ async function extractPersona(setupPrompt, opts = {}) {
   }
 
   const prompt = buildExtractionPrompt(setupPrompt);
-  const provider = getProvider();
+  const provider = getIntrospectionProvider();
 
   let raw = "";
   try {

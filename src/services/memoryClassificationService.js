@@ -14,7 +14,7 @@
 
 const { v7: uuidv7 } = require("uuid");
 const { db } = require("../db");
-const { getProvider } = require("../llm");
+const { getIntrospectionProvider } = require("../llm");
 
 // 哪些 category 值得期待 facts。其它 category（如 chitchat / wellbeing 临时情绪）
 // 即使 LLM 输出 facts 也按 0 处理，避免事实表被噪音灌满。
@@ -197,7 +197,7 @@ async function classifyWithLLM(content, opts = {}) {
   const prompt = LLM_PROMPT_TEMPLATE
     .replace(/__CHARACTER_NAME__/g, promptCharacter)
     .replace("__CONTENT__", text.slice(0, 500));
-  const { content: raw } = await getProvider().complete({
+  const { content: raw } = await getIntrospectionProvider().complete({
     messages: [
       { role: "system", content: "你是记忆分类与事实抽取引擎。只输出 JSON，不要额外文字。" },
       { role: "user", content: prompt },

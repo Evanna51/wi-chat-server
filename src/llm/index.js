@@ -2,6 +2,7 @@ const config = require("../config");
 
 let _chatProvider = null;
 let _embedProvider = null;
+let _introspectionProvider = null;
 
 function createProvider(name) {
   switch ((name || "qwen").toLowerCase()) {
@@ -41,14 +42,35 @@ function getEmbedProvider() {
   return _embedProvider;
 }
 
+/**
+ * introspection-side provider：memory_classify / persona_extract / episode_build / reflect。
+ * 走 INTROSPECTION_LLM_PROVIDER（默认继承 SERVER_LLM_PROVIDER → "qwen" 本地）。
+ * 切换只需改 .env，无需改代码。
+ */
+function getIntrospectionProvider() {
+  if (!_introspectionProvider) {
+    const { ConfigurableProvider } = require("./ConfigurableProvider");
+    const cfg = config.getIntrospectionLlmConfig();
+    _introspectionProvider = new ConfigurableProvider({
+      name: `introspection-${cfg.provider}`,
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+    });
+  }
+  return _introspectionProvider;
+}
+
 function _setProviderForTesting(provider) {
   _chatProvider = provider;
   _embedProvider = provider;
+  _introspectionProvider = provider;
 }
 
 function _resetProviders() {
   _chatProvider = null;
   _embedProvider = null;
+  _introspectionProvider = null;
 }
 
-module.exports = { getProvider, getEmbedProvider, _setProviderForTesting, _resetProviders };
+module.exports = { getProvider, getEmbedProvider, getIntrospectionProvider, _setProviderForTesting, _resetProviders };
