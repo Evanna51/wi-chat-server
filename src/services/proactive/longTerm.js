@@ -35,6 +35,7 @@ const { parseQuietHours, isInQuietHours } = require("../characterEngine");
 
 const {
   clipText,
+  relativeTimeLabel,
   startOfDayMs,
   jitterMs,
   VALID_INTENTS,
@@ -138,24 +139,32 @@ function buildPlanPrompt({
   stateFragment,
   identityFragment,
   dynamicsFragment,
+  now = Date.now(),
 }) {
+  // 每条素材都带相对时间标签，让 LLM 看清"几天前的事 vs 今天的事"，
+  // 避免把旧事件当今天事来问（"今天吃的怎么样" 但其实那顿是 3 天前的）。
   const turnLines = recentTurns
     .slice(0, 6)
-    .map((t) => `- ${t.role}: ${clipText(t.content, 140)}`)
+    .map((t) => `- [${relativeTimeLabel(t.created_at, now)}] ${t.role}: ${clipText(t.content, 140)}`)
     .join("\n");
+  // userFacts 是无时效的"用户属性"，不带时间标签
   const factLines = userFacts
     .slice(0, 12)
     .map((f) => `- ${f.fact_key}=${clipText(f.fact_value, 80)}`)
     .join("\n");
   const memLines = relevantMemories
     .slice(0, 5)
-    .map((m) => `- ${m.memory_type || m.memoryType || "memory"}: ${clipText(m.content, 140)}`)
+    .map((m) => {
+      const ts = m.createdAt || m.created_at || 0;
+      const type = m.memoryType || m.memory_type || "memory";
+      return `- [${relativeTimeLabel(ts, now)}/${type}] ${clipText(m.content, 140)}`;
+    })
     .join("\n");
   const draftLines = recentDrafts
     .slice(0, 10)
     .map(
       (d) =>
-        `- [${d.trigger_reason || "unknown"}/${d.status || "?"}] ${clipText(
+        `- [${relativeTimeLabel(d.created_at, now)}/${d.trigger_reason || "unknown"}/${d.status || "?"}] ${clipText(
           d.draft_body || "",
           120
         )}`
@@ -180,6 +189,8 @@ function buildPlanPrompt({
     ...(stateFragment ? [stateFragment, ""] : []),
     ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
     `触发：${triggerReason} — ${triggerExplanation}`,
+    "",
+    "**时间感（强制遵守）**：每条素材前面 [N 天前 / 昨天 / ...] 是这件事实际发生的时间，不是现在。引用旧事件必须带时间感（『前几天提到的 X』『上次说去 Y 怎么样了』），不要把 3 天前的事说成『今天』。时间近（≤ 6 小时）才说『刚才/今天』。",
     "",
     "角色档案：",
     renderBackgroundForIntrospection(characterBackground, 800),
@@ -307,6 +318,7 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
         stateFragment: buildStatePromptFragment(assistantId),
         identityFragment: buildIdentityPromptFragment(getCharacterIdentity(assistantId)),
         dynamicsFragment: buildRelationshipFragment(assistantId),
+        now,
       });
       let raw;
       try {

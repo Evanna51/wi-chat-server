@@ -31,6 +31,36 @@ function formatLocalTs(ts) {
   return `${yyyy}-${mm}-${dd} ${HH}:${MM}（上海时间）`;
 }
 
+/**
+ * 相对时间标签：把 ms epoch 时间戳变成"刚刚"/"3 小时前"/"昨天"/"3 天前"/"2 周前"。
+ *
+ * 用于 prompt 里给 LLM 看 "用户什么时候说过这件事" —— 之前 prompt 只给原始内容
+ * 不给时间，LLM 会把 3 天前的吃饭说成"今天吃的怎么样"，造成时间错位幻觉。
+ *
+ * 边界用"自然日"切（不是滚动 24h），更贴近人的时间感：23 点说的事，过了凌晨
+ * 就算"昨天"；不会出现"23 小时前 = 今天" / "25 小时前 = 昨天"这种割裂。
+ */
+function relativeTimeLabel(ts, now = Date.now()) {
+  if (!ts) return "";
+  const diff = now - ts;
+  if (diff < 60 * 1000) return "刚刚";
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  // 同一自然日内才说"X 小时前"，跨日就用"昨天/N 天前"
+  const today0 = new Date(now); today0.setHours(0, 0, 0, 0);
+  const tsDay = new Date(ts); tsDay.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round((today0.getTime() - tsDay.getTime()) / (24 * 60 * 60 * 1000));
+  if (dayDiff <= 0) return `${hours} 小时前`;
+  if (dayDiff === 1) return "昨天";
+  if (dayDiff === 2) return "前天";
+  if (dayDiff < 7) return `${dayDiff} 天前`;
+  if (dayDiff < 14) return "上周";
+  if (dayDiff < 30) return `${Math.floor(dayDiff / 7)} 周前`;
+  if (dayDiff < 365) return `${Math.floor(dayDiff / 30)} 个月前`;
+  return `${Math.floor(dayDiff / 365)} 年前`;
+}
+
 function parseStrictJsonObject(text = "") {
   const normalized = String(text || "").trim();
   const fenced = normalized.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
@@ -102,6 +132,7 @@ module.exports = {
   // text
   clipText,
   formatLocalTs,
+  relativeTimeLabel,
   parseStrictJsonObject,
   // time
   startOfDayMs,

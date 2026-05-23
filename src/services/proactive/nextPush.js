@@ -42,10 +42,12 @@ const {
 } = require("../character/behaviorPlanner");
 const { buildAttention1h } = require("../character/attentionWindow");
 const { maxJaccardAgainst } = require("../textDedupService");
+const { retrieveMemory } = require("../memoryRetrievalService");
 
 const {
   clipText,
   formatLocalTs,
+  relativeTimeLabel,
   VALID_INTENTS,
   callLlmForPlanDraft,
   NEXT_PUSH_TRIGGER_REASON,
@@ -96,6 +98,7 @@ function buildNextPushPrompt({
   userFacts,
   coreFacts,
   lifeEvents,
+  relevantMemories,
   lastUserMessage,
   recentAssistantMessages,
   recentProactiveDrafts, // 含 sent / cancelled / pending 的最近 proactive 草稿，避免 LLM 重复同一句
@@ -104,13 +107,18 @@ function buildNextPushPrompt({
   dynamicsFragment,
   intentFragment,
   nowIso,
+  now,
   hoursSinceLastUserReply,
   nowDate, // 本地 Date 对象，用来抽时间段
 }) {
+  // 每条都带相对时间标签 —— 不然 LLM 看不出 3 天前的事和今天的事区别，会把
+  // 旧事件当今天事来问（"今天吃的怎么样？" 但其实那顿饭是 3 天前的）。
   const turnLines = recentTurns
     .slice(0, 6)
-    .map((t) => `- ${t.role}: ${clipText(t.content, 140)}`)
+    .map((t) => `- [${relativeTimeLabel(t.created_at, now)}] ${t.role}: ${clipText(t.content, 140)}`)
     .join("\n");
+  // userFacts / coreFacts 是"对用户的事实判断"，本质上是无时效的（"你做金融"
+  // 而不是"你 3 天前做金融"），不给时间标签避免误导。
   const factLines = (userFacts || [])
     .slice(0, 8)
     .map((f) => `- ${f.fact_key}=${clipText(f.fact_value, 80)}`)
@@ -119,13 +127,24 @@ function buildNextPushPrompt({
     .slice(0, 8)
     .map((f) => `- ${f.factKey}=${clipText(f.factValue, 80)} (imp=${(f.importance ?? 0).toFixed(2)})`)
     .join("\n");
+  // life_event / work_event 是有时间的具体事件，必须带时间标签
   const lifeLines = (lifeEvents || [])
     .slice(0, 5)
-    .map((m) => `- ${clipText(m.content, 120)}`)
+    .map((m) => `- [${relativeTimeLabel(m.created_at, now)}] ${clipText(m.content, 120)}`)
     .join("\n");
   const myMsgLines = (recentAssistantMessages || [])
     .slice(0, 3)
-    .map((t) => `- ${clipText(t.content, 140)}`)
+    .map((t) => `- [${relativeTimeLabel(t.created_at, now)}] ${clipText(t.content, 140)}`)
+    .join("\n");
+  // 语义召回的记忆 —— 跟 longTerm 路径对齐，让 LLM 能引用到 lastUserMessage 相关的
+  // 旧记忆。每条也带时间，避免把上周的事说成今天的。
+  const recallLines = (relevantMemories || [])
+    .slice(0, 5)
+    .map((m) => {
+      const ts = m.createdAt || m.created_at || 0;
+      const type = m.memoryType || m.memory_type || "memory";
+      return `- [${relativeTimeLabel(ts, now)}/${type}] ${clipText(m.content, 130)}`;
+    })
     .join("\n");
   // 把最近的 proactive 草稿（不分 status）也铺给 LLM 看 —— 之前 watchdog 30min
   // 一遍循环生成同一句 body，LLM 看不到自己 cancelled 的旧草稿，只看 conversation_turns
@@ -152,6 +171,12 @@ function buildNextPushPrompt({
     "- 不确定时用试探语气（『是不是』『还记得吗』），不要用断言（『你爱的』『你最喜欢的』）",
     "- 反例：life event 写『我买了你爱吃的黑巧克力』——不要在主动消息里说『我买了你爱吃的黑巧克力』，可以说『我买了点黑巧克力』或『超市看到黑巧克力，想起你』",
     "",
+    "**时间感（强制遵守）**：",
+    "- 上面每条素材前面 [N 天前 / 昨天 / 3 小时前 / ...] 是这件事**实际发生的时间**，不是现在",
+    "- 引用旧事件**必须带时间感**：『3 天前你说要去...，后来怎么样了』、『上次提到的 X』、『前几天那顿 Y』——不是『今天的 X 怎么样』",
+    "- 反例：素材写『[3 天前] 用户：今晚吃日料』。**不能说**『今天吃了什么』或『今晚的日料好吃吗』；**可以说**『前几天那顿日料怎么样』『3 天前说去吃日料，味道还行吗』",
+    "- 时间近（≤ 6 小时）才说『刚才/今天』；昨天就说『昨天』；2-6 天说『前几天 / N 天前』；更久说『上周 / 上个月』",
+    "",
     // T-CC-08 注入：identity → state → dynamics
     ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
@@ -169,6 +194,9 @@ function buildNextPushPrompt({
     "",
     "你最近的生活/心境：",
     lifeLines || "- 无",
+    "",
+    "和上一句相关的旧记忆（语义召回）：",
+    recallLines || "- 无",
     "",
     "最近 6 条对话：",
     turnLines || "- 无",
@@ -385,12 +413,31 @@ async function scheduleNextPushPlan({
         .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 48 * 60 * 60 * 1000);
     } catch (e) { /* ignore */ }
 
+    // 语义召回：以 lastUserTurn 为 seed，让 next_push 能用到向量检索的旧记忆
+    // （跟 longTerm 路径对齐）。之前 next_push 只看 facts + lifeEvents top-N，引用
+    // 不到"上次聊到 X 时你提到 Y"这种语义相关但不在最新窗口里的记忆。
+    let relevantMemories = [];
+    try {
+      const memSeed = lastUserTurn?.content || profile.character_name || "";
+      if (memSeed) {
+        relevantMemories = await retrieveMemory({
+          assistantId,
+          sessionId: profile.last_session_id || `persona:${assistantId}`,
+          query: memSeed,
+          topK: 5,
+        });
+      }
+    } catch (e) {
+      console.warn(`[proactive] next_push retrieveMemory failed: ${e.message}`);
+    }
+
     const prompt = buildNextPushPrompt({
       characterBackground: profile.character_background || "",
       recentTurns,
       userFacts,
       coreFacts,
       lifeEvents,
+      relevantMemories,
       lastUserMessage: lastUserTurn?.content || "",
       recentAssistantMessages,
       recentProactiveDrafts,
@@ -400,6 +447,7 @@ async function scheduleNextPushPlan({
       intentFragment,
       // 显式给 LLM 看本地时间（上海时间），不用 toISOString —— 那是 UTC，LLM 会按字面值解读，时间错位 8h
       nowIso: formatLocalTs(now),
+      now,
       nowDate: new Date(now), // 用来在 prompt 里渲染时间段 / 工作日
       hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });
