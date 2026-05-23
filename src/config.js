@@ -44,6 +44,12 @@ const config = {
   // introspection-side LLM：memory_classify / persona_extract / episode_build / reflect。
   // 默认继承 SERVER_LLM_PROVIDER（通常是本地小模型），可单独覆盖。
   introspectionLlmProvider: (process.env.INTROSPECTION_LLM_PROVIDER || process.env.SERVER_LLM_PROVIDER || "qwen").toLowerCase(),
+  // Web search（proactive skip-fallback 找热点）。tavily 是当前唯一 provider。
+  // 不配 TAVILY_API_KEY 时 webSearchService 会优雅降级（返回 api_key_missing），
+  // 整个 proactive 链路接受原 skip，不影响主流程。
+  webSearchProvider: (process.env.WEB_SEARCH_PROVIDER || "tavily").toLowerCase(),
+  webSearchDailyCap: Number(process.env.WEB_SEARCH_DAILY_CAP || 3),
+  tavilyApiKey: process.env.TAVILY_API_KEY || "",
   memoryRetrievalEnabled: (process.env.MEMORY_RETRIEVAL_ENABLED || "1") === "1",
   retrievalTopK: Number(process.env.RETRIEVAL_TOP_K || 8),
   retrievalWindowDays: Number(process.env.RETRIEVAL_WINDOW_DAYS || 30),

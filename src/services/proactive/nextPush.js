@@ -462,18 +462,98 @@ async function scheduleNextPushPlan({
     const draft = normalizeNextPushDraft(raw);
 
     if (draft.skip) {
-      insertBehaviorJournalEntry({
-        runType: "next_push_schedule",
-        assistantId,
-        sessionId: profile.last_session_id || null,
-        shouldPushMessage: false,
-        status: "skipped",
-        reason: "ai_chose_skip",
-        input: { sinceLastUserMs, lastUserPreview: clipText(lastUserTurn?.content || "", 80) },
-        result: { skipReason: draft.skipReason },
-        createdAt: now,
-      });
-      return { ok: true, skipped: "ai_chose_skip", skipReason: draft.skipReason };
+      // Web-topic fallback：LLM 说没话题 → 兜底跑 web search 找热点重写一条。
+      // 配额闸门在 webSearchService 里（每角色每自然日 3 次默认）。失败就接受原 skip。
+      try {
+        const { tryWebTopicFallback } = require("./topicFallback");
+        const fb = await tryWebTopicFallback({ assistantId, profile, now });
+        if (fb?.ok) {
+          // 用 trigger_reason='web_topic' 与普通 next_push 区分；post_dispatch
+          // 路径只对 NEXT_PUSH_TRIGGER_REASON 续链，web_topic 不会自递归。
+          const NEXT_PUSH_JITTER_BAND_MS = 10 * 60 * 1000;
+          const jitter = Math.floor((Math.random() - 0.5) * 2 * NEXT_PUSH_JITTER_BAND_MS);
+          // web_topic 默认排在 5~15min 后（短延迟让用户感觉是"刚看到就分享"）
+          let scheduledAt = now + 10 * 60 * 1000 + jitter;
+          if (scheduledAt < now + NEXT_PUSH_MIN_DELAY_MS) {
+            scheduledAt = now + NEXT_PUSH_MIN_DELAY_MS;
+          }
+          const planId = insertProactivePlan({
+            assistantId,
+            userId: userId || process.env.DEFAULT_USER_ID || "default-user",
+            triggerReason: "web_topic",
+            intent: fb.intent,
+            draftTitle: fb.title || "想说点什么",
+            draftBody: fb.body,
+            anchorTopic: fb.anchorTopic,
+            // rationale 里塞 sourceUrl 方便回查
+            rationale: clipText(
+              `${fb.rationale}${fb.sourceUrl ? ` | src=${fb.sourceUrl}` : ""}`,
+              500
+            ),
+            scheduledAt,
+            now,
+          });
+          insertBehaviorJournalEntry({
+            runType: "next_push_schedule",
+            assistantId,
+            sessionId: profile.last_session_id || null,
+            shouldPushMessage: true,
+            status: "ok",
+            reason: "web_topic_planned",
+            messageIntent: fb.intent,
+            draftMessage: fb.body,
+            input: { sinceLastUserMs, originalSkipReason: draft.skipReason, query: fb.query },
+            result: { planId, sourceUrl: fb.sourceUrl, scheduledAt },
+            createdAt: now,
+          });
+          return {
+            ok: true,
+            planId,
+            scheduledAt,
+            body: fb.body,
+            via: "web_topic",
+            sourceUrl: fb.sourceUrl,
+          };
+        }
+        // fallback 失败（query_planner / no_snippets / daily_cap_exceeded /
+        // api_key_missing 等）→ 落 journal 但仍接受原 skip
+        insertBehaviorJournalEntry({
+          runType: "next_push_schedule",
+          assistantId,
+          sessionId: profile.last_session_id || null,
+          shouldPushMessage: false,
+          status: "skipped",
+          reason: "ai_chose_skip",
+          input: {
+            sinceLastUserMs,
+            lastUserPreview: clipText(lastUserTurn?.content || "", 80),
+            webFallbackReason: fb?.reason || "unknown",
+          },
+          result: { skipReason: draft.skipReason },
+          createdAt: now,
+        });
+        return {
+          ok: true,
+          skipped: "ai_chose_skip",
+          skipReason: draft.skipReason,
+          webFallback: fb?.reason || null,
+        };
+      } catch (e) {
+        // fallback 抛错也不阻塞主流程
+        console.warn(`[proactive] web_topic fallback failed: ${e.message}`);
+        insertBehaviorJournalEntry({
+          runType: "next_push_schedule",
+          assistantId,
+          sessionId: profile.last_session_id || null,
+          shouldPushMessage: false,
+          status: "skipped",
+          reason: "ai_chose_skip",
+          input: { sinceLastUserMs, webFallbackError: e.message },
+          result: { skipReason: draft.skipReason },
+          createdAt: now,
+        });
+        return { ok: true, skipped: "ai_chose_skip", skipReason: draft.skipReason };
+      }
     }
 
     if (!draft.body || draft.body.length < 2) {
