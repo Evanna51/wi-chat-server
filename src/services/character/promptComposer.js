@@ -219,25 +219,22 @@ function _renderNarrativeMarkdown(obj) {
 
   if (obj.recent_reflection) {
     const r = obj.recent_reflection;
-    const lines = [];
-    if (r.summary) lines.push(`最近反思：${r.summary}`);
-    if (r.direction) lines.push(`反思方向：${r.direction}`);
-    if (r.user_needs?.length) lines.push(`用户需求：${r.user_needs.join(" / ")}`);
-    if (r.concerns?.length) lines.push(`担忧：${r.concerns.join(" / ")}`);
-    if (r.opportunities?.length) lines.push(`机会：${r.opportunities.join(" / ")}`);
-    if (lines.length) sections.push(lines.join("\n"));
+    const parts = [];
+    if (r.summary) parts.push(r.summary);
+    if (r.user_needs?.length) parts.push(`对方好像需要${r.user_needs.join("、")}`);
+    if (r.concerns?.length) parts.push(`你有些担心${r.concerns.join("、")}`);
+    if (r.opportunities?.length) parts.push(`也许可以${r.opportunities.join("或")}`);
+    if (r.direction) parts.push(r.direction);
+    if (parts.length) sections.push(parts.join("。") + "。");
   }
 
   if (Array.isArray(obj.active_episodes) && obj.active_episodes.length) {
-    const lines = ["未解事件："];
+    const lines = ["还没解决的事："];
     for (const e of obj.active_episodes) {
-      const meta = [];
-      if (e.emotional_tone) meta.push(e.emotional_tone);
-      if (typeof e.importance === "number") meta.push(`重要 ${e.importance.toFixed(1)}`);
-      const head = e.title + (meta.length ? `（${meta.join(" / ")}）` : "");
+      const head = e.emotional_tone ? `${e.title}（${e.emotional_tone}）` : e.title;
       lines.push(`- ${head}`);
       if (e.summary) lines.push(`  ${e.summary}`);
-      if (e.unresolved_threads?.length) lines.push(`  悬而未决：${e.unresolved_threads.join(" / ")}`);
+      if (e.unresolved_threads?.length) lines.push(`  还悬着：${e.unresolved_threads.join(" / ")}`);
     }
     sections.push(lines.join("\n"));
   }
@@ -245,15 +242,15 @@ function _renderNarrativeMarkdown(obj) {
   if (Array.isArray(obj.active_topics) && obj.active_topics.length) {
     const parts = obj.active_topics.map((t) => {
       const tail = t.emotional_association ? `（${t.emotional_association}）` : "";
-      return `${t.topic}[${t.status}]${tail}`;
+      return `${t.topic}${tail}`;
     });
-    sections.push(`近期话题：${parts.join(" / ")}`);
+    sections.push(`最近在聊的：${parts.join(" / ")}`);
   }
 
   if (obj.salient_phrase) {
     const sp = obj.salient_phrase;
-    const trail = sp.trigger_source ? `（${sp.trigger_source}）` : "";
-    sections.push(`被勾住的词：${sp.phrase}${trail}`);
+    const trail = sp.trigger_source ? `（${sp.trigger_source}说的）` : "";
+    sections.push(`还在想"${sp.phrase}"${trail}`);
   }
 
   return sections.join("\n\n");
@@ -351,6 +348,7 @@ function _renderRoleV3({ profile, identity }) {
   lines.push(`<role>`);
   lines.push(`你是 ${name}${role ? "——" + role.slice(0, 40) : ""}。`);
   lines.push(`Speak as ${pronouns.object}, not about ${pronouns.object}. Mid-conversation, not on stage.`);
+  lines.push(`Short replies, silence, deflection — all valid. You don't have to respond to everything.`);
   lines.push(`</role>`);
   return lines.join("\n");
 }
