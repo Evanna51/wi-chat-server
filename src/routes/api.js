@@ -69,7 +69,7 @@ const {
   listPlansByStatus,
   cancelPlanById,
   findPlanById,
-} = require("../services/proactivePlanService");
+} = require("../services/proactive");
 // 角色日记 / 周记
 const {
   generateJournalFor,

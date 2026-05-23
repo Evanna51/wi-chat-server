@@ -34,7 +34,7 @@ const {
   scheduleNextPushPlan,
   runProactiveWatchdogOnce,
   NEXT_PUSH_TRIGGER_REASON,
-} = require("./services/proactivePlanService");
+} = require("./services/proactive");
 const {
   broadcastToUser,
   getActiveSocketCount,
@@ -270,7 +270,7 @@ async function runDeadLetterMonitorTick() {
 /**
  * Proactive watchdog tick — 周期性给所有 active assistant 重新机会决定要不要主动发。
  * 之前只有 turn.user.batch + plan 派发后会 schedule —— AI 一次 ai_chose_skip 就死链。
- * 详见 src/services/proactivePlanService.js#runProactiveWatchdogOnce
+ * 详见 src/services/proactive/watchdog.js#runProactiveWatchdogOnce
  */
 async function runProactiveWatchdogTick() {
   try {

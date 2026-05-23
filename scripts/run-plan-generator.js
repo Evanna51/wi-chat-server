@@ -11,7 +11,7 @@ function getArg(flag, fallback = null) {
 const assistantId = getArg("--assistant");
 
 require(path.join(__dirname, "..", "src", "db"));
-const { generatePlans } = require(path.join(__dirname, "..", "src", "services", "proactivePlanService"));
+const { generatePlans } = require(path.join(__dirname, "..", "src", "services", "proactive"));
 
 (async () => {
   try {

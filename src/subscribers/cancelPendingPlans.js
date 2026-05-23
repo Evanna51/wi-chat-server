@@ -7,7 +7,7 @@
  */
 const {
   cancelPendingPlansForAssistant,
-} = require("../services/proactivePlanService");
+} = require("../services/proactive");
 
 function register(turnEvents) {
   turnEvents.on("turn.user.batch", ({ assistantId }) => {
