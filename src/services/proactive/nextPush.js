@@ -283,8 +283,14 @@ function buildThinkPrompt({
     "- 例：topicCandidate=『问问她上次面试的结果』 → recallQuery=『上次面试 紧张 准备』",
     "- 例：topicCandidate=『分享我今天看的电影』 → recallQuery=''（不需要查 她 的旧记忆）",
     "",
+    "**depth（消息分量）**：",
+    "- brief：日常关心、轻问候、随口一提 → compose 写 30-80 字",
+    "- medium：有具体事件想跟进、有情绪想分享 → compose 写 80-160 字",
+    "- deep：严肃话题上次没说完（她 或 你 当时搁置了）、或超过 3 天未联系 → compose 写 160-280 字",
+    "→ 优先 brief；只有真的有足够内容支撑才升 depth",
+    "",
     "输出 JSON（只判断，不写正文）：",
-    '{"shouldPush":true,"skipReason":"","delayMs":1800000,"mood":"<你当下的情绪基调，2-6字，如：温柔关切/想念/淡淡好奇/略疲>","topicCandidate":"<唯一切入点，10-30字；只选一件事，compose 阶段不会再扩展其他话题>","anchorTopic":"<要引用的具体旧事物，没有就空字符串>","intent":"ask_followup|check_in|share_thought|remind","recallQuery":"<想重搜的旧记忆 query，不需要就空>","rationale":"<为什么这时候这条 / 为什么 skip，30-100字>"}',
+    '{"shouldPush":true,"skipReason":"","delayMs":1800000,"mood":"<你当下的情绪基调，2-6字，如：温柔关切/想念/淡淡好奇/略疲>","topicCandidate":"<唯一切入点，10-30字；只选一件事，compose 阶段不会再扩展其他话题>","anchorTopic":"<要引用的具体旧事物，没有就空字符串>","depth":"brief|medium|deep","intent":"ask_followup|check_in|share_thought|remind","recallQuery":"<想重搜的旧记忆 query，不需要就空>","rationale":"<为什么这时候这条 / 为什么 skip，30-100字>"}',
   ].join("\n");
 }
 
@@ -305,12 +311,15 @@ function normalizeThinkOutput(raw = {}) {
     NEXT_PUSH_MIN_DELAY_MS,
     Math.min(NEXT_PUSH_MAX_DELAY_MS, Number(raw.delayMs) || 0)
   );
+  const depthRaw = String(raw.depth || "").toLowerCase().trim();
+  const depth = ["medium", "deep"].includes(depthRaw) ? depthRaw : "brief";
   return {
     shouldPush: true,
     delayMs,
     mood: clipText(raw.mood || "", 24),
     topicCandidate: clipText(raw.topicCandidate || "", 80),
     anchorTopic: clipText(raw.anchorTopic || "", 60),
+    depth,
     intent,
     recallQuery: clipText(raw.recallQuery || "", 120),
     rationale: clipText(raw.rationale || "", 200),
@@ -337,7 +346,17 @@ function buildComposePrompt({
     "→ 围绕『想说的切入点』展开。不要换话题，不要扩大范围。",
     "",
     "**正文规格（强制）**：",
-    "- 目标 30-100 字，最多 3 句；这是一条短信，不是一封信，写完就够",
+    ...(thinkOutput.depth === "deep"
+      ? [
+          "- 分量：deep —— 严肃话题搁置 / 久未联系，允许 160-280 字、3-5 句；有足够情感重量时才往上写，写完就够",
+        ]
+      : thinkOutput.depth === "medium"
+      ? [
+          "- 分量：medium —— 有具体事件想跟进，目标 80-160 字、2-4 句",
+        ]
+      : [
+          "- 分量：brief（默认）—— 日常关心，目标 30-80 字、1-2 句；这是一条短信，不是一封信",
+        ]),
     "- 只展开『想说的切入点』这一个话题；下面的【用户事实】是背景参考，不是清单，不要逐一提及",
     "- 禁止使用 AI/科幻自我描述词（如'数字意识体'/'信号序列'/'感知一切'/'数字空间'等）—— 这类词让消息读起来像 chatbot 台词，破坏真实感",
     "- 【角色人格】是你说话的底色，不要把里面的概念词直接说出来；用情绪、动作或具体细节来体现它",
@@ -390,10 +409,11 @@ function buildComposePrompt({
   ].join("\n");
 }
 
-function normalizeComposeOutput(raw = {}) {
+function normalizeComposeOutput(raw = {}, depth = "brief") {
+  const bodyLimit = depth === "deep" ? 500 : depth === "medium" ? 320 : 160;
   return {
     title: clipText(raw.title || "", 40),
-    body: clipText(raw.body || "", 300),
+    body: clipText(raw.body || "", bodyLimit),
   };
 }
 
@@ -747,15 +767,16 @@ async function scheduleNextPushPlan({
     const composePrompt = buildComposePrompt({ ctx, thinkOutput: think, nowIso });
     let composeRaw;
     try {
+      const depthMaxTokens = think.depth === "deep" ? 550 : think.depth === "medium" ? 400 : 280;
       composeRaw = await callLlmForPlanDraft(composePrompt, {
         temperature: 0.75,           // 写正文阶段稍高温度保留语气多样
-        maxTokens: 300,              // 目标 30-100 字正文，300 tokens 充裕（含 JSON 开销）
+        maxTokens: depthMaxTokens,   // brief≈280字内 / medium≈400 / deep≈550（含 JSON 开销）
         assistantId,
       });
     } catch (e) {
       return { ok: false, skipped: "llm_unreachable", error: e.message, stage: "compose" };
     }
-    const composed = normalizeComposeOutput(composeRaw);
+    const composed = normalizeComposeOutput(composeRaw, think.depth);
 
     if (!composed.body || composed.body.length < 2) {
       return { ok: false, skipped: "empty_body" };
