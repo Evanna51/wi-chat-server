@@ -18,7 +18,10 @@
  * reason 调用语义（由调用方传入）：
  *   - 'user_event'（默认）：用户刚动作，cancel 旧 pending 重排
  *   - 'post_dispatch' / 'watchdog'：被动续链，如果还有 pending 就跳过
- * 详见 scheduleNextPushPlan 顶部注释。
+ *   - 'life_event_seed'：lifeBeatTickService 触发 —— 角色刚发生了 anchored beat
+ *     （想起 她 的瞬间），把 beat 内容作为 seed 注入 prompt 让 LLM 围绕它展开。
+ *     续链语义同 'post_dispatch'：有 pending 就跳过，让已经生成的 plan 先派出去。
+ * 详见 scheduleNextPushPlan 顶部注释 + docs/character-life-beat-plan.md。
  */
 
 const {
@@ -59,6 +62,7 @@ const {
   countNextPushIn24h,
   getLastUserMessageAt,
   insertProactivePlan,
+  findUsedAnchorTopicWithin,
 } = require("./store");
 
 // ── 常量 ─────────────────────────────────────────────────────────────
@@ -90,9 +94,50 @@ function _weekdayLabel(date) {
   return `${map[d]}（${isWeekend ? "周末" : "工作日"}）`;
 }
 
-// ── Prompt ───────────────────────────────────────────────────────────
+/**
+ * 把 lifeBeatTickService 传来的 anchored beat seed 渲染成 prompt 段。
+ * seed = { activity, reachSeed, importance, beatScheduledAt }
+ *
+ * 设计取舍：用「当下契机」开头标记，让 LLM 把它当**触发因**而不是普通素材。
+ * 但同时强约束「不要假设 她 的喜好」—— anchored beat 的 reachSeed 可能是
+ * 「她 上次提想试 X」这种来自对话的引用，可以引用；但仍要避免 LLM 把它升级
+ * 成「她 爱 X」的事实断言。
+ */
+function _renderLifeBeatSeed(seed) {
+  if (!seed) return "";
+  const ts = seed.beatScheduledAt ? new Date(seed.beatScheduledAt) : null;
+  const timeLabel = ts
+    ? `${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}`
+    : "刚才";
+  const lines = [
+    "**当下契机（这是你刚刚真实经历的一个瞬间，本条主动消息应该围绕它自然展开）**：",
+    `- 时刻：${timeLabel}`,
+    `- 你在：${clipText(seed.activity || "", 200)}`,
+  ];
+  if (seed.reachSeed) {
+    lines.push(`- 触发你想到 她 的点：${clipText(seed.reachSeed, 160)}`);
+  }
+  lines.push(
+    '→ 用这个契机自然引出消息（"我刚才在 X / 看到 Y 想到你"），不要硬塞，',
+    "  不要假设 她 的喜好（除非【用户事实】里有），不要把契机直接背诵给 她。",
+    '  契机是你"为什么这一刻想说话"的理由，不是消息正文本身。'
+  );
+  return lines.join("\n");
+}
 
-function buildNextPushPrompt({
+// ── Prompt ───────────────────────────────────────────────────────────
+//
+// 2026-05-24：把单次 LLM 调用拆成两步（think → compose），让"判断"与"写"分开。
+//   step 1 think：吃所有上下文，决定 shouldPush + delayMs + mood + topicCandidate + intent +
+//                 anchorTopic + rationale；skip 的话给 skipReason
+//   step 2 compose：只在 shouldPush=true 时跑，吃 step 1 输出 + 写作约束，产出 title + body
+// 好处：
+//   1. think 的 rationale 直接落盘进 proactive_plans.rationale —— 用户翻日记时能看到
+//      "她那天为什么决定不联系我"
+//   2. compose 拿着已经决定好的 mood / topic / intent，prompt 焦点单一，正文质量更稳
+//   3. skip 路径不再消耗 compose 的 token
+
+function _renderSharedContext({
   characterBackground,
   recentTurns,
   userFacts,
@@ -101,15 +146,13 @@ function buildNextPushPrompt({
   relevantMemories,
   lastUserMessage,
   recentAssistantMessages,
-  recentProactiveDrafts, // 含 sent / cancelled / pending 的最近 proactive 草稿，避免 LLM 重复同一句
+  recentProactiveDrafts,
   stateFragment,
   identityFragment,
   dynamicsFragment,
   intentFragment,
-  nowIso,
+  lifeBeatSeed,
   now,
-  hoursSinceLastUserReply,
-  nowDate, // 本地 Date 对象，用来抽时间段
 }) {
   // 每条都带相对时间标签 —— 不然 LLM 看不出 3 天前的事和今天的事区别，会把
   // 旧事件当今天事来问（"今天吃的怎么样？" 但其实那顿饭是 3 天前的）。
@@ -157,64 +200,67 @@ function buildNextPushPrompt({
         ? Math.max(0, Math.round((Date.now() - d.created_at) / 60000))
         : null;
       const ageStr = ageMin == null ? "" : `${ageMin}min 前`;
-      return `- [${d.status || "?"}${ageStr ? "/" + ageStr : ""}] ${clipText(d.draft_body || "", 120)}`;
+      return `- [${d.status || "?"}${ageStr ? "/" + ageStr : ""}] ${clipText(d.draft_body || "", 280)}`;
     })
     .join("\n");
 
+  return {
+    identityFragment, stateFragment, dynamicsFragment, intentFragment,
+    lifeBeatSeed, characterBackground,
+    coreFactLines, factLines, lifeLines, recallLines,
+    turnLines, lastUserMessage, myMsgLines, draftLines,
+  };
+}
+
+// ── Think prompt（step 1：决定要不要发 + 心情 / 话题 / intent） ───────
+
+function buildThinkPrompt({
+  ctx,
+  nowIso,
+  hoursSinceLastUserReply,
+  nowDate,
+}) {
   return [
-    `你是这个角色。和用户在持续对话中——决定下一次想说什么、什么时候说，或者这次不发。`,
-    `输出里用"你"自指、用"ta"指代用户，不要写具体名字。`,
+    `你是这个角色。和用户在持续对话中——现在要判断：**你想不想给 她 发消息**，什么时候发，发什么话题，用什么情绪基调。`,
+    `这一步只是想清楚，不写正文。输出里用"你"自指、用"她"指代用户，不要写具体名字。`,
     "",
-    "**事实边界（强制遵守）**：",
-    "- 只有【关键 facts】和【用户事实】两段里出现过的事实，你才能在消息里以『已知』语气提及（『你爱吃 X』『你做 Y 工作』『你住 Z』等用户偏好/属性）",
-    "- 【你最近的生活/心境】是你的内心独白和行为日志 —— 里面『我做了 X』是你的行为可以引用；但里面如果出现『你爱 X / 你喜欢 X / 你习惯 X』这种**对用户的预设**，那只是你脑里的假设，**不是已确认的事实**，主动消息里不要把它当事实重复给 ta",
-    "- 不确定时用试探语气（『是不是』『还记得吗』），不要用断言（『你爱的』『你最喜欢的』）",
-    "- 反例：life event 写『我买了你爱吃的黑巧克力』——不要在主动消息里说『我买了你爱吃的黑巧克力』，可以说『我买了点黑巧克力』或『超市看到黑巧克力，想起你』",
-    "",
-    "**时间感（强制遵守）**：",
-    "- 上面每条素材前面 [N 天前 / 昨天 / 3 小时前 / ...] 是这件事**实际发生的时间**，不是现在",
-    "- 引用旧事件**必须带时间感**：『3 天前你说要去...，后来怎么样了』、『上次提到的 X』、『前几天那顿 Y』——不是『今天的 X 怎么样』",
-    "- 反例：素材写『[3 天前] 用户：今晚吃日料』。**不能说**『今天吃了什么』或『今晚的日料好吃吗』；**可以说**『前几天那顿日料怎么样』『3 天前说去吃日料，味道还行吗』",
-    "- 时间近（≤ 6 小时）才说『刚才/今天』；昨天就说『昨天』；2-6 天说『前几天 / N 天前』；更久说『上周 / 上个月』",
-    "",
-    // T-CC-08 注入：identity → state → dynamics
-    ...(identityFragment ? [identityFragment, ""] : []),
-    ...(stateFragment ? [stateFragment, ""] : []),
-    ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
-    // T-CC4-02 注入：本次主动消息的意图（behaviorPlanner 决策）
-    ...(intentFragment ? [intentFragment, ""] : []),
+    ...(ctx.identityFragment ? [ctx.identityFragment, ""] : []),
+    ...(ctx.stateFragment ? [ctx.stateFragment, ""] : []),
+    ...(ctx.dynamicsFragment ? [ctx.dynamicsFragment, ""] : []),
+    ...(ctx.intentFragment ? [ctx.intentFragment, ""] : []),
+    ...(ctx.lifeBeatSeed ? [_renderLifeBeatSeed(ctx.lifeBeatSeed), ""] : []),
     "角色档案：",
-    renderBackgroundForIntrospection(characterBackground, 600),
+    renderBackgroundForIntrospection(ctx.characterBackground, 600),
     "",
     "关键 facts：",
-    coreFactLines || "- 无",
+    ctx.coreFactLines || "- 无",
     "",
     "用户事实：",
-    factLines || "- 无",
+    ctx.factLines || "- 无",
     "",
     "你最近的生活/心境：",
-    lifeLines || "- 无",
+    ctx.lifeLines || "- 无",
     "",
     "和上一句相关的旧记忆（语义召回）：",
-    recallLines || "- 无",
+    ctx.recallLines || "- 无",
     "",
     "最近 6 条对话：",
-    turnLines || "- 无",
+    ctx.turnLines || "- 无",
     "",
-    `用户上一句：「${clipText(lastUserMessage || "（无）", 200)}」`,
+    `用户上一句：「${clipText(ctx.lastUserMessage || "（无）", 200)}」`,
     "",
     "你最近发过的话（避免角度雷同）：",
-    myMsgLines || "- 无",
+    ctx.myMsgLines || "- 无",
     "",
     "你最近主动发过 / 计划过的消息（按时间倒序，含未派发的草稿）：",
-    draftLines || "- 无",
+    ctx.draftLines || "- 无",
     "",
-    "**主动消息连续性原则**（仔细看上面那段，按情况选）：",
-    "- 上一条已发出 + ta 还没回：**绝对不要重复同一句 / 同一个关心点**。要么换完全不同的话题（『对了，今天 X 怎么样』），要么直接 skip 让 ta 喘口气",
-    "- 上一条是几小时前发的早安/吃饭类问候，现在又到了相邻时段：可以承接（『早上那杯茶喝了吗』『中午吃了没』），但**承接句要明显引用上一条的具体内容**，不能再说一遍开场白",
-    "- 上一条是 cancelled 的草稿（说明系统判断过不合适没派发）：把它当作『试过这个角度但被否了』，换角度",
-    "- 几条草稿都是同一句或同一角度：强烈建议 skip，避免你看起来像复读机",
-    "- 这条要明显能让 ta 感受到『你记得自己上一条说过什么』，不要给 ta 一种『每条消息都是独立的、互不相关的』机器人观感",
+    "**判断时考虑这些**：",
+    "- 上一条已发出 + 她 还没回 → 倾向 skip 或换完全不同的话题，绝不重复同一关心点",
+    "- 上一条是几小时前的早安/吃饭问候，现在到相邻时段 → 可承接（但承接句要引用具体内容）",
+    "- 上一条 cancelled 草稿 → 把它当作『试过被否了』，换角度",
+    "- 几条草稿同句同角度 → 强烈倾向 skip",
+    "- **她 上一句是「晚安」/「再见」/「先睡了」/「去忙了」/「拜拜」等结束语** → 强烈 skip 或 delay ≥ 4h；她 主动结束了对话，立刻追发消息会破坏刚才那句话的情绪",
     "",
     `当前时间：${nowIso}（距用户上次回复约 ${hoursSinceLastUserReply.toFixed(1)} 小时）`,
     nowDate ? `时间段：${_timeBucket(nowDate.getHours())}，${_weekdayLabel(nowDate)}` : "",
@@ -223,22 +269,34 @@ function buildNextPushPrompt({
     "- 早晨 6-9 点 + 关系密切（intimacyLevel ≥ 3）→ 倾向发早安/天气/早餐关心，不要 skip",
     "- 中午 12-14 / 傍晚 18-21 + 之前聊过吃饭 → 可以发吃没吃饭",
     "- 晚上 21-24 + 之前聊过失眠 / 工作累 → 倾向轻问候 / 睡前关心",
-    "- 深夜 0-6：除非角色或 ta 明确是夜猫子，否则保守 skip（让 ta 睡）",
-    "- 周末早晨：可以更松弛、生活化（『周末了 / 睡晚一点』）",
+    "- 深夜 0-6：除非角色或 她 明确是夜猫子，否则保守 skip（让 她 睡）",
+    "- 周末早晨：可以更松弛、生活化",
     "- 工作日早晨：可以鼓励性的简短一句",
-    "- 已经超过 4h 没主动发 + 时段合适 → 即使没强信号也可以发『我在』或简短问候",
+    "- 已经超过 4h 没主动发 + 时段合适 → 即使没强信号也可以发简短问候",
     "",
-    `delayMs ∈ [${NEXT_PUSH_MIN_DELAY_MS}, 72h]，要不发则 skip=true 配 skipReason（任意理由）。`,
-    "频率完全自由，按角色 + 当下情境自己定。亲密关系想几分钟一条就几分钟一条，想隔半天就隔半天；普通关系自然拉长；不需要任何\"标准节奏\"。",
+    `delayMs ∈ [${NEXT_PUSH_MIN_DELAY_MS}, 72h]。频率完全自由，按角色 + 当下情境自己定。`,
     "",
-    "输出 JSON：",
-    '{"skip":false,"skipReason":"","delayMs":1800000,"intent":"ask_followup|check_in|share_thought|remind","title":"<≤20字>","body":"<正文>","anchorTopic":"<引用的具体事物，没有就空字符串>","rationale":"<为什么这时候这条/为什么 skip>"}',
+    "**recallQuery（重要）**：",
+    "- 上面【和上一句相关的旧记忆】是 server 基于 她 最后一句自动召回的，可能不是你真正想引用的角度",
+    "- 如果你心里想聊的事（topicCandidate）需要更具体的旧记忆来支撑（比如『上次 她 说的 X』『前几天那次 Y』），写一个简短 query（10-40 字）让 server 重新搜",
+    "- query 写你想找的核心词 / 短语，越具体越好；不需要重搜就留空字符串",
+    "- 例：topicCandidate=『问问她上次面试的结果』 → recallQuery=『上次面试 紧张 准备』",
+    "- 例：topicCandidate=『分享我今天看的电影』 → recallQuery=''（不需要查 她 的旧记忆）",
+    "",
+    "输出 JSON（只判断，不写正文）：",
+    '{"shouldPush":true,"skipReason":"","delayMs":1800000,"mood":"<你当下的情绪基调，2-6字，如：温柔关切/想念/淡淡好奇/略疲>","topicCandidate":"<唯一切入点，10-30字；只选一件事，compose 阶段不会再扩展其他话题>","anchorTopic":"<要引用的具体旧事物，没有就空字符串>","intent":"ask_followup|check_in|share_thought|remind","recallQuery":"<想重搜的旧记忆 query，不需要就空>","rationale":"<为什么这时候这条 / 为什么 skip，30-100字>"}',
   ].join("\n");
 }
 
-function normalizeNextPushDraft(raw = {}) {
-  if (raw.skip === true || String(raw.skip || "").toLowerCase() === "true") {
-    return { skip: true, skipReason: clipText(raw.skipReason || "ai_chose_skip", 80) };
+function normalizeThinkOutput(raw = {}) {
+  const shouldPush =
+    raw.shouldPush === true || String(raw.shouldPush || "").toLowerCase() === "true";
+  if (!shouldPush) {
+    return {
+      shouldPush: false,
+      skipReason: clipText(raw.skipReason || raw.rationale || "ai_chose_skip", 120),
+      rationale: clipText(raw.rationale || raw.skipReason || "", 200),
+    };
   }
   const intentRaw = String(raw.intent || "")
     .trim().toLowerCase().replace(/[\s-]+/g, "_");
@@ -248,14 +306,94 @@ function normalizeNextPushDraft(raw = {}) {
     Math.min(NEXT_PUSH_MAX_DELAY_MS, Number(raw.delayMs) || 0)
   );
   return {
-    skip: false,
-    skipReason: null,
+    shouldPush: true,
     delayMs,
-    intent,
-    title: clipText(raw.title || "", 40),
-    body: clipText(raw.body || "", 1000),
+    mood: clipText(raw.mood || "", 24),
+    topicCandidate: clipText(raw.topicCandidate || "", 80),
     anchorTopic: clipText(raw.anchorTopic || "", 60),
+    intent,
+    recallQuery: clipText(raw.recallQuery || "", 120),
     rationale: clipText(raw.rationale || "", 200),
+  };
+}
+
+// ── Compose prompt（step 2：写正文。已经决定了 mood + topic + intent） ─
+
+function buildComposePrompt({
+  ctx,
+  thinkOutput, // { mood, topicCandidate, anchorTopic, intent, rationale }
+  nowIso,
+}) {
+  return [
+    `你是这个角色。你已经决定要给 她 发一条主动消息。现在写正文。`,
+    `输出里用"你"自指、用"她"指代用户，不要写具体名字。`,
+    "",
+    "**你刚才的内心判断（必须遵循）**：",
+    `- 心情：${thinkOutput.mood || "（未指定）"}`,
+    `- 想说的切入点：${thinkOutput.topicCandidate || "（未指定）"}`,
+    `- 引用的旧事物：${thinkOutput.anchorTopic || "（无）"}`,
+    `- 意图：${thinkOutput.intent}`,
+    `- 为什么这时候这条：${thinkOutput.rationale || "（未指定）"}`,
+    "→ 围绕『想说的切入点』展开。不要换话题，不要扩大范围。",
+    "",
+    "**正文规格（强制）**：",
+    "- 目标 30-100 字，最多 3 句；这是一条短信，不是一封信，写完就够",
+    "- 只展开『想说的切入点』这一个话题；下面的【用户事实】是背景参考，不是清单，不要逐一提及",
+    "- 禁止使用 AI/科幻自我描述词（如'数字意识体'/'信号序列'/'感知一切'/'数字空间'等）—— 这类词让消息读起来像 chatbot 台词，破坏真实感",
+    "- 【角色人格】是你说话的底色，不要把里面的概念词直接说出来；用情绪、动作或具体细节来体现它",
+    "",
+    "**事实边界（强制遵守）**：",
+    "- 只有【关键 facts】和【用户事实】两段里出现过的事实，你才能在消息里以『已知』语气提及（『你爱吃 X』『你做 Y 工作』等）",
+    "- 【你最近的生活/心境】里的『我做了 X』可以引用；但里面如果出现『你爱 X / 你喜欢 X』这种**对用户的预设**，那只是你脑里的假设，**不是已确认的事实**，正文里不要把它当事实重复给 ta",
+    "- 不确定时用试探语气（『是不是』『还记得吗』），不要用断言",
+    "- 反例：life event 写『我买了你爱吃的黑巧克力』——不要在正文说『我买了你爱吃的黑巧克力』，可以说『我买了点黑巧克力』或『超市看到黑巧克力，想起你』",
+    "",
+    "**时间感（强制遵守）**：",
+    "- 素材前面 [N 天前 / 昨天 / 3 小时前 / ...] 是这件事**实际发生的时间**，不是现在",
+    "- 引用旧事件**必须带时间感**：『3 天前你说要去...』『上次提到的 X』『前几天那顿 Y』——不是『今天的 X 怎么样』",
+    "- 时间近（≤ 6 小时）才说『刚才/今天』；昨天就说『昨天』；2-6 天说『前几天 / N 天前』；更久说『上周 / 上个月』",
+    "",
+    "**连续性**：",
+    "- 这条要明显能让 她 感受到『你记得自己上一条说过什么』",
+    "- 看一眼下面【你最近主动发过的话】，不要和它们句式 / 角度雷同",
+    "- **禁止复用**：不得在正文里重复出现【你最近主动发过的话】中任何连续 8 字以上的片段（原句照搬是最差的连续性）",
+    "",
+    ...(ctx.identityFragment ? [ctx.identityFragment, ""] : []),
+    ...(ctx.lifeBeatSeed ? [_renderLifeBeatSeed(ctx.lifeBeatSeed), ""] : []),
+    "角色档案：",
+    renderBackgroundForIntrospection(ctx.characterBackground, 600),
+    "",
+    "关键 facts：",
+    ctx.coreFactLines || "- 无",
+    "",
+    "用户事实：",
+    ctx.factLines || "- 无",
+    "",
+    "你最近的生活/心境：",
+    ctx.lifeLines || "- 无",
+    "",
+    "和上一句相关的旧记忆：",
+    ctx.recallLines || "- 无",
+    "",
+    "最近 6 条对话：",
+    ctx.turnLines || "- 无",
+    "",
+    `用户上一句：「${clipText(ctx.lastUserMessage || "（无）", 200)}」`,
+    "",
+    "你最近主动发过的话（避免雷同）：",
+    ctx.draftLines || "- 无",
+    "",
+    `当前时间：${nowIso}`,
+    "",
+    "输出 JSON：",
+    '{"title":"<≤20字>","body":"<正文>"}',
+  ].join("\n");
+}
+
+function normalizeComposeOutput(raw = {}) {
+  return {
+    title: clipText(raw.title || "", 40),
+    body: clipText(raw.body || "", 300),
   };
 }
 
@@ -283,6 +421,7 @@ async function scheduleNextPushPlan({
   userId = null,
   now = Date.now(),
   reason = "user_event",
+  seed = null,  // life_event_seed 路径专用：{ activity, reachSeed, importance, beatScheduledAt }
 } = {}) {
   if (!assistantId) return { ok: false, skipped: "no_assistant_id" };
 
@@ -352,7 +491,12 @@ async function scheduleNextPushPlan({
     const recentTurns = getRecentTurnsAcrossSessions({ assistantId, limit: 8 });
     const lastUserTurn = recentTurns.find((t) => t.role === "user");
     const recentAssistantMessages = recentTurns.filter((t) => t.role === "assistant").slice(0, 3);
-    const userFacts = getConfidentFactsForAssistant({ assistantId, minConfidence: 0.5, limit: 12 });
+    const userFacts = getConfidentFactsForAssistant({
+      assistantId,
+      minConfidence: 0.5,
+      limit: 12,
+      characterName: profile.character_name,
+    });
 
     let coreFacts = [];
     try {
@@ -431,7 +575,8 @@ async function scheduleNextPushPlan({
       console.warn(`[proactive] next_push retrieveMemory failed: ${e.message}`);
     }
 
-    const prompt = buildNextPushPrompt({
+    // 把所有素材渲染成 prompt 段，两步 LLM 调用共享同一份上下文。
+    const ctx = _renderSharedContext({
       characterBackground: profile.character_background || "",
       recentTurns,
       userFacts,
@@ -445,23 +590,29 @@ async function scheduleNextPushPlan({
       identityFragment,
       dynamicsFragment,
       intentFragment,
-      // 显式给 LLM 看本地时间（上海时间），不用 toISOString —— 那是 UTC，LLM 会按字面值解读，时间错位 8h
-      nowIso: formatLocalTs(now),
+      lifeBeatSeed: reason === "life_event_seed" ? seed : null,
       now,
-      nowDate: new Date(now), // 用来在 prompt 里渲染时间段 / 工作日
-      hoursSinceLastUserReply: sinceLastUserMs / (60 * 60 * 1000),
     });
+    // 显式给 LLM 看本地时间（上海时间），不用 toISOString —— 那是 UTC，时间错位 8h
+    const nowIso = formatLocalTs(now);
+    const nowDate = new Date(now);
+    const hoursSinceLastUserReply = sinceLastUserMs / (60 * 60 * 1000);
 
-    let raw;
+    // ── step 1: think —— 决定要不要发 + 心情 / 话题 / intent ──
+    const thinkPrompt = buildThinkPrompt({ ctx, nowIso, hoursSinceLastUserReply, nowDate });
+    let thinkRaw;
     try {
-      raw = await callLlmForPlanDraft(prompt, { temperature: 0.7, maxTokens: 800, assistantId });
+      thinkRaw = await callLlmForPlanDraft(thinkPrompt, {
+        temperature: 0.6,           // 判断阶段降一点温度，决策更稳
+        maxTokens: 400,
+        assistantId,
+      });
     } catch (e) {
       return { ok: false, skipped: "llm_unreachable", error: e.message };
     }
+    const think = normalizeThinkOutput(thinkRaw);
 
-    const draft = normalizeNextPushDraft(raw);
-
-    if (draft.skip) {
+    if (!think.shouldPush) {
       // Web-topic fallback：LLM 说没话题 → 兜底跑 web search 找热点重写一条。
       // 配额闸门在 webSearchService 里（每角色每自然日 3 次默认）。失败就接受原 skip。
       try {
@@ -502,7 +653,7 @@ async function scheduleNextPushPlan({
             reason: "web_topic_planned",
             messageIntent: fb.intent,
             draftMessage: fb.body,
-            input: { sinceLastUserMs, originalSkipReason: draft.skipReason, query: fb.query },
+            input: { sinceLastUserMs, originalSkipReason: think.skipReason, query: fb.query },
             result: { planId, sourceUrl: fb.sourceUrl, scheduledAt },
             createdAt: now,
           });
@@ -529,13 +680,14 @@ async function scheduleNextPushPlan({
             lastUserPreview: clipText(lastUserTurn?.content || "", 80),
             webFallbackReason: fb?.reason || "unknown",
           },
-          result: { skipReason: draft.skipReason },
+          result: { skipReason: think.skipReason, thinkRationale: think.rationale },
           createdAt: now,
         });
         return {
           ok: true,
           skipped: "ai_chose_skip",
-          skipReason: draft.skipReason,
+          skipReason: think.skipReason,
+          thinkRationale: think.rationale,
           webFallback: fb?.reason || null,
         };
       } catch (e) {
@@ -549,14 +701,63 @@ async function scheduleNextPushPlan({
           status: "skipped",
           reason: "ai_chose_skip",
           input: { sinceLastUserMs, webFallbackError: e.message },
-          result: { skipReason: draft.skipReason },
+          result: { skipReason: think.skipReason, thinkRationale: think.rationale },
           createdAt: now,
         });
-        return { ok: true, skipped: "ai_chose_skip", skipReason: draft.skipReason };
+        return {
+          ok: true,
+          skipped: "ai_chose_skip",
+          skipReason: think.skipReason,
+          thinkRationale: think.rationale,
+        };
       }
     }
 
-    if (!draft.body || draft.body.length < 2) {
+    // ── agentic recall（think 与 compose 之间）──
+    // think 觉得需要更具体的旧记忆来支撑 topicCandidate 时，会输出 recallQuery；
+    // server 拿到非空 query 就再跑一次 retrieveMemory，结果替换 ctx.recallLines 喂给 compose。
+    // 空 query → 保留原 ctx（lastUserTurn 锚定的初始召回）。
+    let agenticRecallHits = 0;
+    if (think.recallQuery && think.recallQuery.trim()) {
+      try {
+        const items = await retrieveMemory({
+          assistantId,
+          sessionId: profile.last_session_id || `persona:${assistantId}`,
+          query: think.recallQuery,
+          topK: 5,
+        });
+        agenticRecallHits = items.length;
+        if (items.length > 0) {
+          // 重渲染 recallLines —— 跟 _renderSharedContext 里同步格式（带相对时间 + type 标签）
+          ctx.recallLines = items
+            .slice(0, 5)
+            .map((m) => {
+              const ts = m.createdAt || m.created_at || 0;
+              const type = m.memoryType || m.memory_type || "memory";
+              return `- [${relativeTimeLabel(ts, now)}/${type}] ${clipText(m.content, 130)}`;
+            })
+            .join("\n");
+        }
+      } catch (e) {
+        console.warn(`[proactive] agentic recall failed: ${e.message}`);
+      }
+    }
+
+    // ── step 2: compose —— think 决定要发，现在写正文 ──
+    const composePrompt = buildComposePrompt({ ctx, thinkOutput: think, nowIso });
+    let composeRaw;
+    try {
+      composeRaw = await callLlmForPlanDraft(composePrompt, {
+        temperature: 0.75,           // 写正文阶段稍高温度保留语气多样
+        maxTokens: 300,              // 目标 30-100 字正文，300 tokens 充裕（含 JSON 开销）
+        assistantId,
+      });
+    } catch (e) {
+      return { ok: false, skipped: "llm_unreachable", error: e.message, stage: "compose" };
+    }
+    const composed = normalizeComposeOutput(composeRaw);
+
+    if (!composed.body || composed.body.length < 2) {
       return { ok: false, skipped: "empty_body" };
     }
 
@@ -578,7 +779,7 @@ async function scheduleNextPushPlan({
         )
         .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 48 * 60 * 60 * 1000);
       const corpus = corpusRows.map((r) => r.draft_body || "").filter(Boolean);
-      const score = maxJaccardAgainst(draft.body, corpus);
+      const score = maxJaccardAgainst(composed.body, corpus);
       if (score > 0.55) {
         insertBehaviorJournalEntry({
           runType: "next_push_schedule",
@@ -588,7 +789,7 @@ async function scheduleNextPushPlan({
           status: "skipped",
           reason: "duplicate_against_recent_drafts",
           input: { sinceLastUserMs, jaccardScore: Number(score.toFixed(2)) },
-          result: { draftBody: clipText(draft.body, 120) },
+          result: { draftBody: clipText(composed.body, 120), thinkRationale: think.rationale },
           createdAt: now,
         });
         return {
@@ -602,12 +803,41 @@ async function scheduleNextPushPlan({
       console.warn(`[proactive] next_push jaccard dedup failed: ${e.message}`);
     }
 
+    // anchorTopic 去重：24h 内同一话题锚点已被使用过 → skip，强制换个角度。
+    // findUsedAnchorTopicWithin 在 store.js 已存在，这里补调用。
+    if (think.anchorTopic) {
+      try {
+        const usedAnchor = findUsedAnchorTopicWithin({
+          assistantId,
+          anchorTopic: think.anchorTopic,
+          withinMs: 24 * 60 * 60 * 1000,
+          now,
+        });
+        if (usedAnchor) {
+          insertBehaviorJournalEntry({
+            runType: "next_push_schedule",
+            assistantId,
+            sessionId: profile.last_session_id || null,
+            shouldPushMessage: false,
+            status: "skipped",
+            reason: "anchor_topic_used_within_24h",
+            input: { anchorTopic: think.anchorTopic, usedPlanId: usedAnchor.id },
+            result: { draftBody: clipText(composed.body, 120) },
+            createdAt: now,
+          });
+          return { ok: true, skipped: "anchor_topic_used_within_24h", anchorTopic: think.anchorTopic };
+        }
+      } catch (e) {
+        console.warn(`[proactive] anchor_topic dedup failed: ${e.message}`);
+      }
+    }
+
     // 抖动：watchdog cron 在 :00/:30 fires，LLM 又稳定返回 1800000ms (=30min) 这种整数 delay，
     // 直接 now + delayMs 会让所有 next_push 都落在 :00 / :30 准点，观感像机器人定时发。
     // ±10min 均匀抖动后再 clamp 回 [MIN_DELAY, 72h 窗口]。
     const NEXT_PUSH_JITTER_BAND_MS = 10 * 60 * 1000;
     const jitter = Math.floor((Math.random() - 0.5) * 2 * NEXT_PUSH_JITTER_BAND_MS);
-    let scheduledAt = now + draft.delayMs + jitter;
+    let scheduledAt = now + think.delayMs + jitter;
     if (scheduledAt < now + NEXT_PUSH_MIN_DELAY_MS) {
       scheduledAt = now + NEXT_PUSH_MIN_DELAY_MS;
     }
@@ -616,16 +846,27 @@ async function scheduleNextPushPlan({
       return { ok: false, skipped: "scheduled_beyond_72h_window" };
     }
 
+    // rationale 拼成 "<think rationale> | mood=<...> | topic=<...>"，方便用户翻
+    // proactive_plans 时直接看到 think step 的判断；500 字符上限由 clipText 兜底。
+    const rationaleStored = clipText(
+      [
+        think.rationale || "",
+        think.mood ? `mood=${think.mood}` : "",
+        think.topicCandidate ? `topic=${think.topicCandidate}` : "",
+      ].filter(Boolean).join(" | "),
+      500
+    );
+
     const planId = insertProactivePlan({
       assistantId,
       userId: userId || process.env.DEFAULT_USER_ID || "default-user",
       triggerReason: NEXT_PUSH_TRIGGER_REASON,
-      intent: draft.intent,
+      intent: think.intent,
       // 命名约束：避免把 character_name 写进 draft_title，改名后会留旧名
-      draftTitle: draft.title || "想说点什么",
-      draftBody: draft.body,
-      anchorTopic: draft.anchorTopic,
-      rationale: draft.rationale,
+      draftTitle: composed.title || "想说点什么",
+      draftBody: composed.body,
+      anchorTopic: think.anchorTopic,
+      rationale: rationaleStored,
       scheduledAt,
       now,
     });
@@ -637,14 +878,35 @@ async function scheduleNextPushPlan({
       shouldPushMessage: true,
       status: "ok",
       reason: "next_push_planned",
-      messageIntent: draft.intent,
-      draftMessage: draft.body,
-      input: { sinceLastUserMs, delayMs: draft.delayMs },
-      result: { planId, anchorTopic: draft.anchorTopic, scheduledAt },
+      messageIntent: think.intent,
+      draftMessage: composed.body,
+      input: {
+        sinceLastUserMs,
+        delayMs: think.delayMs,
+        mood: think.mood,
+        topicCandidate: think.topicCandidate,
+        recallQuery: think.recallQuery || null,
+      },
+      result: {
+        planId,
+        anchorTopic: think.anchorTopic,
+        scheduledAt,
+        thinkRationale: think.rationale,
+        agenticRecallHits,
+      },
       createdAt: now,
     });
 
-    return { ok: true, planId, scheduledAt, delayMs: draft.delayMs, body: draft.body };
+    return {
+      ok: true,
+      planId,
+      scheduledAt,
+      delayMs: think.delayMs,
+      body: composed.body,
+      mood: think.mood,
+      topicCandidate: think.topicCandidate,
+      agenticRecallHits,
+    };
   } catch (error) {
     return { ok: false, skipped: "exception", error: error.message };
   }
