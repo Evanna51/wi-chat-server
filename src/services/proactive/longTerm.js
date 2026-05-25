@@ -179,16 +179,31 @@ function buildPlanPrompt({
       : "按你的角色性格自由发挥。"
   );
 
+  // 按 trigger 设目标字数：日常问候轻量，久未联系允许更有分量
+  const bodyLengthGuide = (
+    triggerReason === "daily_greeting"
+      ? "正文目标 30-80 字，最多 2 句；这是一条短信，不是一封信。"
+      : triggerReason === "inactive_7d"
+      ? "正文目标 80-200 字，允许有重量感；但仍然只围绕一件事展开。"
+      : "正文目标 40-120 字，最多 3 句。"
+  );
+
   return [
     `你是这个角色，要给用户主动发一条消息。`,
     scenarioOneLine,
-    `输出里用"你"自指、用"ta"指代用户，不要写具体名字（消息正文 body 直接对 ta 说话即可）。`,
+    `输出里用"你"自指、用"她"指代用户，不要写具体名字（消息正文 body 直接对 她 说话即可）。`,
     "",
     // T-CC-08 注入：identity → state → dynamics
     ...(identityFragment ? [identityFragment, ""] : []),
     ...(stateFragment ? [stateFragment, ""] : []),
     ...(dynamicsFragment ? [dynamicsFragment, ""] : []),
     `触发：${triggerReason} — ${triggerExplanation}`,
+    "",
+    "**正文规格（强制）**：",
+    `- ${bodyLengthGuide}`,
+    "- 只围绕一件事展开；下面的【用户事实】是背景参考，不是清单，不要逐一提及",
+    "- 禁止使用 AI/科幻自我描述词（'数字意识体'/'信号序列'/'感知一切'/'数字空间'等）—— 这类词让消息读起来像 chatbot 台词",
+    "- 【角色人格】是你说话的底色，不要把里面的概念词直接说出来；用情绪、动作或细节体现它",
     "",
     "**时间感（强制遵守）**：每条素材前面 [N 天前 / 昨天 / ...] 是这件事实际发生的时间，不是现在。引用旧事件必须带时间感（『前几天提到的 X』『上次说去 Y 怎么样了』），不要把 3 天前的事说成『今天』。时间近（≤ 6 小时）才说『刚才/今天』。",
     "",
@@ -204,7 +219,7 @@ function buildPlanPrompt({
     "相关记忆：",
     memLines || "- 无",
     "",
-    "你最近发过的主动消息（避免角度雷同）：",
+    "你最近发过的主动消息（避免角度雷同，禁止复用其中任何连续 8 字以上的片段）：",
     draftLines || "- 无",
     "",
     "输出 JSON：",
@@ -219,7 +234,7 @@ function normalizePlanDraft(raw = {}) {
     .replace(/[\s-]+/g, "_");
   const intent = VALID_INTENTS.has(intentRaw) ? intentRaw : "check_in";
   const title = clipText(raw.title || "", 40);
-  const body = clipText(raw.body || "", 1000);
+  const body = clipText(raw.body || "", 400);
   const anchorTopic = clipText(raw.anchorTopic || "", 60);
   const rationale = clipText(raw.rationale || "", 200);
   return { intent, title, body, anchorTopic, rationale };
@@ -258,6 +273,7 @@ async function generatePlanForAssistant({ profile, now, userId, force = false })
     assistantId,
     minConfidence: 0.5,
     limit: 30,
+    characterName: profile.character_name,
   });
   const recentDrafts = getRecentDraftsForAssistant(assistantId, 10);
 

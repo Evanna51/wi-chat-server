@@ -93,6 +93,44 @@
 
 ---
 
+## KI-05 角色 meme / 表情包库
+
+**现状**：
+- `dialogueSkillsCatalog.js` 的 skill 列表里没有"发表情包/meme"这一招。
+- 角色目前只能用文字表达情绪，缺少一个很真实的人际沟通方式。
+
+**触发条件**：
+- 角色在轻松/玩笑/共鸣场景里，文字显得干，表情包会更自然。
+
+**修复方向**：
+1. 新建 `meme_library` 表：存 `(id, tag[], image_url, description, usage_count)`。
+2. 新增 `send_meme` skill，供 registerRouter 在轻松/共情 register 里选中。
+3. 调用 tool 流程：registerRouter 输出 `skill=send_meme` → promptComposer 注入 `search_meme_tool` → LLM 决定发哪一张（tag 匹配）→ 客户端渲染图片消息。
+4. 需要至少一轮额外 tool call，属于两步 LLM 调用，热路径成本需评估。
+
+**预估成本**：3-4 天（表库建设 + tool 接入 + 客户端图片消息支持）。
+
+---
+
+## KI-06 角色日常生活状态粒度过粗
+
+**现状**：
+- `character_state` / life beat 里的"当前活动"只有粗粒度描述（在家、外出等）。
+- 现实中"洗澡中 / 刷牙 / 吃饭 / 做饭 / 买菜 / 看视频 / 读书 / 打游戏 / 锻炼 / 工作中（具体类型）"这些状态对消息的语气、时机、话题都有强影响，但目前上下文里拿不到。
+
+**触发条件**：
+- 角色在用户购物时来一条"你在干嘛"——用户回了"买菜"，但角色下一条主动消息还是没有意识到这个状态。
+- 角色在用户洗澡时发了很长的需要回复的消息。
+
+**修复方向**：
+1. 扩展 life beat 的 `activity` 枚举/分类：引入精细状态标签（`grooming`, `cooking`, `meal`, `shopping`, `exercise`, `gaming`, `reading`, `streaming`, `working:meeting`, `working:deep_focus` 等）。
+2. 让 think 步骤（nextPush/longTerm）感知到"角色当前状态"，据此调整消息时机和长度（角色自己在开会时不会长篇大论）。
+3. 用户侧状态的推断：从最近 turn 的内容短语中提取"她在干什么"并临时注入 context，影响 next_push 的 depth 和 timing。
+
+**预估成本**：2-3 天（状态扩展 + prompt 注入 + 推断逻辑）。
+
+---
+
 ## 维护规则
 
 - 只有「**有清晰修复方案 + 当前不修**」的问题进这里。

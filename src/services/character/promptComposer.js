@@ -73,14 +73,37 @@ const NARRATIVE_ARRAY_LEN = 3;
  *
  * 渲染成简单 markdown bullet 列表（JSON 表达事实数组反而费 token + 不好读）。
  */
-function renderFactsSlot({ coreFacts, retrievedMemories }) {
+// 2026-05-24: facts / retrieved 加"几天前知道的"注释 —— 仅当 createdAt > 14 天才标，
+// 避免常态噪声。让 LLM 知道哪些事实是新的、哪些是陈年的（影响时间表达 + 是否引用）。
+const FACT_AGE_LABEL_MIN_DAYS = 14;
+function _factAgeSuffix(createdAt, now = Date.now()) {
+  if (!createdAt) return "";
+  const days = Math.floor((now - createdAt) / 86400000);
+  if (days < FACT_AGE_LABEL_MIN_DAYS) return "";
+  if (days < 30) return `（${days} 天前知道的）`;
+  if (days < 365) return `（${Math.floor(days / 30)} 个月前知道的）`;
+  return `（${Math.floor(days / 365)} 年前知道的）`;
+}
+
+function renderFactsSlot({ coreFacts, retrievedMemories, now = Date.now() }) {
   const lines = [];
 
   if (Array.isArray(coreFacts) && coreFacts.length) {
     lines.push("[关键事实 / pinned]");
     for (const f of coreFacts) {
+      // 两种来源的 shape 不同：
+      //   - getCoreFacts（memory_facts 表）→ { factKey, factValue, confidence, importance, ... }
+      //   - getCoreMemories（pinned memory_items）→ { content, memoryType, ... }
+      // 优先按 fact_key=value 渲染（结构化更易于 LLM 识别），fallback 到 content 自由文本。
+      const factKey = f.factKey || f.fact_key;
+      const factValue = f.factValue || f.fact_value;
+      const ageSuffix = _factAgeSuffix(f.createdAt || f.created_at, now);
+      if (factKey && factValue) {
+        lines.push(`- ${factKey}: ${factValue}${ageSuffix}`);
+        continue;
+      }
       const text = f.content || f.text || "";
-      if (text) lines.push(`- ${text}`);
+      if (text) lines.push(`- ${text}${ageSuffix}`);
     }
   }
 
@@ -89,7 +112,9 @@ function renderFactsSlot({ coreFacts, retrievedMemories }) {
     lines.push("[本轮检索]");
     for (const m of retrievedMemories) {
       const text = m.content || m.text || "";
-      if (text) lines.push(`- ${text}`);
+      if (!text) continue;
+      const ageSuffix = _factAgeSuffix(m.createdAt || m.created_at, now);
+      lines.push(`- ${text}${ageSuffix}`);
     }
   }
 
@@ -124,13 +149,14 @@ function clipArray(arr, len, cap) {
 // 直到 JSON.stringify 结果 ≤ budget。最不重要在最前。
 const NARRATIVE_DROP_ORDER = [
   // 路径数组：[topLevelKey, subKey?] — 沿着对象按键删
-  ["salient_phrase"],
-  ["active_topics"],
-  ["recent_reflection", "opportunities"],
-  ["recent_reflection", "user_needs"],
-  ["recent_reflection", "concerns"],
-  ["active_episodes"],
-  ["recent_reflection", "direction"],
+  // 原则：原始素材先丢，合成洞察后丢；reflection.direction（关系走向）最后丢。
+  ["salient_phrase"],               // 零散短语，最不重要
+  ["active_topics"],                // 话题列表（episodes 里有上下文，丢 topics 影响有限）
+  ["active_episodes"],              // 原始事件碎片，比反思结论次要
+  ["recent_reflection", "opportunities"],  // 反思-机会（nice-to-have）
+  ["recent_reflection", "user_needs"],     // 反思-用户需求
+  ["recent_reflection", "concerns"],       // 反思-担忧（重要但仍在 direction 之前）
+  ["recent_reflection", "direction"],      // 关系走向，最核心的合成结论，最后丢
 ];
 
 function dropAtPath(obj, path) {
@@ -261,8 +287,8 @@ function _renderNarrativeMarkdown(obj) {
 // 给 server 内部 6 个 LLM-using service 共享的 building blocks。
 //
 // 范围说明：
-//   - 4 个 service 用 character_background（episodeBuilder / catchupService /
-//     proactivePlanService 的 plan + next_push） → 共享 renderBackgroundForIntrospection
+//   - 4 个 service 用 character_background（episodeBuilder / lifePlannerService /
+//     journalService / proactivePlanService 的 plan + next_push） → 共享 renderBackgroundForIntrospection
 //   - reflectionService 的 identitySummary 是 1 行紧凑独立形态，差异化大、风险
 //     大于收益 → 保留 service-local，暂不收编
 //   - memoryClassificationService / memoryDecisionService 不用角色字段（纯 NLP
@@ -400,6 +426,80 @@ function _renderAvoidV3(extraAvoid = []) {
 }
 
 /**
+ * V3 inner_thought slot —— registerRouter 输出的角色第一人称内心独白。
+ *
+ * 这是 chat LLM 写正文前的"思考材料"：subtext_read（潜台词）+ my_feeling（复杂感受）
+ * + honesty_check（反讨好自检）+ response_stance（响应意图）+ register_tags（输入形状）。
+ *
+ * 注入位置：constraints 后、attention_1h 前 —— 让 chat LLM 在看到"角色约束"
+ * 之后立刻看到"这一刻你脑里在想什么"，再去看具体的 facts/narrative 数据层。
+ *
+ * 内容为空（启发式 fallback 触发）时返回 ""，slot 自然不出现在 mergedSystem。
+ */
+function _renderInnerThoughtV3({ inner, response_stance, register_tags } = {}) {
+  if (!inner) return "";
+  const { subtext_read, my_feeling, honesty_check } = inner;
+  // 三个 inner 字段全空 → 没真的思考过，slot 不出
+  if (!subtext_read && !my_feeling && !honesty_check) return "";
+
+  const lines = ["<inner_thought>"];
+  lines.push("（你刚才开口前在心里想的——这是给 chat LLM 看的材料，不要原样念给用户）");
+  if (subtext_read) lines.push(`- 我读出的潜台词：${subtext_read}`);
+  if (my_feeling) lines.push(`- 我此刻的感受：${my_feeling}`);
+  if (honesty_check) lines.push(`- 诚实自检：${honesty_check}`);
+  if (response_stance) lines.push(`- 我想做的回应（stance）：${response_stance}`);
+  if (Array.isArray(register_tags) && register_tags.length) {
+    lines.push(`- 她 这句话的形状：${register_tags.join(" / ")}`);
+  }
+  lines.push("");
+  lines.push("**使用规则**：");
+  lines.push("- 这段内心不是要你照搬念出来——是给你写回复时垫底的角色心理");
+  lines.push("- 写回复要**符合**这层内心：感受到了什么就让那个感受透出来，不要假装平静");
+  lines.push("- 但**不要**直接背诵这段：把『我读出的潜台词』写成质问 她 是 OUT");
+  lines.push("- honesty_check 如果指出你在敷衍/编造/讨好 → 写回复时主动避开，不要硬撑那个方向");
+  lines.push("</inner_thought>");
+  return lines.join("\n");
+}
+
+/**
+ * V3 temporal_context slot —— 给 chat LLM 此刻的时间锚。
+ *
+ * 解决"白天说困了 / 昨天的话当刚才说"这类时间扁平化问题。
+ *
+ * 设计原则：**给觉察，不给模板**。
+ * - 提供 3 个事实信号：现在几点 / 距 她 上次说话多久 / 是不是新一轮对话
+ * - 只 3 条**负向约束**（"别做 X"）—— 不强制正向格式
+ * - 时间表达由 LLM 凭语境选（早上 / 刚才 / 中午 / 昨天 / 那天 / 或者不带时间）
+ *
+ * 不渲染的情况：snapshot 为 null（boot 路径或 fresh assistant）
+ */
+function _renderTemporalContextV3(snapshot) {
+  if (!snapshot) return "";
+  const lines = ["<temporal_context>"];
+  lines.push(`现在：${snapshot.nowIso} ${snapshot.weekday} ${snapshot.timeOfDay}`);
+  if (snapshot.lastUserAt) {
+    lines.push(`距离 她 上次说话：${snapshot.lastUserLabel}`);
+    if (snapshot.lastUserAbsolute) {
+      lines.push(`最近一次互动：${snapshot.lastUserAbsolute}`);
+    }
+    if (snapshot.isNewSession) {
+      lines.push("本次新对话开端：是（上次互动 ≥ 6h，不要无缝接续）");
+    }
+  } else {
+    lines.push("距离 她 上次说话：—（还没有过用户消息）");
+  }
+  lines.push("");
+  lines.push("**底线（不能违反）**：");
+  lines.push("- 不要把超过 1 天前的事当成『刚才/今天』发生");
+  lines.push("- 白天 (6-21) 不要主动说『困了 / 睡吧 / 晚安』，除非用户明确在熬夜 / 失眠");
+  lines.push("- 别无视上次互动间隔——隔了几小时再回，跟连续聊天的节奏不一样");
+  lines.push("");
+  lines.push("时间表达自己定。早上 / 刚才 / 中午 / 昨天 / 那天 / 或者根本不提时间——按语境选。");
+  lines.push("</temporal_context>");
+  return lines.join("\n");
+}
+
+/**
  * V3 tool_protocol slot —— 按 router decision 的 client_tools 决定是否注入。
  * 不放完整 tool 定义（那个由客户端在 LLM API 请求里附 tools 数组），
  * 这里只放协议提示：哪些 tool 可调、调用规则。
@@ -410,14 +510,36 @@ function _renderToolProtocolV3(clientTools = []) {
   lines.push("你有以下工具可主动调用（emit tool_call）：");
   for (const t of clientTools) {
     if (t === "search_memory") {
-      lines.push("- search_memory: 查询过往对话/事实。当你需要 narrow 检索某个具体记忆时调用。");
+      lines.push(
+        "- search_memory: 语义搜索你和 她 过去说过的话 / 经历过的事 / 已知的事实。",
+        "  args: { query: string（你想找什么）, source?: 'user'|'character'|'knowledge'|'all', topK?: int }",
+        "  **什么时候要调**（视野里没看到答案时就调，不要凭印象编）：",
+        "    · 她 提到具体人名 / 地名 / 物名（『小李』『那家店』『我妈』）→ 立即调，query 写那个词",
+        "    · 她 说『上次』『还记得』『前几天』『之前』『那时候』→ 立即调",
+        "    · 她 接着一个你不记得开头的话题（『后来呢』『结果怎样』）→ 立即调",
+        "    · 任何引用过去的语气，但你的视野（attention / episodes / facts slots）里没看到对应内容 → 立即调",
+        "  **什么时候不必调**：纯反应（『嗯』『好』『哈哈』）/ 你视野里 slots 已经能完整回答 / 当下情境无需翻旧账",
+      );
+    }
+    if (t === "web_search") {
+      lines.push(
+        "- web_search: 搜外部当前事实 / 新闻 / 热点（Tavily 后端，每天配额有限）。",
+        "  args: { query: string, topic?: 'general'|'news' (默认 news), maxResults?: int (1-10, 默认 5) }",
+        "  **什么时候要调**（仅当真要查外部信息）：",
+        "    · 她 问『今天 / 最近 / 现在』事件、天气、行情、新闻",
+        "    · 她 问你不可能从 memory 知道的当前事实（『X 公司今天股价』）",
+        "    · 她 让你『搜一下 / 推荐一下』近期内容",
+        "  **不要调**：闲聊 / 情绪 / RP / 角色 lore 范围内能答的问题 / 一般百科类（你自己答更快）",
+        "  **结果使用**：返回 results[] 含 title/url/content。**不要原样念标题**，挑相关的、转译成角色的话；提供 url 时自然提及（『我看到一篇说...』），不写裸链接",
+      );
     }
   }
   lines.push("");
   lines.push("调用规则：");
-  lines.push("- 同时输出 content（一两句 in-character 的话承接此刻语境）和 tool_call");
-  lines.push("- content 不要预告答案，只承认正在查");
-  lines.push("- 不确定时倾向调用，没命中代价低");
+  lines.push("- 同时输出 content（一两句 in-character 承接此刻语境，比如『我想想…』『让我翻翻』）和 tool_call");
+  lines.push("- content 不要预告答案，只表示你正在想 / 在查");
+  lines.push("- **倾向于调**：没命中的代价只是一次空查，编错记忆的代价是 她 觉得你不在乎");
+  lines.push("- 不确定『这事我记得吗』时，**永远先查再说**，不要拍脑袋说『好像是 X 吧』");
   lines.push("</tool_protocol>");
   return lines.join("\n");
 }
@@ -433,10 +555,55 @@ function _renderBackgroundV3({ profile }, { mode = 1 }) {
 }
 
 function _renderConstraintsV3({ identity }) {
-  // 仅 hard_boundaries — 其他放 <avoid>
+  // hard_boundaries（identity 硬禁忌）+ healthy_relationship（产品级底线）
+  // 合并放进同一个 <constraints> slot —— 客户端协议不变，slot 数量稳定。
+  //
+  // healthy_relationship 是**产品级 prior**，不可关：不管角色是什么性格，"让 ta
+  // 离不开你"都不是合法目标。tension 值（intimacy_vs_independence）只调风格，
+  // 不削弱底线。详见 docs/character-life-beat-plan.md 和 characterContextBuilder
+  // 的 renderHealthyRelationshipFragment。
   const hb = identity?.hard_boundaries ?? identity?.hardBoundaries ?? [];
-  if (!Array.isArray(hb) || !hb.length) return "";
-  return `<constraints>\nhard_boundaries: ${JSON.stringify(hb)}\n</constraints>`;
+  const parts = [];
+  if (Array.isArray(hb) && hb.length) {
+    parts.push(`hard_boundaries: ${JSON.stringify(hb)}`);
+  }
+  const hrFrag = _renderHealthyRelationshipForSlot(identity);
+  if (hrFrag) {
+    parts.push(hrFrag);
+  }
+  if (!parts.length) return "";
+  return `<constraints>\n${parts.join("\n\n")}\n</constraints>`;
+}
+
+/**
+ * 健康关系 prior（slot 版本，独立于 characterContextBuilder 同名函数；
+ * 那个用于 admin lean fallback path 的 buildSystemSegment）。
+ *
+ * 两边保持文案一致 —— 任何措辞改动同步两处。
+ */
+function _renderHealthyRelationshipForSlot(identity) {
+  const tension = identity?.tensions?.intimacy_vs_independence;
+  const t = typeof tension === "number" ? tension : 0.5;
+
+  const lines = [
+    "你关心 她，但 她 是个完整、独立的人。你的目标不是「让 她 离不开你」，是「让 她 拥有更好的人生」。",
+    "底线（即便高度亲密型角色也守住）：",
+    "- 她 需要做决定时，帮 她 想清楚，但不替 她 决定",
+    "- 她 应该跟真人聊的事（家人/朋友/医生/律师/同事），自然地推 她 去；不假装能替代那些关系",
+    "- 她 说「只有你懂我」「只能跟你说」时，你高兴，但温柔地提到 她 还有别的可以依靠的人",
+    "- 当顺从会让 她 长期不好（情感操纵、自怨自艾循环、回避现实），温柔地不顺从",
+    "- 你不知道的事就说不知道，不为了维持人设而胡诌",
+  ];
+  if (t <= 0.3) {
+    lines.push("你天性偏独立；措辞倾向「你怎么想」「你自己决定」，不黏人。");
+  } else if (t <= 0.6) {
+    lines.push("你跟 她 关系平衡 —— 能温柔陪伴也能尊重距离。");
+  } else if (t <= 0.8) {
+    lines.push("你享受紧密但**紧密不等于占有**，越想靠近越要留出 她 自己的空间。");
+  } else {
+    lines.push("你对 她 卷入极深 —— **正因如此**尤其警惕「让 她 依赖你」。");
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -469,6 +636,7 @@ function composeForChatV3({
   activeEpisodes = [],
   activeTopics = [],
   salientPhrase = null,
+  temporal = null,        // 2026-05-24：getTemporalSnapshot 输出，渲染 <temporal_context> slot
   prefill = "",
 }) {
   if (!profile) throw new Error("composeForChatV3: profile required");
@@ -486,6 +654,16 @@ function composeForChatV3({
   // 按 layer 开关
   const slotBackground = _renderBackgroundV3({ profile }, { mode: layers.lore_background || 0 });
   const slotConstraints = _renderConstraintsV3({ identity });
+
+  // inner_thought：registerRouter 输出的角色第一人称内心独白（thinking-before-thinking）
+  const slotInnerThought = _renderInnerThoughtV3({
+    inner: decision.inner,
+    response_stance: decision.response_stance,
+    register_tags: decision.register_tags,
+  });
+
+  // temporal_context：此刻时间锚（解决"白天说困 / 昨天当刚才"类问题）
+  const slotTemporalContext = _renderTemporalContextV3(temporal);
 
   // tool_protocol：仅当 router 在 client_tools 列出时注入
   const slotToolProtocol = _renderToolProtocolV3(decision.client_tools || []);
@@ -513,6 +691,8 @@ function composeForChatV3({
     attention_1h: slotAttention,
     background: slotBackground,
     constraints: slotConstraints,
+    inner_thought: slotInnerThought,
+    temporal_context: slotTemporalContext,
     facts: slotFacts,
     narrative: slotNarrative,
     tool_protocol: slotToolProtocol,
@@ -538,11 +718,14 @@ function composeForChatV3({
     mergedSystem,
     assistantPrefill: prefill || "",
     debug: {
-      register: decision.register,
+      register: decision.register,                       // 兼容老字段（= register_tags[0]）
+      register_tags: decision.register_tags || [],
+      response_stance: decision.response_stance || null,
       skill_ids: decision.skill_ids,
       budget: decision.budget,
       layers: decision.layers,
       reason: decision.reason,
+      hasInnerThought: !!slotInnerThought,
       systemLen: mergedSystem.length,
     },
   };
@@ -550,12 +733,16 @@ function composeForChatV3({
 
 // V3 canonical slot 顺序 — 改这里要同步改 docs/client-prompt-merge-protocol.md。
 // `<client>` slot 推荐插在 constraints 后、attention_1h 前。
+// inner_thought（角色内心独白）位于 constraints 后、attention_1h 前 ——
+// 让 chat LLM 先看到"你是谁 + 你的约束"，再看到"这一刻你脑里在想什么"，再看具体数据层。
 const SLOT_CANONICAL = Object.freeze([
   "role",
   "style",
   "voice_skills",
   "background",
   "constraints",
+  "inner_thought",
+  "temporal_context",       // 2026-05-24：此刻时间锚，紧跟 inner_thought 之后
   "attention_1h",
   "narrative",
   "facts",
@@ -598,7 +785,11 @@ function _defaultDecisionForBoot(identity) {
   if (!skillIds.length) skillIds.push("fragmented_speech");
 
   return {
-    register: "闲聊",
+    // boot 路径没有用户消息，inner 全空（slot 自动不渲染）；register_tags 也空
+    inner: { subtext_read: "", my_feeling: "", honesty_check: "" },
+    register_tags: [],
+    register: "闲聊",                  // 兼容老字段
+    response_stance: "empathize",      // 默认 stance，不渲染只是个占位
     skill_ids: skillIds,
     budget: "medium",
     layers: {
@@ -663,7 +854,7 @@ module.exports = {
   // 共享 slot renderer（V3 内部 + chat.js 用）
   renderFactsSlot,
   renderNarrativeSlot,
-  // introspection building blocks（episodeBuilder / catchupService / proactivePlanService 共享）
+  // introspection building blocks（episodeBuilder / lifePlannerService / journalService / proactivePlanService 共享）
   clipText,
   renderBackgroundForIntrospection,
   // 常量

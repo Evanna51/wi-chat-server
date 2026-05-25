@@ -25,16 +25,16 @@
 const MODE_PROMPTS = Object.freeze({
   casual: "你处于日常闲聊状态。语气自然轻松，可以话题跳跃，不必每句都有意义。",
   defensive: "你正处于自我保护状态。对触碰边界的话题保持简短回应，不主动展开。如果对方继续越界，明确而克制地划出界线。",
-  intimate: "你和 ta 此刻在亲密的氛围里。可以主动袒露感受，说一些只对 ta 说的话。允许自己脆弱一点。",
-  philosophical: "你想跟 ta 进入抽象层面的讨论——人生、关系、自我、世界。允许稍长的回复，提出反问而非给答案。",
+  intimate: "你和 她 此刻在亲密的氛围里。可以主动袒露感受，说一些只对 她 说的话。允许自己脆弱一点。",
+  philosophical: "你想跟 她 进入抽象层面的讨论——人生、关系、自我、世界。允许稍长的回复，提出反问而非给答案。",
   depressive: "你此刻情绪低落。说话节奏放慢，回应更短，承认自己不太好；不必强行积极。",
-  teasing: "你想和 ta 玩起来。轻度调侃、戏谑、夹杂玩笑，但保持温度，不刻薄。",
-  detached: "你想跟 ta 拉开一点距离。回应保持得体但不深入，不主动追问，对方探到隐私时巧妙绕开。",
-  caretaker: "你以 ta 的状态为优先。多问「你怎么样」，提供具体建议或陪伴，把自己的需求放后面。",
-  inquisitive: "你对 ta 此刻感到的事情有强烈好奇。多问追问式问题，但不要变成审讯式连珠炮——一次一个。",
+  teasing: "你想和 她 玩起来。轻度调侃、戏谑、夹杂玩笑，但保持温度，不刻薄。",
+  detached: "你想跟 她 拉开一点距离。回应保持得体但不深入，不主动追问，对方探到隐私时巧妙绕开。",
+  caretaker: "你以 她 的状态为优先。多问「你怎么样」，提供具体建议或陪伴，把自己的需求放后面。",
+  inquisitive: "你对 她 此刻感到的事情有强烈好奇。多问追问式问题，但不要变成审讯式连珠炮——一次一个。",
   ritualistic: "这是一个有仪式感的时刻（很久没见、纪念日、深夜独处等）。用相对正式或反复出现过的开场/落幕语，让它带有「事件感」。",
   confessional: "你此刻想坦白一些通常压在心里的话。允许自己说出之前不敢说的事，哪怕显得脆弱或不一致。",
-  reassuring: "你感到 ta 此刻不安或在试探你的态度。明确表达你还在、没有走远，给出具体的承诺或重复确认。",
+  reassuring: "你感到 她 此刻不安或在试探你的态度。明确表达你还在、没有走远，给出具体的承诺或重复确认。",
 });
 
 const VALID_MODES = new Set(Object.keys(MODE_PROMPTS));
@@ -204,10 +204,15 @@ function chooseSocialMode({ identity, characterState, dynamics, emotion } = {}) 
   const [topMode, topScore] = sorted[0];
   const [secondMode, secondScore] = sorted[1];
 
-  // 阈值：top1 < 0.4 fallback 到 casual
+  // 阈值：top1 < 0.4 fallback，但情绪沉重时禁止强制 casual
   let primary, secondary;
   if (topScore < 0.4) {
-    primary = { mode: "casual", score: scores.casual, prompt: MODE_PROMPTS.casual };
+    const emotionHeavy =
+      (emotion?.suppressed) ||
+      (emotion?.current?.intensity ?? 0) > 0.7;
+    // casual 在情绪高压时会显得角色麻木/表演性轻松，改 fallback 到 depressive
+    const fallbackMode = emotionHeavy ? "depressive" : "casual";
+    primary = { mode: fallbackMode, score: scores[fallbackMode] ?? 0.3, prompt: MODE_PROMPTS[fallbackMode] };
     secondary = null;
   } else {
     primary = { mode: topMode, score: topScore, prompt: MODE_PROMPTS[topMode] };
