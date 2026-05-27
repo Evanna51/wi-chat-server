@@ -66,7 +66,6 @@ export async function viewCharacter(assistantId, tabId = "overview") {
       )
     );
   }
-  badges.push(el("span", { class: "badge badge--neutral" }, `熟悉度: ${a.state?.familiarity ?? 0}/100`));
   badges.push(el("span", { class: "badge badge--neutral" }, `轮次: ${a.state?.totalTurns ?? 0}`));
 
   const head = el("section", { class: "char-head" }, [

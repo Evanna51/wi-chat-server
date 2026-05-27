@@ -167,6 +167,29 @@ export const ZH = {
     resentment: "怨恨",
     gratitude: "感激",
   },
+  // cognition router response_stance（角色响应意图，与 proactive intent 不同）
+  responseStance: {
+    empathize: "共情承接（跟着 ta 的情绪起伏）",
+    reflect: "镜映 / 帮 ta 把感受说清",
+    probe: "试探追问",
+    stay_silent: "静默承接（短回应不展开）",
+    hold_space: "留空间，不急着填话",
+    share_back: "分享对应经历（平等回赠）",
+    redirect: "主动转向另一话题",
+    tease: "调侃 / 轻松化",
+    affirm: "肯定 / 确认 / 站队",
+    repair: "修复关系（之前有摩擦）",
+    assert_boundary: "表达边界 / 不同意",
+  },
+  // cognition router register_tags（用户消息形状，多标签）
+  registerTag: {
+    "反应型": "反应型（≤8 字 / 纯情绪）",
+    "闲聊": "闲聊（日常）",
+    "情绪倾诉": "情绪倾诉",
+    "引用过去": "引用过去（上次/还记得）",
+    "长咨询": "长咨询（完整观点）",
+    "RP": "RP（角色扮演 / 括号动作）",
+  },
   intent: {
     reassure_after_conflict: "冲突后安抚",
     reassure_abandonment_fear: "安抚被抛弃恐惧",

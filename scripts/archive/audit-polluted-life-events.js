@@ -1,4 +1,19 @@
 /**
+ * ⚠️ 2026-05-24 归档（scripts/archive/）：
+ *
+ * 污染源 catchupService 已被 daily-life-plan + life-beat-tick 取代（migration 035 /
+ * docs/character-life-beat-plan.md）。lifePlannerService 的 prompt 显式禁止"凭空假
+ * 设 ta 喜好"，新生产的 life event 不再产生此类污染。
+ *
+ * 旧条目如需事后补救可继续跑此脚本（独立于服务）；放进 archive 避免被新人误以为还
+ * 在常规维护链路里。
+ *
+ * 用法（路径要改一下，因为现在在 archive 子目录）：
+ *   node scripts/archive/audit-polluted-life-events.js              # dry-run
+ *   node scripts/archive/audit-polluted-life-events.js --apply      # 落库
+ *
+ * ──────────────────────────────────────────────────────────────────
+ *
  * audit-polluted-life-events — 扫 life_event / work_event 里"凭空假设用户偏好"的条目
  *
  * 触发动机：catchupService 自动生成 life_event 时，AI 会编造"我买了你爱吃的 X"
@@ -9,10 +24,6 @@
  *   1. 扫所有 life_event / work_event content
  *   2. 用启发式正则找疑似污染（含"你爱 X / 你喜欢 X / ta 爱 X" 等）
  *   3. 默认 dry-run 列出来；--apply 标 quality_grade='D'
- *
- * 用法：
- *   node scripts/audit-polluted-life-events.js              # dry-run
- *   node scripts/audit-polluted-life-events.js --apply      # 落库
  */
 
 require("dotenv").config();

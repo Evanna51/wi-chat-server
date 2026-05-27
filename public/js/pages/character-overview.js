@@ -31,8 +31,6 @@ export async function renderOverviewTab(body, a) {
   const stateBlock = el("article", {}, [
     el("header", {}, [el("strong", {}, "State")]),
     el("dl", { class: "config-dl" }, [
-      el("dt", {}, "familiarity"),
-      el("dd", {}, String(a.state?.familiarity ?? 0)),
       el("dt", {}, "totalTurns"),
       el("dd", {}, String(a.state?.totalTurns ?? 0)),
       el("dt", {}, "activeSessionId"),

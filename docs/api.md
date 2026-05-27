@@ -195,13 +195,15 @@
 | GET | `/api/character/behavior-intent/vocab` | 14 个 intent 定义 |
 | GET | `/api/character/attention-1h?assistantId=` | 1h 滚动注意力 debug（chat hot path 与 proactive intent 共享同一缓存）|
 
-### 2.3 Catchup / Proactive（admin UI 调度）
+### 2.3 Life plan / Proactive（admin UI 调度）
 | Method | Path | 用途 |
 |---|---|---|
-| POST | `/api/character/catchup` | 离线 catchup（角色"读"用户离线消息）|
+| GET | `/api/character/life-plan/today?assistantId=&date=YYYY-MM-DD&lazy=1` | 查角色今日 beat 时间表（lazy=1 默认，缺 plan 自动触发生成）。详见 [docs/character-life-beat-plan.md](./character-life-beat-plan.md) |
 | POST | `/api/proactive/regenerate-plans` | 手动重生成主动消息计划 |
 | GET | `/api/proactive/plans` | 列 plans |
 | DELETE | `/api/proactive/plans/:id` | 取消 plan |
+
+> ⚠️ **已废弃**：`POST /api/character/catchup` → 410 Gone（2026-05-24，migration 035）。角色生活记忆改由后台 `daily-life-plan` + `life-beat-tick` cron 自动生成。
 
 ### 2.4 Browse（admin UI 浏览数据）
 全在 `/api/browse/*`，[src/routes/browse.js](../src/routes/browse.js)：

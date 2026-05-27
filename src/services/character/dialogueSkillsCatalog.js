@@ -413,11 +413,32 @@ function renderSkillForPrompt(skill, { maxExamples = 2 } = {}) {
 }
 
 const VALID_REGISTERS = Object.freeze(["反应型", "闲聊", "情绪倾诉", "引用过去", "长咨询", "RP"]);
+// 2026-05-24：register 改为多标签后的语义别名。同一份枚举集，只是用法从 1-of-N 变成 0..3-of-N。
+// 保留 VALID_REGISTERS 老名给 skill.registers 数组比对继续用（不破坏 catalog 结构）。
+const VALID_REGISTER_TAGS = VALID_REGISTERS;
+
+// 角色响应意图（character-side response stance）—— 与 register_tags（用户消息形状）正交。
+// 同一句"我没事"角色可以选 probe / hold_space / empathize / redirect …，由 inner cognition 决定。
+const VALID_RESPONSE_STANCES = Object.freeze([
+  "empathize",         // 共情承接，跟着 她 的情绪起伏
+  "reflect",           // 镜映 / 帮 她 把感受说清楚
+  "probe",             // 试探追问，想了解更深
+  "stay_silent",       // 静默承接（短回应，不展开）
+  "hold_space",        // 留空间，不急着填话
+  "share_back",        // 分享对应经历，平等回赠
+  "redirect",          // 主动转向另一个话题（避免硬撞）
+  "tease",             // 调侃 / 轻松化
+  "affirm",            // 肯定 / 确认 / 站队
+  "repair",            // 修复关系（之前有摩擦/冷场）
+  "assert_boundary",   // 表达自己的边界 / 不同意
+]);
 
 module.exports = {
   CATALOG,
   CATALOG_BY_ID,
   VALID_REGISTERS,
+  VALID_REGISTER_TAGS,
+  VALID_RESPONSE_STANCES,
   getSkillById,
   listSkillsForRegister,
   listAllSkills,

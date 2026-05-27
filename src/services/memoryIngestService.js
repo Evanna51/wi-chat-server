@@ -13,20 +13,6 @@ const SEMANTIC_ROLES = new Set(["user", "assistant"]);
 /** 真正进入 memory_items + facts + edges + 向量索引 + 分类管线的 role。 */
 const MEMORY_ROLES = new Set(["user"]);
 
-/**
- * @deprecated 2026-05-06 弃用：原 regex `/喜欢([^，。！？\n]+)/` 太粗暴，
- * 不锚定句首、不分主语、不排除否定、句中位置匹配，产生大量 garbage 事实
- * （如 "的方式靠近我..."、"的事情"）。
- *
- * 新方向：事实抽取由 LLM 路径承接（参考 `memoryClassificationService` 9 类分类基础设施，
- * 后续 KG Phase B 会一并用 LLM 抽实体/关系/事实，进 kg_relations 表）。
- *
- * 此函数现在永远返回 []，不再写入 memory_facts。等 LLM 抽取上线后整体迁移。
- */
-function extractFacts(/* content */) {
-  return [];
-}
-
 function estimateSalience(role, content) {
   const lengthBoost = Math.min(0.3, (content.length || 0) / 400);
   const roleBoost = role === "user" ? 0.2 : 0.05;
@@ -104,24 +90,9 @@ function ingestInteraction({
     createdAt: now, // 用 turn 真实发生时间，不要用 server ingest 时间
   });
 
-  const facts = extractFacts(content);
-  const insertFactStmt = db.prepare(
-    `INSERT INTO memory_facts
-      (id, assistant_id, session_id, memory_item_id, fact_key, fact_value, confidence, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  for (const fact of facts) {
-    insertFactStmt.run(
-      uuidv7(),
-      assistantId,
-      sessionId,
-      memoryId,
-      fact.key,
-      fact.value,
-      fact.confidence,
-      now
-    );
-  }
+  // memory_facts 当前不再由 ingest 路径写入。旧 regex 抽取（"喜欢/讨厌/..."）
+  // 在 2026-05-06 移除（产 garbage facts），LLM 抽取后续在 KG Phase B 上线，
+  // 走独立 worker 写 kg_relations。这里只留 memoryId 供下游 fact-write 用。
 
   const previous = db
     .prepare(

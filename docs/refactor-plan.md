@@ -42,18 +42,18 @@
   - ⏳ 删 `src/services/fcm.js` / admin.js FCM 路径 / firebase-admin 依赖 / `FCM_*` env
 - **验收**：`grep -rni 'fcm\|push_token\|sendFcmMessage' src/` 为空。
 
-### T-03 删除 `character_state.familiarity` 字段 ⏸ 等客户端
+### T-03 删除 `character_state.familiarity` 字段 ✅（2026-05-25）
 
 - **动机**：`intimacyScore + level` 已替代它；`familiarity = floor(totalTurns/3)` 是冗余派生值。
 - **关联**：[CR-02](./client-release-required.md#cr-02-不再读-familiarity-字段对应服务端-t-03)
-- **改动**（客户端发版后再合）：
-  - 新 migration（顺延）：rebuild `character_state` 表去 `familiarity` 列
-  - [db.js:32-54](../src/db.js#L32) 移除 familiarity 字段
-  - `characterStateService.ensureDefaultState` 删 `familiarityHint` 参数
-  - `characterEngine.buildProactivePrompt` 改用 `relationship.level` 映射
-  - `relationshipStateView.js` 输出去掉 familiarity
-  - `/api/character/bootstrap` payload 去 familiarity
-- **验收**：`grep -rn familiarity src/` 仅命中 migration 历史。
+- **改动**：
+  - migration 036：`ALTER TABLE character_state DROP COLUMN familiarity`
+  - [db.js](../src/db.js) `upsertCharacterState` 去 familiarity
+  - `characterStateService.ensureDefaultState` 去 `familiarityHint` 参数
+  - `relationshipStateView.js` payload 不再带 familiarity
+  - `characterStateUpdater` / `memoryEditService` 不再写 familiarity
+  - admin UI（app.js / home / character / character-overview / character-cognition）改用 totalTurns
+- **验收**：`grep -rn familiarity src/` 已为空 ✅
 
 ### T-04 收紧 `memory_type` 枚举（service 层断言）✅
 
@@ -249,9 +249,9 @@
   ├─ T-06 scheduler_locks           ✅
   └─ T-04 memory_type 断言          ✅
 
-  待客户端发版（CR-01 / CR-02 对齐后再合）
+  待客户端发版（CR-01 对齐后再合）
   ├─ T-02 push_token + FCM          ⏸ 等客户端
-  └─ T-03 familiarity               ⏸ 等客户端
+  └─ T-03 familiarity               ✅（2026-05-25，migration 036）
 
 阶段 2 已完成（2026-05-08）
   ├─ T-13 retrieval fixture（脚本 + 14 fixture）   ✅（待手动跑 baseline）
@@ -286,7 +286,7 @@
 
 - [x] T-01 删 proactive_message_log
 - [ ] T-02 删 push_token + FCM ⏸ CR-01
-- [ ] T-03 删 familiarity 字段 ⏸ CR-02
+- [x] T-03 删 familiarity 字段（migration 036）
 - [x] T-04 memory_type 断言（service 层）
 - [x] T-05 删 RETRIEVAL_STRATEGY
 - [x] T-06 删 scheduler_locks

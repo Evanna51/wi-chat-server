@@ -69,9 +69,14 @@ val systemPrompt = parts.joinToString("\n\n") +
 server 内部 canonical 顺序（`enabledSlots` 总是按这个排）：
 
 ```
-role → style → voice_skills → background → constraints
+role → style → voice_skills → background → constraints → inner_thought
   → attention_1h → narrative → facts → tool_protocol → avoid
 ```
+
+> **2026-05-24**: 加 `inner_thought` slot（位置：constraints 后、attention_1h 前）。
+> 这是 cognition router 输出的角色第一人称内心独白（subtext_read / my_feeling / honesty_check
+> + response_stance + register_tags）。chat LLM 看到这段会带着角色心理活动写正文。
+> 客户端**无需特殊处理**——按 `enabledSlots` 顺序 map 即可。
 
 `enabledSlots` 例子（不同场景 router 决策不同）：
 
@@ -146,6 +151,7 @@ while (llmResp.toolCalls.isNotEmpty() && loops < 3) {
   // slot 字典，每个值已 XML-wrap 好。配合 enabledSlots 用：按数组 map 取出拼接。
   slots: {
     role, style, voice_skills, background, constraints,
+    inner_thought,            // 2026-05-24 新增：角色第一人称内心独白
     attention_1h, narrative, facts, tool_protocol, avoid
     // 每个值是 "<tag>...</tag>" 字符串或 ""
   };
@@ -155,7 +161,25 @@ while (llmResp.toolCalls.isNotEmpty() && loops < 3) {
 
   // ── 以下是 debug / 监控字段，不参与 prompt 拼装 ──
   routerDecision: {
-    register, skill_ids, budget, layers,
+    register,                  // 兼容老字段（= register_tags[0]）
+    register_tags: string[],   // 多标签 (0-3 个)：反应型/闲聊/情绪倾诉/引用过去/长咨询/RP
+    response_stance: string,   // empathize/reflect/probe/stay_silent/hold_space/share_back/redirect/tease/affirm/repair/assert_boundary
+    inner: {                   // 角色第一人称内心独白（同 inner_thought slot 的原始数据）
+      subtext_read: string,    //   ta 这句话的潜台词
+      my_feeling: string,      //   你（角色）此刻的复杂感受
+      honesty_check: string,   //   反讨好/反编造自检
+    } | null,
+    state_delta: {             // 本轮 cognition 决定的关系/心情 shift（已落 DB）
+      mood_valence_delta, mood_intensity_delta,
+      intimacy_delta, energy_delta, suppressed_intensity_delta,
+      mood_emotion_hint, reason
+    } | null,
+    state_delta_applied: {     // server 实际写入结果（含 clamp 后的最终值）
+      applied: boolean,
+      deltas: {...},
+      after: { mood_emotion, mood_valence, intimacy_score, energy, relationship_level }
+    } | null,
+    skill_ids, budget, layers,
     server_tools, client_tools, reason, characterIntent
   };
   attention1h: { topics, innerFocus, emotionalTone, turnCount };
@@ -201,11 +225,17 @@ interface ChatContextRequest {
 
 ```kotlin
 Log.d("ChatContext",
-    "register=${resp.routerDecision.register} " +
+    "tags=${resp.routerDecision.registerTags} " +
+    "stance=${resp.routerDecision.responseStance} " +
     "skills=${resp.routerDecision.skillIds} " +
     "budget=${resp.routerDecision.budget} " +
-    "reason=${resp.routerDecision.reason}")
+    "innerFeel=${resp.routerDecision.inner?.myFeeling} " +
+    "stateApplied=${resp.routerDecision.stateDeltaApplied?.applied}")
 ```
+
+> **Inner Thought UI**：客户端如想暴露"她当下在想什么"作为可选 debug 面板（不展示给普通用户），
+> 读 `routerDecision.inner` 即可。三个字段 `subtext_read` / `my_feeling` / `honesty_check`
+> 都是中文短句（≤200 字），可直接渲染。**默认不开**——这是给开发者 / power user 的观察窗口。
 
 | 现象 | 检查 |
 |---|---|

@@ -8,8 +8,9 @@
  *   - retention-sweep cron     清 outbox / 过期数据
  *   - memory-classify cron     给 user_turn 类记忆分类的 backfill
  *   - daily/weekly backup cron 备份
+ *   - daily-life-plan / life-beat-tick  角色独立时间线
  *
- * 角色生活记忆改走 client-driven /api/character/catchup（见 catchupService.js）。
+ * 角色生活记忆由 daily-life-plan + life-beat-tick 联合生产，取代了 catchupService。
  * 主动消息决策改走 plan 表（generatePlans + plan executor）。
  */
 
@@ -178,6 +179,42 @@ async function runWeeklyJournalTick() {
     return result;
   } catch (error) {
     console.error("[scheduler] weekly-journal failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+async function runDailyLifePlanTick() {
+  // 每天 04:00 跑：给每个 allow_auto_life=1 的角色生成今日 beat 时间表。
+  // 详见 src/services/character/lifePlannerService.js + docs/character-life-beat-plan.md
+  try {
+    const { runDailyLifePlanTick: tick } = require("./services/character/lifePlannerService");
+    const result = await tick();
+    infoLog(
+      `[scheduler] daily-life-plan: scanned=${result.scanned} generated=${result.generated} ` +
+        `skipped=${result.skipped} errors=${result.errors} expired=${result.expiredBeats}`
+    );
+    return result;
+  } catch (error) {
+    console.error("[scheduler] daily-life-plan failed:", error.message);
+    return { error: error.message };
+  }
+}
+
+async function runLifeBeatTickTick() {
+  // 每 15min 跑：扫到点的 pending beat → 落 memory + 视情触发 proactive。
+  // 详见 src/services/character/lifeBeatTickService.js
+  try {
+    const { runLifeBeatTickOnce } = require("./services/character/lifeBeatTickService");
+    const result = await runLifeBeatTickOnce();
+    if (result.scanned > 0 || result.activated > 0) {
+      infoLog(
+        `[scheduler] life-beat-tick: scanned=${result.scanned} activated=${result.activated} ` +
+          `proactiveTriggered=${result.proactiveTriggered} errors=${result.errors}`
+      );
+    }
+    return result;
+  } catch (error) {
+    console.error("[scheduler] life-beat-tick failed:", error.message);
     return { error: error.message };
   }
 }
@@ -474,6 +511,11 @@ function startScheduler() {
   // 角色日记 / 周记
   scheduleIfEnabled(config.dailyJournalCron, "daily-journal", runDailyJournalTick, { lockTtlMs: LLM_TTL });
   scheduleIfEnabled(config.weeklyJournalCron, "weekly-journal", runWeeklyJournalTick, { lockTtlMs: LLM_TTL });
+  // 角色独立时间线（lifePlanner / lifeBeatTick） — 取代 catchupService
+  // daily-life-plan：N 角色 × LLM 调用，串行；用 LLM_TTL（1h）
+  // life-beat-tick：纯本地 + 视情况触发 proactive 排程，用 SHORT_TTL（5min < 15min cron）
+  scheduleIfEnabled(config.dailyLifePlanCron, "daily-life-plan", runDailyLifePlanTick, { lockTtlMs: LLM_TTL });
+  scheduleIfEnabled(config.lifeBeatTickCron, "life-beat-tick", runLifeBeatTickTick, { lockTtlMs: SHORT_TTL });
   startPlanExecutorLoop();
 }
 
@@ -492,4 +534,6 @@ module.exports = {
   runReflectionTickWeekly,
   runDailyJournalTick,
   runWeeklyJournalTick,
+  runDailyLifePlanTick,
+  runLifeBeatTickTick,
 };

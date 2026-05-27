@@ -983,6 +983,92 @@ tr.intent-winner td:first-child::before {
   content: "▶ ";
   color: var(--vis-on);
 }
+
+/* ─── Cognition router 调试卡片（intent tab） ─── */
+.cognition-debug {
+  border-left: 3px solid var(--vis-on);
+}
+.cognition-summary {
+  padding: 0.5rem 0.75rem;
+  background: rgba(15, 23, 42, 0.03);
+  border-radius: 6px;
+  margin-bottom: 0.6rem;
+}
+.cognition-result h5 {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+.cognition-meta {
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: rgba(15, 23, 42, 0.02);
+  border-radius: 6px;
+}
+.inner-thought-card {
+  border: 1px solid rgba(124, 58, 237, 0.25);
+  background: rgba(124, 58, 237, 0.04);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin: 0.6rem 0;
+}
+.inner-thought-card p {
+  margin: 0.3rem 0;
+}
+.honesty-text {
+  font-style: italic;
+}
+
+/* ─── State delta 卡片 ─── */
+.state-delta-card {
+  border: 1px solid rgba(14, 116, 144, 0.25);
+  background: rgba(14, 116, 144, 0.04);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin: 0.6rem 0;
+}
+.state-delta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+}
+.delta-cell {
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.03);
+  text-align: center;
+}
+.delta-cell--pos {
+  background: rgba(22, 163, 74, 0.10);
+  color: rgb(22, 101, 52);
+}
+.delta-cell--neg {
+  background: rgba(220, 38, 38, 0.10);
+  color: rgb(159, 18, 18);
+}
+.delta-cell--zero {
+  background: rgba(100, 116, 139, 0.06);
+  color: rgb(71, 85, 105);
+}
+
+/* ─── Character State 面板（cognition tab） ─── */
+.state-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.6rem;
+  margin: 0.3rem 0 0.5rem;
+}
+.state-cell {
+  padding: 0.5rem 0.7rem;
+  background: rgba(15, 23, 42, 0.03);
+  border-radius: 6px;
+}
+.state-cell--warn {
+  background: rgba(217, 119, 6, 0.08);
+}
+.state-cell > div {
+  margin: 0.1rem 0;
+}
 .mono {
   font-family: var(--vis-mono);
 }

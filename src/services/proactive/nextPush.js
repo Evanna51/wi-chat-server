@@ -358,6 +358,7 @@ function buildComposePrompt({
           "- 分量：brief（默认）—— 日常关心，目标 30-80 字、1-2 句；这是一条短信，不是一封信",
         ]),
     "- 只展开『想说的切入点』这一个话题；下面的【用户事实】是背景参考，不是清单，不要逐一提及",
+    "- **check_in 类消息禁止用通用句式**（'记得吃饭'/'记得休息'/'保重身体'等）——必须结合【用户事实】或当前上下文里的具体细节（ta 在做什么、ta 的饮食偏好/禁忌、今天发生了什么）来写；没有具体素材就不写这类话",
     "- 禁止使用 AI/科幻自我描述词（如'数字意识体'/'信号序列'/'感知一切'/'数字空间'等）—— 这类词让消息读起来像 chatbot 台词，破坏真实感",
     "- 【角色人格】是你说话的底色，不要把里面的概念词直接说出来；用情绪、动作或具体细节来体现它",
     "",
@@ -793,12 +794,12 @@ async function scheduleNextPushPlan({
         .prepare(
           `SELECT draft_body FROM proactive_plans
             WHERE assistant_id = ?
-              AND trigger_reason = ?
+              AND trigger_reason IN ('next_push', 'web_topic')
               AND created_at >= ?
             ORDER BY created_at DESC
             LIMIT 12`
         )
-        .all(assistantId, NEXT_PUSH_TRIGGER_REASON, now - 48 * 60 * 60 * 1000);
+        .all(assistantId, now - 48 * 60 * 60 * 1000);
       const corpus = corpusRows.map((r) => r.draft_body || "").filter(Boolean);
       const score = maxJaccardAgainst(composed.body, corpus);
       if (score > 0.55) {

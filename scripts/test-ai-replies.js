@@ -45,7 +45,7 @@ function buildSystemPrompt({ profile, relationshipState, memories, antiHallucina
   if (relationshipState) {
     const m = relationshipState.mood;
     const r = relationshipState.relationship;
-    lines.push(`【你当前状态】情绪 ${m.emotionZh}（${m.emotionEn}, 强度 ${Math.round(m.intensity*100)}%, valence ${m.valence}），关系 ${r.levelName}（第 ${r.level} 级），亲密分 ${r.intimacyScore}，熟悉度 ${r.familiarity}/100`);
+    lines.push(`【你当前状态】情绪 ${m.emotionZh}（${m.emotionEn}, 强度 ${Math.round(m.intensity*100)}%, valence ${m.valence}），关系 ${r.levelName}（第 ${r.level} 级），亲密分 ${r.intimacyScore}/200，总轮次 ${r.totalTurns}`);
   }
   if (memories && memories.length) {
     lines.push("【从记忆里检索到的相关片段（按时间倒序，仅限真实记录）】");

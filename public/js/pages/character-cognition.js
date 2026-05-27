@@ -29,7 +29,11 @@ export async function renderCognitionTab(body, a) {
   }
   body.innerHTML = "";
 
-  // 1) Relationship Dynamics — 12 维条形图
+  // 1) Character State 实时面板（mood / intimacy / energy / trend）
+  // 这是 state_delta 实际落到哪里 —— cognition router 每轮 chat 都会动这几个数。
+  renderCharacterStatePanel(body, ctx);
+
+  // 2) Relationship Dynamics — 12 维条形图
   const dynamicsArticle = el("article", {});
   dynamicsArticle.appendChild(el("header", {}, [el("strong", {}, "Relationship Dynamics（12 维）")]));
   const dyn = ctx.relationshipDynamics;
@@ -197,6 +201,115 @@ export async function renderCognitionTab(body, a) {
   // 5) Prompt 预览（V_NEW_LEAN）—— 让 admin 看到 server 渲染好的 8 段 slots + assistantPrefill
   // 含一个简易 salient phrase 调试器：输入用户消息 → 看哪个 wound 被勾住
   renderPromptPreview(body, a, ctx);
+}
+
+// Character State 实时面板 —— mood / intimacy / energy / trend
+// 数据来自 /character/context 的 emotion + characterState 字段。这是 cognition router
+// state_delta 实际累加沉淀的地方；每一轮 chat 都会被 applyStateDelta 推动。
+function renderCharacterStatePanel(parent, ctx) {
+  const article = el("article", {});
+  article.appendChild(el("header", {}, [
+    el("strong", {}, "Character State · 实时"),
+    el("small", { class: "muted", style: "margin-left: 0.5rem" },
+      "cognition router 的 state_delta 每轮累加到这里"),
+  ]));
+
+  const emo = ctx.emotion;
+  const st = ctx.characterState;
+  if (!emo && !st) {
+    article.appendChild(el("p", { class: "muted" }, "暂无 state —— 角色还没有用户对话"));
+    parent.appendChild(article);
+    return;
+  }
+
+  const grid = el("div", { class: "state-panel-grid" });
+
+  // 当前心情 emotion
+  if (emo?.current) {
+    const c = emo.current;
+    grid.appendChild(el("div", { class: "state-cell" }, [
+      el("div", { class: "muted small" }, "当前情绪"),
+      el("div", {}, [
+        el("span", { class: "badge badge--neutral", style: "font-size: 0.95rem" }, c.zh || c.id),
+        el("span", { class: "muted small", style: "margin-left: 0.3rem" }, `(${c.id})`),
+      ]),
+      el("div", { class: "muted small" },
+        `强度 ${Math.round((c.intensity || 0) * 100)}%  ·  ` +
+        `valence ${(c.valence || 0).toFixed(2)}  ·  arousal ${(c.arousal || 0).toFixed(2)}`),
+    ]));
+  }
+
+  // 压抑情绪
+  if (emo?.suppressed) {
+    const s = emo.suppressed;
+    grid.appendChild(el("div", { class: "state-cell state-cell--warn" }, [
+      el("div", { class: "muted small" }, "压抑情绪 / 内里压着"),
+      el("div", {}, [
+        el("span", { class: "badge badge--off" }, s.zh || s.id),
+        el("span", { class: "muted small", style: "margin-left: 0.3rem" },
+          `强度 ${Math.round((s.intensity || 0) * 100)}%`),
+      ]),
+    ]));
+  }
+
+  // 关系亲密度 + level（payload 来自 relationshipStateView：nested mood/relationship/energy/focus）
+  const rel = st?.relationship;
+  if (rel) {
+    grid.appendChild(el("div", { class: "state-cell" }, [
+      el("div", { class: "muted small" }, "关系 / 亲密度"),
+      el("div", {}, [
+        el("span", { class: "badge badge--on" },
+          `Lv ${rel.level ?? 0}${rel.levelName ? ` · ${rel.levelName}` : ""}`),
+        el("span", { class: "muted small", style: "margin-left: 0.3rem" },
+          `intimacy ${(rel.intimacyScore ?? 0).toFixed(1)} / 200`),
+      ]),
+      el("div", { class: "muted small" },
+        `总轮次 ${rel.totalTurns ?? 0}`),
+    ]));
+  }
+
+  // 精力
+  const energyVal = typeof st?.energy === "number" ? st.energy : st?.energy?.value;
+  if (typeof energyVal === "number") {
+    const e = energyVal;
+    const label = e > 0.6 ? "充沛" : e > 0.3 ? "普通" : "疲惫";
+    const tone = e > 0.6 ? "ok" : e > 0.3 ? "neutral" : "bad";
+    grid.appendChild(el("div", { class: "state-cell" }, [
+      el("div", { class: "muted small" }, "精力"),
+      el("div", {}, [
+        el("span", { class: `badge badge--${tone === "ok" ? "on" : tone === "bad" ? "off" : "neutral"}` },
+          label),
+        el("span", { class: "muted small", style: "margin-left: 0.3rem" }, e.toFixed(2)),
+      ]),
+    ]));
+  }
+
+  // 24h 趋势
+  if (emo?.trend24h != null) {
+    const t = emo.trend24h;
+    const label = Math.abs(t) < 0.1 ? "平稳" : t > 0 ? "向好" : "走低";
+    grid.appendChild(el("div", { class: "state-cell" }, [
+      el("div", { class: "muted small" }, "24h 心情趋势"),
+      el("div", {}, [
+        el("span", { class: "badge badge--neutral" }, label),
+        el("span", { class: "muted small", style: "margin-left: 0.3rem" },
+          (t > 0 ? "+" : "") + t.toFixed(2)),
+      ]),
+    ]));
+  }
+
+  // 未化解情绪话题
+  if (emo?.unresolvedTopic) {
+    grid.appendChild(el("div", { class: "state-cell state-cell--warn" }, [
+      el("div", { class: "muted small" }, "未化解的情绪话题"),
+      el("div", {}, emo.unresolvedTopic),
+    ]));
+  }
+
+  article.appendChild(grid);
+  article.appendChild(el("p", { class: "muted small", style: "margin-top: 0.5rem" },
+    "提示：去『意图』tab 跑一句测试消息，能看到 cognition router 输出的 state_delta 如何推动这几个数。"));
+  parent.appendChild(article);
 }
 
 // V_NEW_LEAN Prompt 预览组件 —— 显示 mergedSystem + assistantPrefill + 选择性注意调试。

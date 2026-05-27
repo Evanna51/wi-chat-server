@@ -50,12 +50,16 @@ const RECENCY_FLOOR = 0.15;
 // source 参数 → memory_type IN (...) 映射
 const SOURCE_TYPES = {
   user:      ["user_turn"],
-  character: ["life_event", "work_event"],   // T-08 后 assistant_turn 不再存在
+  // life_event_autonomous（migration 035 / lifeBeatTickService）= 角色"独立想到 / 在做"
+  // 的瞬间，不直接 anchor 用户。retrieval 默认不召回（避免污染用户 query 命中池）；
+  // 只有 source='character' 显式问"角色独立想了什么"时才进结果。
+  character: ["life_event", "work_event", "life_event_autonomous"],
   knowledge: ["knowledge"],                   // 知识库条目
   all:       null,                            // 不过滤（仅调试/导出用）
 };
 
 // 调用方不传 source 时的默认候选池。
+// 故意不含 life_event_autonomous —— 见 SOURCE_TYPES.character 注释。
 const DEFAULT_TYPES = ["user_turn", "life_event", "work_event", "knowledge"];
 
 function normalize(value, min, max) {

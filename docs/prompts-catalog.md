@@ -157,67 +157,71 @@ delayMs ∈ [60s, 72h]，要不发则 skip=true 配 skipReason（任意理由）
 
 ---
 
-## 5. catchupService — 角色生活补叙（lazy）
+## 5. lifePlannerService — 角色今日时间表（每天 04:00）
 
-**入口**：`POST /api/character/catchup` → `callLlmForCatchup`
+> 2026-05-24 取代 catchupService（migration 035）。视角从"用户不在期间补叙日记"翻
+> 转为"角色今天会经历的一天"；时间戳是真实未来时刻，不是 backfill 进 gap 窗口。
+> 详见 [character-life-beat-plan.md](./character-life-beat-plan.md)。
+
+**入口**：`daily-life-plan` cron（`0 4 * * *`）→ `generateLifePlanFor` →
+`callLlmForLifePlan` → 落 `character_life_beat` 表 pending 行。
 
 **模型参数**：
 ```
-systemPrompt: (无)
-temperature: 0.8 / 0.95（attempt 重试）
-maxTokens:   900
+systemPrompt: "你是角色生活规划器。以角色第一人称视角规划今日时间表。输出严格 JSON，不要 markdown 代码块。"
+temperature: 0.85
+maxTokens:   1800
 responseFormat: "json"
+provider:    introspection（getIntrospectionProvider）
 ```
 
-**user prompt 模板**：
+**user prompt 关键段**（节选；完整见 `src/services/character/lifePlannerService.js`）：
 ```
-你正在给这个角色写"用户不在的这段时间里发生了什么"的私人日记。给角色自己看，不发给用户。
-用"你"自指、用"ta"指代用户，不要写具体名字。
+你是这个角色。请规划"今天"你自己的一天 —— 不是给用户安排，是你作为这个角色会经历的具体时刻。
 
 {identityFragment}
-{stateFragment}
-{dynamicsFragment}
-【时间窗】
-开始：{lastInteractionAt}（{lastInteractionAt} 时间戳）
-现在：{now}（{now} 时间戳）
-跨度：{durationHours} 小时
+【角色档案】{characterBackground (≤600)}
+【今天】{planDate}（{dowLabel}，{工作日|周末}）
+【你的作息】{sleepHours 或 "至少留 6 小时连续睡眠空白"}
 
-【角色档案】
-{characterBackground (≤800)}
-
-【最近 6 条对话】
-{turnLines}
-
-【角色之前已经发生的事情，本次必须避开重复主题或动作】
-{memLines}
-
-【已知用户事实】
-{factLines}
+【最近和 ta 的对话采样】 {turnLines}
+【你之前最近的记忆片段】 {memLines}
+【ta 的事实（已知信息）】 {factLines}
+【你昨天的时间表（仅作参考，今天不要照抄）】 {yLines}
 
 【生成要求】
-1. 输出 {nEvents} 条事件，按 absTime 升序
-2. 每条 20-50 字，必须含**具体的人/事/物**：写"和老李在 7 楼吵了一架"，不写"和同事产生了分歧"
-3. 至少有 {anchorMin} 条事件要呼应"最近对话"或"用户事实"——比如用户提到学羽毛球，角色今天可以在路上想到这件事
-4. 时间分布合理：吃饭、通勤、休息、走神都可以，不要全是工作
-5. **禁止**出现以下空话："思考人生""享受时光""感受美好""内心平静""微笑了""陷入回忆""若有所思"
-6. **禁止**与"已经发生过的事情"列表中任何一条主题/动作重复：如果之前已经"喝咖啡"过，本次不能再写"喝咖啡"，要换具体动作
-7. 风格语气与角色背景一致
+1. 输出 {nMin}-{nMax} 条 beat（工作日 10-18 / 周末 8-18），按 absTime 升序
+2. 每条 = 具体时刻 + 你在做什么（15-40 字，必须有人/事/物/场景）
+3. beat_type：
+   - autonomous：你自己的独立时刻，占大多数 (>= 60%)
+   - anchored：你"想到了" ta —— 但触发点必须是对话或事实里实际出现过的细节
+                而不是凭空假设；必须填 reachSeed 写明引用了哪句话/事实
+4. importance 0-1：日常 0.2-0.4 / 普通 anchored 0.4-0.5 / 重要 anchored 0.6-0.85
+5. 时间分布合理：吃饭/通勤/工作/休息/走神都有；不要每个间隔均匀
+6. **禁止凭空假设 ta 的喜好**：除非【ta 的事实】里写了
+7. anchored 的 reachSeed 要写具体引用，例如"ta 上次提想试燕麦拿铁"
+```
 
-【random_seed】 {seed}
-
-严格输出 JSON（不要任何额外文本，不要 markdown 代码块包裹）：
+**输出 JSON schema**：
+```
 {
-  "events": [
+  "beats": [
     {
       "absTime": "HH:MM",
-      "memoryType": "life_event" | "work_event",
-      "summary": "<20-50 字的事件描述>",
-      "anchorRef": "<本条引用了哪条对话/fact 的关键词，没有就空字符串>",
-      "whyNow": "<snake_case_reason 用于审计，比如 user_mentioned_badminton_3d_ago>"
+      "activity": "<15-40 字>",
+      "beatType": "autonomous" | "anchored",
+      "reachSeed": "<anchored 时填具体引用；autonomous 空字符串>",
+      "importance": <0..1>
     }
   ]
 }
 ```
+
+**与 catchupService 的关键差异**：
+- 视角："今天我会怎么过" vs 旧的"用户不在期间发生了什么"
+- 时间戳：未来真实时刻 vs 旧的 backfill 进 [lastInteractionAt, now] 窗口
+- 用户呼应：软约束（"想到 ta" 是其中一种 beat 类型）vs 旧的强制 `anchorMin = floor(N/2)`
+- 触发：scheduler cron 主动 vs 旧的 client lazy POST
 
 ---
 
@@ -458,7 +462,7 @@ confidence vs importance（两个维度正交，分别评估）：
 | `src/services/proactivePlanService.js` | §1 §2 |
 | `src/services/character/behaviorPlanner.js` | §3（注入） |
 | `src/services/character/socialModes.js` | §4（注入） |
-| `src/services/catchupService.js` | §5 |
+| `src/services/character/lifePlannerService.js` | §5 |
 | `src/services/character/episodeBuilder.js` | §6 |
 | `src/services/character/reflectionService.js` | §7 |
 | `src/services/memoryDecisionService.js` | §8 |

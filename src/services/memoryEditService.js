@@ -357,7 +357,7 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
   db.transaction(() => {
     // 删 turn 前先快照：哪些 assistant 的 user-role turn 即将消失。
     // 用于事后递减 character_state.total_turns —— 防 message_delete / sync
-    // logical-dup replace 永久虚高 total_turns 进而导致 familiarity 飘高。
+    // logical-dup replace 永久虚高 total_turns。
     // 见 backfill 历史：4 个角色 over-count 5~31 都是这条路径累积出来的。
     let userTurnByAssistant = new Map();
     if (turnIds.length > 0) {
@@ -403,15 +403,13 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
         .run(...turnIds).changes;
     }
 
-    // 递减 character_state.total_turns / familiarity（公式与
-    // characterStateUpdater 写入路径一致：floor(total/3) capped 100）。
-    // 取 floor 0 防漂负。character_state 不存在的 assistant 跳过（不会有 user
-    // turn 计数，删完也无可减）。
+    // 递减 character_state.total_turns。取 floor 0 防漂负。character_state
+    // 不存在的 assistant 跳过（不会有 user turn 计数，删完也无可减）。
     if (userTurnByAssistant.size > 0) {
       const now = Date.now();
       const upd = db.prepare(
         `UPDATE character_state
-           SET total_turns = ?, familiarity = ?, updated_at = ?
+           SET total_turns = ?, updated_at = ?
            WHERE assistant_id = ?`
       );
       const sel = db.prepare(
@@ -421,8 +419,7 @@ function runDeleteTransaction({ turnIds = [], memoryIds = [] }) {
         const row = sel.get(assistantId);
         if (!row) continue;
         const newTotal = Math.max(0, (row.total_turns || 0) - n);
-        const newFam = Math.min(100, Math.floor(newTotal / 3));
-        upd.run(newTotal, newFam, now, assistantId);
+        upd.run(newTotal, now, assistantId);
       }
     }
   })();
@@ -504,7 +501,7 @@ function getCoreMemories(assistantId, { limit = 8 } = {}) {
  *
  * 同 fact_key 在不同 memory_item 上可能重复（例如多次提到偏好），按 key 去重保最高分。
  */
-function getCoreFacts(assistantId, { limit = 15, minScore = 0.55 } = {}) {
+function getCoreFacts(assistantId, { limit = 15, minScore = 0.55, characterName = null } = {}) {
   if (!assistantId) return [];
   const rows = db
     .prepare(
@@ -530,10 +527,12 @@ function getCoreFacts(assistantId, { limit = 15, minScore = 0.55 } = {}) {
     .sort((a, b) => b.composite_score - a.composite_score)
     .slice(0, limit);
 
+  // 占位符展开：fact_value 里的 `{角色}` → 当前 character_name。缺 name 时占位符保留字面值。
+  const { expandPlaceholder } = require("../utils/characterPlaceholder");
   return deduped.map((r) => ({
     id: r.id,
     factKey: r.fact_key,
-    factValue: r.fact_value,
+    factValue: expandPlaceholder(r.fact_value, characterName),
     confidence: r.confidence,
     importance: r.importance,
     score: Number(r.composite_score.toFixed(3)),

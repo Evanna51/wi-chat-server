@@ -57,6 +57,8 @@ const tables = [
   "memory_audit_log",
   "memory_retrieval_log",
   "character_behavior_journal",
+  "character_journal",
+  "character_life_beat",
   "proactive_plans",
   "conversation_turns",
   "outbox_events",

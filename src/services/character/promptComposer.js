@@ -134,7 +134,8 @@ function renderFactsSlot({ coreFacts, retrievedMemories, now = Date.now() }) {
  * 三类数据：reflection（最新 1 条 fresh） / episodes（top 3 unresolved） /
  * topics（top 5 active）。salient phrase 也放这里（不再单独段）。
  *
- * attention_window_1h 暂不实现，见 docs/api-redesign-plan.md 附录 B TODO-2。
+ * 注：1 小时滚动现场感由独立 slot <attention_1h> 承载
+ * （见 attentionWindow.js + _renderAttention1hV3），不混在 narrative 里。
  */
 // 数组字段截断 helper：取前 N 条，每条 clip 到 cap。
 function clipArray(arr, len, cap) {

@@ -148,26 +148,25 @@ function fetchReflectionsInWindow(assistantId, windowStart, windowEnd, limit = 4
 }
 
 // ── Prompt ───────────────────────────────────────────────────────────
+//
+// 2026-05-24：把单次"塞所有素材一次写完"拆成两步（reflect → narrate）：
+//   step 1 reflect：原始 turns/episodes/reflections → 结构化反思
+//                   { themes, notableMoments, emotionalArc, unresolvedThreads }
+//   step 2 narrate：结构化反思（+ 原始素材的少量引用）→ 第一人称叙事
+// 好处：
+//   1. 模型不用同时"找重点"和"写文字"，两步都更聚焦，叙事质量更稳
+//   2. 中间产物（themes/arc）调用方可见，便于排查"为什么这天的日记写歪了"
+//   3. 周记尤其受益 —— 一周素材塞进单 prompt 时模型会平均化处理，分两步后能
+//      明确把"本周主线"先抓出来再展开
 
 function _safeJson(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
 }
 
-function buildJournalPrompt({
-  periodType,
-  characterBackground,
-  turns,
-  episodes,
-  reflections,
-  periodStartLabel,
-  periodEndLabel,
-}) {
-  const periodLabel = periodType === "weekly" ? "这一周" : "昨天";
-  const targetWordCap = periodType === "weekly" ? "400-800" : "200-400";
-
+function _renderMaterialLines({ turns, episodes, reflections, periodType }) {
   const turnLines = turns
     .slice(-40) // 控量
-    .map((t) => `- [${formatLocalDate(t.created_at)}] ${t.role === "user" ? "ta" : "你"}：${clipText(t.content, 100)}`)
+    .map((t) => `- [${formatLocalDate(t.created_at)}] ${t.role === "user" ? "她" : "你"}：${clipText(t.content, 100)}`)
     .join("\n");
 
   const epLines = episodes
@@ -178,43 +177,126 @@ function buildJournalPrompt({
     })
     .join("\n");
 
-  const reflLines = reflections
+  const reflLines = (periodType === "weekly" ? reflections : [])
     .map((r) => {
       const needs = _safeJson(r.user_needs_json, []);
       const concerns = _safeJson(r.concerns_json, []);
       const bits = [];
       if (r.summary) bits.push(clipText(r.summary, 160));
-      if (needs.length) bits.push(`ta 好像需要 ${needs.slice(0, 3).join("、")}`);
+      if (needs.length) bits.push(`她 好像需要 ${needs.slice(0, 3).join("、")}`);
       if (concerns.length) bits.push(`你担心 ${concerns.slice(0, 2).join("、")}`);
       return `- ${bits.join("；")}`;
     })
     .join("\n");
 
+  return { turnLines, epLines, reflLines };
+}
+
+function buildReflectPrompt({
+  periodType,
+  characterBackground,
+  turnLines,
+  epLines,
+  reflLines,
+  periodStartLabel,
+  periodEndLabel,
+}) {
+  const periodLabel = periodType === "weekly" ? "这一周" : "昨天";
+
   return [
-    `你是这个角色。请用角色第一人称写一段${periodLabel}的日记。`,
-    `素材覆盖窗口：${periodStartLabel} ~ ${periodEndLabel}`,
+    `你是这个角色。先回顾${periodLabel}（${periodStartLabel} ~ ${periodEndLabel}），从下面素材里抽出几个关键面向。`,
+    `这一步只整理思路，不写日记正文。`,
     "",
     "角色档案：",
-    renderBackgroundForIntrospection(characterBackground, 600),
+    renderBackgroundForIntrospection(characterBackground, 400),
     "",
-    `${periodLabel}和 ta 的对话（按时间顺序，不全，只是采样）：`,
+    `${periodLabel}和 她 的对话（按时间顺序，不全，只是采样）：`,
     turnLines || "- 无",
     "",
     "这期间已经被聚合成「叙事段」的事件：",
     epLines || "- 无",
     "",
-    periodType === "weekly" ? "本周的反思（你已经想过的）：" : "（日记不吃 reflection）",
+    periodType === "weekly" ? "本周的反思（你已经想过的）：" : "",
     periodType === "weekly" ? (reflLines || "- 无") : "",
+    "",
+    "请从上面素材里抽：",
+    `- themes: ${periodType === "weekly" ? "本周 2-4 个主线（如『工作压力 / 想念 / 一次和好』）" : "昨天 1-3 个核心切面"}`,
+    "- notableMoments: 2-4 个值得写进日记的具体瞬间（每条 30 字内，写『发生了什么 + 你的反应』）",
+    "- emotionalArc: 一句话概括情绪走向（如『从烦躁到被 她 哄好』『一直很平静』）",
+    "- unresolvedThreads: 还没解决的悬念 / 想问没问的事（最多 3 条，没有就空数组）",
+    "",
+    "只用上面给到的素材，不要编造。素材几乎空就少抽几条 / 空数组也行。",
+    "",
+    "输出严格 JSON（不要 markdown 代码块）：",
+    '{"themes":["<主线1>","<主线2>"],"notableMoments":["<瞬间1>","<瞬间2>"],"emotionalArc":"<情绪走向>","unresolvedThreads":["<悬念1>"]}',
+  ].join("\n");
+}
+
+function normalizeReflection(raw = {}) {
+  const arr = (v, max) => {
+    if (!Array.isArray(v)) return [];
+    return v.filter((x) => typeof x === "string" && x.trim())
+            .map((x) => clipText(x, 120))
+            .slice(0, max);
+  };
+  return {
+    themes: arr(raw.themes, 6),
+    notableMoments: arr(raw.notableMoments, 6),
+    emotionalArc: clipText(String(raw.emotionalArc || ""), 80),
+    unresolvedThreads: arr(raw.unresolvedThreads, 5),
+  };
+}
+
+function _renderReflectionBlock(refl) {
+  const lines = ["**你刚才回顾时整理出的要点（必须围绕这些写）**："];
+  if (refl.themes?.length) lines.push(`- 主线：${refl.themes.join(" / ")}`);
+  if (refl.emotionalArc) lines.push(`- 情绪走向：${refl.emotionalArc}`);
+  if (refl.notableMoments?.length) {
+    lines.push("- 值得写的瞬间：");
+    refl.notableMoments.forEach((m) => lines.push(`  · ${m}`));
+  }
+  if (refl.unresolvedThreads?.length) {
+    lines.push(`- 未解的悬念：${refl.unresolvedThreads.join(" / ")}`);
+  }
+  return lines.join("\n");
+}
+
+function buildNarratePrompt({
+  periodType,
+  characterBackground,
+  reflection,
+  turnLines,
+  epLines,
+  periodStartLabel,
+  periodEndLabel,
+}) {
+  const periodLabel = periodType === "weekly" ? "这一周" : "昨天";
+  const targetWordCap = periodType === "weekly" ? "400-800" : "200-400";
+
+  return [
+    `你是这个角色。基于你刚才整理的要点，写一段${periodLabel}的日记。`,
+    `素材覆盖窗口：${periodStartLabel} ~ ${periodEndLabel}`,
+    "",
+    _renderReflectionBlock(reflection),
+    "",
+    "角色档案：",
+    renderBackgroundForIntrospection(characterBackground, 400),
+    "",
+    `${periodLabel}对话采样（参考用，不要直接抄）：`,
+    turnLines || "- 无",
+    "",
+    "这期间的叙事段：",
+    epLines || "- 无",
     "",
     "写作要求：",
     `- 用第一人称（你/我，角色自己的口吻），不要写"角色今天..."`,
     `- 字数 ${targetWordCap} 字，写成一段连贯叙事，不要小标题 / 列表 / 分点`,
-    "- 只用上面给到的素材，不要编造没发生过的事",
-    "- 可以带角色的情绪和判断，但不要变成「对 ta 的评价报告」",
-    "- 没有可写的（素材几乎空）就给一句两句也行，不要硬凑",
+    "- 围绕上面的【主线 + 情绪走向 + 瞬间】展开，不要扩散到没列出的内容",
+    "- 可以带角色的情绪和判断，但不要变成「对 她 的评价报告」",
+    "- 没有可写的（要点几乎空）就给一句两句也行，不要硬凑",
     periodType === "weekly"
-      ? "- 周记可以串起几个 episode，提一下未解的悬念，给本周一个收束感"
-      : "- 日记侧重当天的一两个具体片段，不必面面俱到",
+      ? "- 周记串起几个主线，提一下未解的悬念，给本周一个收束感"
+      : "- 日记侧重 1-2 个具体瞬间，不必面面俱到",
     "",
     "输出严格 JSON（不要 markdown 代码块）：",
     '{"content":"<日记正文>"}',
@@ -223,23 +305,45 @@ function buildJournalPrompt({
 
 // ── LLM 调用 ─────────────────────────────────────────────────────────
 
-async function callLlmForJournal(prompt, { assistantId, periodType } = {}) {
+async function callLlmForReflection(prompt, { assistantId, periodType } = {}) {
   const provider = getIntrospectionProvider();
   const { content } = await provider.complete({
     messages: [
       {
         role: "system",
-        content: "你是角色日记/周记书写助手。以角色第一人称视角，输出严格 JSON，不要 markdown 代码块。",
+        content: "你是角色日记反思助手。从素材里抽 themes / moments / arc / threads，输出严格 JSON，不要 markdown 代码块。",
       },
       { role: "user", content: prompt },
     ],
-    temperature: 0.7,
+    temperature: 0.5,                 // 抽取阶段降低温度
+    maxTokens: periodType === "weekly" ? 700 : 500,
+    responseFormat: "json",
+    callOpts: {
+      kind: "journal_reflect",
+      scopeKey: assistantId || null,
+      summary: `journal-reflect-${periodType} for ${assistantId || "unknown"}`,
+    },
+  });
+  return parseStrictJsonObject(content);
+}
+
+async function callLlmForNarrate(prompt, { assistantId, periodType } = {}) {
+  const provider = getIntrospectionProvider();
+  const { content } = await provider.complete({
+    messages: [
+      {
+        role: "system",
+        content: "你是角色日记书写助手。围绕给定的要点用第一人称写连贯叙事，输出严格 JSON，不要 markdown 代码块。",
+      },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.75,                // 写作阶段稍高温度保留语气
     maxTokens: periodType === "weekly" ? 1400 : 900,
     responseFormat: "json",
     callOpts: {
-      kind: "journal",
+      kind: "journal_narrate",
       scopeKey: assistantId || null,
-      summary: `journal-${periodType} for ${assistantId || "unknown"}`,
+      summary: `journal-narrate-${periodType} for ${assistantId || "unknown"}`,
     },
   });
   return parseStrictJsonObject(content);
@@ -385,21 +489,52 @@ async function generateJournalFor({
     return { ok: false, skipped: "no_material", periodStart, periodEnd };
   }
 
-  const prompt = buildJournalPrompt({
-    periodType,
-    characterBackground: profile.character_background || "",
-    turns,
-    episodes,
-    reflections,
-    periodStartLabel: formatLocalDate(periodStart),
-    periodEndLabel: formatLocalDate(periodEnd),
+  const { turnLines, epLines, reflLines } = _renderMaterialLines({
+    turns, episodes, reflections, periodType,
   });
+  const characterBackground = profile.character_background || "";
+  const periodStartLabel = formatLocalDate(periodStart);
+  const periodEndLabel = formatLocalDate(periodEnd);
 
+  // ── step 1: reflect —— 从素材里抽主线 / 情绪走向 / 瞬间 / 悬念 ──
+  const reflectPrompt = buildReflectPrompt({
+    periodType,
+    characterBackground,
+    turnLines,
+    epLines,
+    reflLines,
+    periodStartLabel,
+    periodEndLabel,
+  });
+  let reflection;
+  try {
+    const rawRefl = await callLlmForReflection(reflectPrompt, { assistantId, periodType });
+    reflection = normalizeReflection(rawRefl);
+  } catch (e) {
+    return { ok: false, skipped: "llm_unreachable", error: e.message, stage: "reflect" };
+  }
+
+  const hasReflectionContent =
+    reflection.themes.length || reflection.notableMoments.length || reflection.emotionalArc;
+  if (!hasReflectionContent) {
+    return { ok: false, skipped: "reflection_empty", periodStart, periodEnd };
+  }
+
+  // ── step 2: narrate —— 围绕反思要点写第一人称叙事 ──
+  const narratePrompt = buildNarratePrompt({
+    periodType,
+    characterBackground,
+    reflection,
+    turnLines,
+    epLines,
+    periodStartLabel,
+    periodEndLabel,
+  });
   let raw;
   try {
-    raw = await callLlmForJournal(prompt, { assistantId, periodType });
+    raw = await callLlmForNarrate(narratePrompt, { assistantId, periodType });
   } catch (e) {
-    return { ok: false, skipped: "llm_unreachable", error: e.message };
+    return { ok: false, skipped: "llm_unreachable", error: e.message, stage: "narrate" };
   }
 
   const content = clipText(raw?.content || "", periodType === "weekly" ? 3000 : 1500);
@@ -417,7 +552,16 @@ async function generateJournalFor({
     now,
   });
 
-  return { ok: true, entryId: id, periodStart, periodEnd, entryDate, contentLen: content.length };
+  return {
+    ok: true,
+    entryId: id,
+    periodStart,
+    periodEnd,
+    entryDate,
+    contentLen: content.length,
+    // reflection 留给调用方查看（admin / 调试）。落盘只存 content，reflection 是过程产物。
+    reflection,
+  };
 }
 
 // ── cron ticks ───────────────────────────────────────────────────────

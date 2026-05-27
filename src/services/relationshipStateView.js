@@ -45,7 +45,6 @@ function buildRelationshipStatePayload(assistantId, opts = {}) {
       level,
       levelName: RELATIONSHIP_NAMES[String(level)] || "朋友",
       intimacyScore: round3(state.intimacy_score ?? 0),
-      familiarity: state.familiarity || 0,
       totalTurns: state.total_turns || 0,
     },
     energy: {

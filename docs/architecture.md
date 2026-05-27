@@ -196,7 +196,7 @@ npm run eval:retrieval -- --write-baseline
 [ LLM 审计 ]          provider_call_log                        — 所有 LLM 调用的入参/出参（14d TTL）
 ```
 
-> 不在表里：T-08 计划把 `assistant_turn` 类 memory_items 全部移除（仅保留在 `conversation_turns`）；T-03 计划删除 `character_state.familiarity` 列。当前文档反映"今天的"事实状态。
+> 不在表里：T-08 计划把 `assistant_turn` 类 memory_items 全部移除（仅保留在 `conversation_turns`）。`character_state.familiarity` 已在 migration 036（T-03）删除。当前文档反映"今天的"事实状态。
 
 ### 4.2 关键 ER 关系
 
@@ -766,15 +766,12 @@ character_state 行（每个 assistant 一行）
 │   ├─ arousal       [0, 1]    激活度（平静 → 兴奋）
 │   └─ intensity     [0, 1]    强度
 ├─ relationship
-│   ├─ intimacyScore [0, 200]  累积亲密分（连续）
+│   ├─ intimacyScore [0, 200]  累积亲密分（连续，cognition router state_delta 推动）
 │   ├─ level         {-2..9}   12 档（冷战 → 灵魂伴侣，由 score 映射）
-│   ├─ familiarity   floor(total_turns/3) capped 100  ⚠️ 已折旧（T-03 + CR-02 后删除）
-│   └─ totalTurns
+│   └─ totalTurns              用户消息总轮次（仅展示用，不参与决策）
 ├─ energy            [0.1, 1]  精力，沉默期会衰减
 └─ focus             话题焦点 + 已深入轮次
 ```
-
-> ⚠️ **familiarity 折旧**：客户端应只读 `relationship.level`（12 档整数），不读 `familiarity`。等客户端发版后，T-03 会通过 migration rebuild 删掉这一列。详见 [client-release-required.md CR-02](./client-release-required.md#cr-02-不再读-familiarity-字段对应服务端-t-03)。
 
 ### 10.2 衰减 vs 写入
 
@@ -802,10 +799,8 @@ energy        → 0.7，半衰期 8h（仅在 >60s idle 后开始恢复）
 - last_proactive_at 距今 < 2h → block (interval guard)
 - last_user_message_at 距今 < 30min → block (recent-activity guard)
 - 当前在 quietHours 内 → block
-- 否则 allow，buildProactivePrompt 拼上 familiarity 档位 + timeBucket
+- 否则 allow，buildProactivePrompt 拼上 relationship.level 档位 + timeBucket
 ```
-
-> familiarity 档位是当前实现，T-03 后会改为 `relationship.level` 直接映射档位。
 
 ### 10.4 客户端拉取
 
@@ -829,7 +824,6 @@ curl -H 'x-api-key: dev-local-key' \
       "intimacyScore": 47,
       "level": 2,
       "levelLabel": "熟人",
-      "familiarity": 30,
       "totalTurns": 92
     },
     "energy": 0.68,

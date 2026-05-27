@@ -44,11 +44,17 @@ const config = {
   // introspection-side LLM：memory_classify / persona_extract / episode_build / reflect。
   // 默认继承 SERVER_LLM_PROVIDER（通常是本地小模型），可单独覆盖。
   introspectionLlmProvider: (process.env.INTROSPECTION_LLM_PROVIDER || process.env.SERVER_LLM_PROVIDER || "qwen").toLowerCase(),
-  // Web search（proactive skip-fallback 找热点）。tavily 是当前唯一 provider。
-  // 不配 TAVILY_API_KEY 时 webSearchService 会优雅降级（返回 api_key_missing），
-  // 整个 proactive 链路接受原 skip，不影响主流程。
+  // Web search 配额 & provider。
+  //
+  // 两个路径共享配额：
+  //   1. proactive web-topic fallback（LLM 决定 skip 时找热点兜底）
+  //   2. chat-side tool /api/tool/web-search（cognition router 暴露给 chat LLM）
+  //
+  // 默认 10 / 角色 / 自然日：Tavily free tier 1000/月 ≈ 33/天，10/天给单角色已很宽松；
+  // 多角色仍在 free 范围内（3 角色 × 10/天 × 30 天 = 900）。
+  // 不配 TAVILY_API_KEY 时 webSearchService 优雅降级（返回 api_key_missing），不影响主流程。
   webSearchProvider: (process.env.WEB_SEARCH_PROVIDER || "tavily").toLowerCase(),
-  webSearchDailyCap: Number(process.env.WEB_SEARCH_DAILY_CAP || 3),
+  webSearchDailyCap: Number(process.env.WEB_SEARCH_DAILY_CAP || 10),
   tavilyApiKey: process.env.TAVILY_API_KEY || "",
   memoryRetrievalEnabled: (process.env.MEMORY_RETRIEVAL_ENABLED || "1") === "1",
   retrievalTopK: Number(process.env.RETRIEVAL_TOP_K || 8),
@@ -121,6 +127,16 @@ const config = {
   // 角色日记 / 周记（journalService）
   dailyJournalCron: process.env.DAILY_JOURNAL_CRON || "30 10 * * *",            // 每天 10:30 写昨天
   weeklyJournalCron: process.env.WEEKLY_JOURNAL_CRON || "30 0 * * 1",           // 周一 00:30 写上周
+  // 角色独立时间线（lifePlanner / lifeBeatTick） — 取代 catchupService
+  dailyLifePlanCron: process.env.DAILY_LIFE_PLAN_CRON || "0 4 * * *",            // 每天 04:00 给每个 active 角色生今日时间表
+  lifeBeatTickCron: process.env.LIFE_BEAT_TICK_CRON || "*/15 * * * *",           // 每 15min 扫到点的 pending beat
+  // beat tick proactive 触发约束
+  lifeBeatChatActiveWindowMs: Number(
+    process.env.LIFE_BEAT_CHAT_ACTIVE_WINDOW_MS || 10 * 60 * 1000
+  ),                                                                              // 10min 内有 turn → 视为聊天活跃，不触发 proactive
+  lifeBeatAnchored24hSoftCap: Number(
+    process.env.LIFE_BEAT_ANCHORED_24H_SOFT_CAP || 4
+  ),                                                                              // 24h anchored beat 触发软上限
 };
 
 /**

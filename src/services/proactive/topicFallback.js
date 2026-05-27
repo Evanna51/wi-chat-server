@@ -19,6 +19,7 @@ const {
   getRecentTurnsAcrossSessions,
   getConfidentFactsForAssistant,
   insertBehaviorJournalEntry,
+  db,
 } = require("../../db");
 const { getProvider } = require("../../llm");
 const {
@@ -37,7 +38,7 @@ const {
 
 // ── 兴趣抽取 ─────────────────────────────────────────────────────────
 
-function _collectUserInterests(assistantId) {
+function _collectUserInterests(assistantId, characterName = null) {
   const topics = listActiveTopics(assistantId, { limit: 6 })
     .map((t) => t.topic)
     .filter(Boolean);
@@ -47,6 +48,7 @@ function _collectUserInterests(assistantId) {
     assistantId,
     minConfidence: 0.5,
     limit: 20,
+    characterName,
   })
     .sort((a, b) => (b.importance || 0) - (a.importance || 0))
     .slice(0, 8)
@@ -135,7 +137,7 @@ function _buildMessagePrompt({ characterBackground, characterName, snippets, int
     snippetLines || "- 无",
     "",
     "**写作要求**：",
-    "- 用角色第一人称，自然口语，像是闲聊里 ta 看到一条新闻想分享给对方",
+    "- 用角色第一人称，自然口语，像是闲聊里 她 看到一条新闻想分享给对方",
     "- **挑一条最贴用户兴趣**的 snippet 来切入，没贴的就挑最有意思的",
     "- 不要复述新闻全文，说『看到 / 听说 / 注意到 X，X 怎么样吧 / 你怎么看 / 想起你之前说过 Y』这种钩子",
     "- 不要给 url 不要标 [1]，自然提就行",
@@ -184,7 +186,7 @@ async function _writeMessageFromSnippets({
 async function tryWebTopicFallback({ assistantId, profile, now = Date.now() } = {}) {
   if (!assistantId || !profile) return { ok: false, reason: "missing_args" };
 
-  const interests = _collectUserInterests(assistantId);
+  const interests = _collectUserInterests(assistantId, profile.character_name);
 
   // 1) LLM 决定搜索词
   let queriesPlan;
@@ -259,6 +261,24 @@ async function tryWebTopicFallback({ assistantId, profile, now = Date.now() } = 
   // 取选中的 snippet url 做引用（即使 LLM 没填也好定位）
   const idx = Number(writeResult.sourceSnippetIndex) || 1;
   const chosen = allSnippets[Math.max(0, Math.min(allSnippets.length - 1, idx - 1))] || allSnippets[0];
+
+  // URL dedup：同一篇文章 7 天内已发过 / 已计划 → skip，避免同文章反复推送
+  if (chosen?.url) {
+    try {
+      const recentWithUrl = db
+        .prepare(
+          `SELECT id FROM proactive_plans
+           WHERE assistant_id = ? AND rationale LIKE ? AND created_at >= ?
+           LIMIT 1`
+        )
+        .get(assistantId, `%${chosen.url}%`, now - 7 * 24 * 60 * 60 * 1000);
+      if (recentWithUrl) {
+        return { ok: false, reason: "url_used_recently", url: chosen.url };
+      }
+    } catch (e) {
+      // dedup 查询失败不阻塞主流程
+    }
+  }
 
   const intentRaw = String(writeResult.intent || "")
     .trim().toLowerCase().replace(/[\s-]+/g, "_");

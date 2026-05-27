@@ -41,6 +41,8 @@ function profileToDto(row, extras = {}) {
     assistantId: row.assistant_id,
     characterName: row.character_name,
     characterBackground: row.character_background || "",
+    lore: row.lore || "",
+    extractionStatus: row.extraction_status || "pending",
     allowAutoLife: row.allow_auto_life === 1,
     allowProactiveMessage: row.allow_proactive_message === 1,
     assistantType: row.assistant_type || "",
@@ -55,7 +57,7 @@ function profileToDto(row, extras = {}) {
 function getStateRow(assistantId) {
   return db
     .prepare(
-      `SELECT assistant_id, active_session_id, familiarity, total_turns,
+      `SELECT assistant_id, active_session_id, total_turns,
               last_user_message_at, last_proactive_at, created_at, updated_at
        FROM character_state WHERE assistant_id = ?`
     )
@@ -85,14 +87,12 @@ function buildAssistantDto(profileRow) {
   return profileToDto(profileRow, {
     state: stateRow
       ? {
-          familiarity: stateRow.familiarity || 0,
           totalTurns: stateRow.total_turns || 0,
           activeSessionId: stateRow.active_session_id || null,
           lastUserMessageAt: stateRow.last_user_message_at || null,
           lastProactiveAt: stateRow.last_proactive_at || null,
         }
       : {
-          familiarity: 0,
           totalTurns: 0,
           activeSessionId: null,
           lastUserMessageAt: null,
@@ -363,10 +363,14 @@ router.get("/facts", (req, res) => {
        LIMIT ?`
     )
     .all(assistantId, limit);
+  // 占位符 `{角色}` → 当前 character_name；缺 profile 时占位符保留字面值，admin 一眼能看到这是未展开数据
+  const profile = require("../db").getAssistantProfile(assistantId);
+  const { expandPlaceholder } = require("../utils/characterPlaceholder");
+  const characterName = profile?.character_name || null;
   const items = rows.map((r) => ({
     id: r.id,
     factKey: r.fact_key,
-    factValue: r.fact_value,
+    factValue: expandPlaceholder(r.fact_value, characterName),
     confidence: r.confidence,
     importance: r.importance,
     memoryItemId: r.memory_item_id,

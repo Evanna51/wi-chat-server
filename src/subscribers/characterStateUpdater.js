@@ -1,5 +1,5 @@
 /**
- * 监听 'turn.user.batch'：更新 character_state（mood / totalTurns / familiarity）。
+ * 监听 'turn.user.batch'：更新 character_state（mood / totalTurns）。
  *
  * 之前散落在 routes/sync.js applyStateUpdatesForProfileAssistants 里。
  *
@@ -26,10 +26,8 @@ function register(turnEvents) {
         .get(assistantId);
       const newTotal = (current?.total_turns || 0) + stats.userTurnCount;
 
-      // T-03 计划删除 familiarity；保留写入直到客户端发版完成 CR-02
       upsertCharacterState(assistantId, {
         total_turns: newTotal,
-        familiarity: Math.min(100, Math.floor(newTotal / 3)),
         last_user_message_at: stats.lastUserAt,
       });
 

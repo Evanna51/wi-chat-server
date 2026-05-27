@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 /**
- * backfill-character-state-counts — 修正历史 character_state.total_turns / familiarity
+ * backfill-character-state-counts — 修正历史 character_state.total_turns
  *
- * 问题：T-09 之前 sync 路径不走事件总线，character_state.total_turns 没有累加，
- *       familiarity（= floor(total_turns/3) capped 100）也跟着低估。
- *       本脚本以 conversation_turns 里 role='user' 的实际数量为权威值，重置二者。
+ * 问题：T-09 之前 sync 路径不走事件总线，character_state.total_turns 没有累加。
+ *       本脚本以 conversation_turns 里 role='user' 的实际数量为权威值，重置 total。
  *
  * 用法：
  *   node scripts/backfill-character-state-counts.js --dry-run
@@ -54,36 +53,35 @@ function main() {
 
     ensureDefaultState(r.assistant_id);
     const cur = db
-      .prepare("SELECT total_turns, familiarity, last_user_message_at FROM character_state WHERE assistant_id = ?")
+      .prepare("SELECT total_turns, last_user_message_at FROM character_state WHERE assistant_id = ?")
       .get(r.assistant_id);
 
     const newTotal = r.user_turn_count;
-    const newFam = Math.min(100, Math.floor(newTotal / 3));
     // 只有当 conversation_turns 的 max(user_at) 比 character_state 里的新（或后者为空）才推进
     const newLastUserAt = !cur?.last_user_message_at || r.last_user_at > cur.last_user_message_at
       ? r.last_user_at
       : cur.last_user_message_at;
 
     const needUpdate =
-      cur.total_turns !== newTotal || cur.familiarity !== newFam || cur.last_user_message_at !== newLastUserAt;
+      cur.total_turns !== newTotal || cur.last_user_message_at !== newLastUserAt;
 
     if (!needUpdate) {
-      console.log(`  ✓ ${profile.character_name} (${r.assistant_id.slice(0, 8)}) — already correct: total=${newTotal} fam=${newFam}`);
+      console.log(`  ✓ ${profile.character_name} (${r.assistant_id.slice(0, 8)}) — already correct: total=${newTotal}`);
       continue;
     }
 
     console.log(
       `  ${dryRun ? "·" : "✎"} ${profile.character_name} (${r.assistant_id.slice(0, 8)}) — ` +
-      `total ${cur.total_turns} → ${newTotal}; familiarity ${cur.familiarity} → ${newFam}`
+      `total ${cur.total_turns} → ${newTotal}`
     );
     willUpdate++;
 
     if (apply) {
       db.prepare(
         `UPDATE character_state
-         SET total_turns = ?, familiarity = ?, last_user_message_at = ?, updated_at = ?
+         SET total_turns = ?, last_user_message_at = ?, updated_at = ?
          WHERE assistant_id = ?`
-      ).run(newTotal, newFam, newLastUserAt, Date.now(), r.assistant_id);
+      ).run(newTotal, newLastUserAt, Date.now(), r.assistant_id);
     }
   }
 

@@ -50,8 +50,6 @@ function upsertCharacterState(assistantId, patch = {}) {
       patch.active_session_id !== undefined
         ? patch.active_session_id
         : row?.active_session_id || "",
-    familiarity:
-      patch.familiarity !== undefined ? patch.familiarity : row?.familiarity || 0,
     total_turns:
       patch.total_turns !== undefined ? patch.total_turns : row?.total_turns || 0,
     last_user_message_at:
@@ -67,12 +65,11 @@ function upsertCharacterState(assistantId, patch = {}) {
   };
   db.prepare(
     `INSERT INTO character_state
-      (assistant_id, active_session_id, familiarity, total_turns, last_user_message_at, last_proactive_at, created_at, updated_at)
+      (assistant_id, active_session_id, total_turns, last_user_message_at, last_proactive_at, created_at, updated_at)
      VALUES
-      (@assistant_id, @active_session_id, @familiarity, @total_turns, @last_user_message_at, @last_proactive_at, @created_at, @updated_at)
+      (@assistant_id, @active_session_id, @total_turns, @last_user_message_at, @last_proactive_at, @created_at, @updated_at)
      ON CONFLICT(assistant_id) DO UPDATE SET
       active_session_id=excluded.active_session_id,
-      familiarity=excluded.familiarity,
       total_turns=excluded.total_turns,
       last_user_message_at=excluded.last_user_message_at,
       last_proactive_at=excluded.last_proactive_at,
@@ -184,6 +181,9 @@ const ALLOWED_MEMORY_TYPES = new Set([
   "life_event",
   "work_event",
   "knowledge",
+  // 角色独立时间线产物（lifeBeatTickService 写入），retrieval 默认不召回，
+  // 仅 source='character' 显式问"角色独立想了什么"时才进结果池。
+  "life_event_autonomous",
 ]);
 
 function insertMemoryItem({
@@ -346,8 +346,8 @@ function getRecentTurnsAcrossSessions({ assistantId, limit = 8 }) {
     .all(assistantId, limit);
 }
 
-function getConfidentFactsForAssistant({ assistantId, minConfidence = 0.5, limit = 30 }) {
-  return db
+function getConfidentFactsForAssistant({ assistantId, minConfidence = 0.5, limit = 30, characterName = null }) {
+  const rows = db
     .prepare(
       `SELECT id, fact_key, fact_value, confidence, importance, memory_item_id, session_id, created_at
        FROM memory_facts
@@ -356,6 +356,11 @@ function getConfidentFactsForAssistant({ assistantId, minConfidence = 0.5, limit
        LIMIT ?`
     )
     .all(assistantId, minConfidence, limit);
+  // 占位符展开：fact_value 里的 `{角色}` → 当前 character_name。
+  // 调用方传 characterName（通常来自 getAssistantProfile(assistantId).character_name）。
+  if (!characterName) return rows;
+  const { expandPlaceholder } = require("./utils/characterPlaceholder");
+  return rows.map((r) => ({ ...r, fact_value: expandPlaceholder(r.fact_value, characterName) }));
 }
 
 function getRecentMemoryItems({ assistantId, memoryTypes = [], limit = 6 }) {
@@ -648,6 +653,146 @@ function searchMemory({ assistantId, q, limit = 20 }) {
     .all(escapeFtsQuery(normalized), assistantId, limit);
 }
 
+// ── character_life_beat CRUD（migration 035）─────────────────────────
+//
+// 时间线模型：daily-life-plan cron 生成 pending beats，life-beat-tick cron
+// 扫到点 → 调 markBeatActivated/markBeatSkipped 落库 + 视情况触发 proactive。
+// 设计：docs/character-life-beat-plan.md
+
+function insertLifeBeat({
+  assistantId,
+  planDate,
+  scheduledAt,
+  activity,
+  beatType,
+  reachSeed = null,
+  importance = 0.5,
+  createdAt = null,
+}) {
+  if (!assistantId || !planDate || !scheduledAt || !activity || !beatType) {
+    throw new Error("insertLifeBeat: missing required field");
+  }
+  if (beatType !== "autonomous" && beatType !== "anchored") {
+    throw new Error(`insertLifeBeat: invalid beat_type='${beatType}'`);
+  }
+  const ts = createdAt != null ? createdAt : Date.now();
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO character_life_beat
+        (assistant_id, plan_date, scheduled_at, activity, beat_type, reach_seed, importance, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    )
+    .run(assistantId, planDate, scheduledAt, activity, beatType, reachSeed, importance, ts);
+  return info.lastInsertRowid || null;
+}
+
+function listPendingLifeBeats({ now = Date.now(), limit = 50 } = {}) {
+  // tick 主查询：取所有到点的 pending beat（跨 assistant，让单次 tick 一把扫完）
+  return db
+    .prepare(
+      `SELECT id, assistant_id, plan_date, scheduled_at, activity, beat_type, reach_seed, importance, status, created_at
+         FROM character_life_beat
+        WHERE status = 'pending' AND scheduled_at <= ?
+        ORDER BY scheduled_at ASC
+        LIMIT ?`
+    )
+    .all(now, limit);
+}
+
+function listLifeBeatsForDate({ assistantId, planDate }) {
+  return db
+    .prepare(
+      `SELECT id, assistant_id, plan_date, scheduled_at, activity, beat_type, reach_seed, importance, status,
+              activated_at, memory_item_id, created_at
+         FROM character_life_beat
+        WHERE assistant_id = ? AND plan_date = ?
+        ORDER BY scheduled_at ASC`
+    )
+    .all(assistantId, planDate);
+}
+
+function getLatestActivatedLifeBeat({ assistantId, withinMs = null, now = Date.now() }) {
+  // context builder 拼"刚才/此刻在做 X"：取最近 1 条 activated beat，withinMs 控制时效
+  if (withinMs && withinMs > 0) {
+    return db
+      .prepare(
+        `SELECT id, assistant_id, plan_date, scheduled_at, activity, beat_type, reach_seed, importance,
+                activated_at, memory_item_id
+           FROM character_life_beat
+          WHERE assistant_id = ? AND status = 'activated' AND activated_at >= ?
+          ORDER BY activated_at DESC
+          LIMIT 1`
+      )
+      .get(assistantId, now - withinMs);
+  }
+  return db
+    .prepare(
+      `SELECT id, assistant_id, plan_date, scheduled_at, activity, beat_type, reach_seed, importance,
+              activated_at, memory_item_id
+         FROM character_life_beat
+        WHERE assistant_id = ? AND status = 'activated'
+        ORDER BY activated_at DESC
+        LIMIT 1`
+    )
+    .get(assistantId);
+}
+
+function countActivatedAnchoredBeatsSince({ assistantId, sinceMs }) {
+  // 24h 软 cap 用：beat tick 决定是否触发 proactive 时，先看过去 24h 已触发过几次
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM character_life_beat
+        WHERE assistant_id = ? AND beat_type = 'anchored' AND status = 'activated'
+          AND activated_at >= ?`
+    )
+    .get(assistantId, sinceMs);
+  return row?.n || 0;
+}
+
+function markBeatActivated({ beatId, memoryItemId, activatedAt = Date.now() }) {
+  db.prepare(
+    `UPDATE character_life_beat
+        SET status = 'activated', memory_item_id = ?, activated_at = ?
+      WHERE id = ? AND status = 'pending'`
+  ).run(memoryItemId || null, activatedAt, beatId);
+}
+
+function markBeatSkipped({ beatId, activatedAt = Date.now() }) {
+  // 落 activated_at 一起更新，便于诊断"什么时候决定 skip 的"
+  db.prepare(
+    `UPDATE character_life_beat
+        SET status = 'skipped', activated_at = ?
+      WHERE id = ? AND status = 'pending'`
+  ).run(activatedAt, beatId);
+}
+
+function expireStaleLifeBeats({ beforePlanDate }) {
+  // daily-life-plan tick 跑之前调一次：把昨日及更早的 pending 全转 expired
+  const info = db
+    .prepare(
+      `UPDATE character_life_beat
+          SET status = 'expired'
+        WHERE status = 'pending' AND plan_date < ?`
+    )
+    .run(beforePlanDate);
+  return info.changes || 0;
+}
+
+function deleteLifeBeatsForDate({ assistantId, planDate }) {
+  // debug / 手动重跑当日 plan 用 —— 删干净再让 planner 重新生成
+  const info = db
+    .prepare(`DELETE FROM character_life_beat WHERE assistant_id = ? AND plan_date = ?`)
+    .run(assistantId, planDate);
+  return info.changes || 0;
+}
+
+function hasLifePlanForDate({ assistantId, planDate }) {
+  const row = db
+    .prepare(`SELECT 1 FROM character_life_beat WHERE assistant_id = ? AND plan_date = ? LIMIT 1`)
+    .get(assistantId, planDate);
+  return !!row;
+}
+
 module.exports = {
   db,
   ALLOWED_MEMORY_TYPES,
@@ -679,4 +824,15 @@ module.exports = {
   findConversationTurnByLogicalKey,
   findMemoryItemBySourceTurnId,
   updateConversationTurnContent,
+  // character_life_beat (migration 035)
+  insertLifeBeat,
+  listPendingLifeBeats,
+  listLifeBeatsForDate,
+  getLatestActivatedLifeBeat,
+  countActivatedAnchoredBeatsSince,
+  markBeatActivated,
+  markBeatSkipped,
+  expireStaleLifeBeats,
+  deleteLifeBeatsForDate,
+  hasLifePlanForDate,
 };

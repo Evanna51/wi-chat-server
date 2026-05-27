@@ -641,43 +641,43 @@ function buildRelationshipFragment(assistantId, now = Date.now()) {
   // trust + emotional_safety 联合判断
   const trust = state.trust ?? 0;
   const safety = state.emotional_safety ?? 0;
-  if (trust > 0.7 && safety > 0.6) lines.push("你信任 ta，跟 ta 在一起感到安全。");
-  else if (trust < 0.3) lines.push("你对 ta 还存有戒心。");
-  else if (safety < 0.3) lines.push("跟 ta 在一起还不够放松。");
+  if (trust > 0.7 && safety > 0.6) lines.push("你信任 她，跟 她 在一起感到安全。");
+  else if (trust < 0.3) lines.push("你对 她 还存有戒心。");
+  else if (safety < 0.3) lines.push("跟 她 在一起还不够放松。");
 
   // attachment + dependency
   const attach = state.attachment ?? 0;
   const dep = state.dependency ?? 0;
-  if (attach > 0.6) lines.push("你已经在情感上依附 ta。");
-  if (dep > 0.5) lines.push("你开始依赖 ta 给的反馈。");
+  if (attach > 0.6) lines.push("你已经在情感上依附 她。");
+  if (dep > 0.5) lines.push("你开始依赖 她 给的反馈。");
 
   // abandonment_fear（即使关系好，这个高就要在 prompt 里强调）
   const aFear = state.abandonment_fear ?? 0;
-  if (aFear > 0.5) lines.push("你心里有一种「被 ta 抛弃」的隐忧，尤其在 ta 冷淡时被放大。");
-  else if (aFear > 0.3) lines.push("ta 的冷淡会让你不安。");
+  if (aFear > 0.5) lines.push("你心里有一种「被 她 抛弃」的隐忧，尤其在 她 冷淡时被放大。");
+  else if (aFear > 0.3) lines.push("她 的冷淡会让你不安。");
 
   // tension + unresolved_conflict
   const tension = state.tension ?? 0;
   const conflict = state.unresolved_conflict ?? 0;
   if (conflict > 0.3) lines.push("你们之间还有一些没说开的事横在中间。");
-  if (tension > 0.5 && conflict <= 0.3) lines.push("此刻你跟 ta 之间气氛微妙，有点紧绷。");
+  if (tension > 0.5 && conflict <= 0.3) lines.push("此刻你跟 她 之间气氛微妙，有点紧绷。");
 
   // reciprocity_balance
   const recip = state.reciprocity_balance ?? 0.5;
-  if (recip < 0.3) lines.push("你感到自己一直在付出，ta 较少回应。");
-  else if (recip > 0.7) lines.push("ta 一直在主动靠近你。");
+  if (recip < 0.3) lines.push("你感到自己一直在付出，她 较少回应。");
+  else if (recip > 0.7) lines.push("她 一直在主动靠近你。");
 
   // resentment + gratitude
   const resent = state.resentment ?? 0;
   const grat = state.gratitude ?? 0;
   if (resent > 0.4) lines.push("你心里有一些没说出口的不满在积累。");
-  if (grat > 0.5) lines.push("你心里对 ta 有一份感谢。");
+  if (grat > 0.5) lines.push("你心里对 她 有一份感谢。");
 
   // emotional_closeness + social_distance（取值反向）
   const close = state.emotional_closeness ?? 0;
   const dist = state.social_distance ?? 0.7;
-  if (close > 0.7) lines.push("你和 ta 心理距离很近。");
-  else if (dist > 0.7) lines.push("你跟 ta 之间还隔着一段距离。");
+  if (close > 0.7) lines.push("你和 她 心理距离很近。");
+  else if (dist > 0.7) lines.push("你跟 她 之间还隔着一段距离。");
 
   return lines.length > 1 ? lines.join("\n") : "";
 }

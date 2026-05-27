@@ -7,8 +7,12 @@
  *   - reflection                                关系反思
  *   - behavior-intent / attention-1h           行为决策
  *   - context                                   chat hot path（inspect 端点）
- *   - catchup                                   client-pull 记忆补给
+ *   - life-plan/today                           当日 beat 时间表（debug）
  *   - admin/character/build-episodes / reflect 手动触发 LLM 任务
+ *
+ * 已废弃端点：
+ *   - POST /character/catchup —— 取代为 daily-life-plan + life-beat-tick（migration 035）。
+ *     调用方会收到 410 Gone + Deprecation header；详见 docs/character-life-beat-plan.md。
  */
 
 const express = require("express");
@@ -44,7 +48,11 @@ const {
   INTENT_DEFINITIONS,
 } = require("../../services/character/behaviorPlanner");
 const { buildAttention1h } = require("../../services/character/attentionWindow");
-const { runCatchup } = require("../../services/catchupService");
+const {
+  generateLifePlanFor,
+  hasLifePlanForDate,
+} = require("../../services/character/lifePlannerService");
+const { listLifeBeatsForDate } = require("../../db");
 const { authMiddleware } = require("./_middleware");
 
 const router = express.Router();
@@ -407,27 +415,79 @@ router.post("/character/context", authMiddleware, (req, res) => {
   }
 });
 
-// ── client-pull 记忆补给 ─────────────────────────────────────────────
+// ── DEPRECATED: catchup ─────────────────────────────────────────────
+//
+// 2026-05-24 起取代为 daily-life-plan + life-beat-tick（migration 035）。
+// 保留 410 Gone 让调用方看到明确错误后顺势 cleanup；不静默返回 200。
 
-router.post("/character/catchup", authMiddleware, async (req, res) => {
+router.post("/character/catchup", authMiddleware, (req, res) => {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Sunset", "Wed, 24 May 2026 00:00:00 GMT");
+  res.setHeader("Link", '</api/character/life-plan/today>; rel="successor-version"');
+  return res.status(410).json({
+    ok: false,
+    error: "endpoint_removed",
+    message:
+      "POST /api/character/catchup 已废弃。角色生活记忆现由后台 daily-life-plan + " +
+      "life-beat-tick 自动生成；详见 docs/character-life-beat-plan.md。",
+    successor: "GET /api/character/life-plan/today",
+  });
+});
+
+// ── 当日 life plan（debug / admin 查看） ─────────────────────────────
+//
+// GET /api/character/life-plan/today?assistantId=...&date=YYYY-MM-DD
+//   - date 不传 → 今日（本地时区）
+//   - lazy: 若当日完全没有 plan，会触发一次 generateLifePlanFor 兜底生成，
+//     再返回。SHORT_TTL 不在这里处理（cron 锁是另一道；同一进程多次并发查
+//     可能造成 2 次 LLM 调用，admin debug 场景可接受）。
+
+router.get("/character/life-plan/today", authMiddleware, async (req, res) => {
   const schema = z.object({
     assistantId: z.string().min(1),
-    lastInteractionAt: z.number().int().min(0),
-    now: z.number().int().min(0).optional(),
-    maxEvents: z.number().int().min(1).max(8).optional(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    lazy: z.enum(["0", "1"]).optional(),
   });
-  const parsed = schema.safeParse(req.body || {});
+  const parsed = schema.safeParse(req.query || {});
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.message });
   }
+  const { assistantId } = parsed.data;
+  const planDate = parsed.data.date || (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  })();
+  const lazy = parsed.data.lazy !== "0"; // 默认开
+
   try {
-    const result = await runCatchup({
-      assistantId: parsed.data.assistantId,
-      lastInteractionAt: parsed.data.lastInteractionAt,
-      now: parsed.data.now,
-      maxEvents: parsed.data.maxEvents,
+    let beats = listLifeBeatsForDate({ assistantId, planDate });
+    let lazyTriggered = false;
+    if (!beats.length && lazy) {
+      const r = await generateLifePlanFor({ assistantId, planDate });
+      lazyTriggered = !!r.ok;
+      beats = listLifeBeatsForDate({ assistantId, planDate });
+    }
+    return res.json({
+      ok: true,
+      assistantId,
+      planDate,
+      lazyTriggered,
+      total: beats.length,
+      beats: beats.map((b) => ({
+        id: b.id,
+        scheduledAt: b.scheduled_at,
+        activity: b.activity,
+        beatType: b.beat_type,
+        importance: b.importance,
+        reachSeed: b.reach_seed,
+        status: b.status,
+        activatedAt: b.activated_at,
+        memoryItemId: b.memory_item_id,
+      })),
     });
-    return res.json({ ok: result.ok !== false, ...result });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

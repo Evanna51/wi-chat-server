@@ -160,7 +160,7 @@ npm run db:query -- --life --assistant d244644b-e851-416a-ad98-b557fb991b99 --li
 - 管理页（角色 → 管理 Tab）可：
   - 切换 `allowAutoLife` / `allowProactiveMessage` 开关（PATCH `/api/browse/assistants/:id/flags`）；
   - 编辑 `characterName` / `characterBackground`（PATCH `/api/browse/assistants/:id/profile`）；
-  - 立即触发 lazy catchup 补叙生活记忆（POST `/api/character/catchup`）；
+  - 查看角色今日 beat 时间表（GET `/api/character/life-plan/today`，缺当日 plan 会 lazy 触发生成）；
   - 立即重新生成本角色今日 proactive plans（POST `/api/proactive/regenerate-plans`）。
 - 对话页（角色 → 对话 Tab）可：
   - hover 任意气泡显示"× 删除"按钮，确认后**级联硬删**该 turn + 衍生 memory_item / facts / edges / vectors / outbox（DELETE `/api/browse/conversation-turns/:id`）。操作不可逆。
@@ -754,24 +754,32 @@ npm run ws:test -- --user default-user --api-key dev-local-key
 
 可选参数 `--host <host>` `--port <port>`。
 
-### 15) Character Catchup (lazy life memory)
+### 15) Character Life Plan (角色独立时间线)
 
-- `POST /api/character/catchup`
-- Body:
-```json
-{
-  "assistantId": "...",
-  "lastInteractionAt": 1777190000000,
-  "now": 1777200000000,
-  "maxEvents": 5
-}
-```
+> 2026-05-24 取代旧 `POST /api/character/catchup`（现返 410 Gone）。
+> 设计文档：[docs/character-life-beat-plan.md](docs/character-life-beat-plan.md)。
+
+- `GET /api/character/life-plan/today?assistantId=...&date=YYYY-MM-DD&lazy=1`
+- `date` 不传 → 今日（本地时区）；`lazy=1`（默认）当日无 plan 时自动触发一次生成
 - Response:
 ```json
-{ "ok": true, "windowMs": 10000000, "generated": 3, "memories": [...] }
+{
+  "ok": true,
+  "assistantId": "...",
+  "planDate": "2026-05-24",
+  "lazyTriggered": false,
+  "total": 12,
+  "beats": [
+    { "id": 1, "scheduledAt": 1782345000000, "activity": "在公司楼下买冰美式",
+      "beatType": "anchored", "importance": 0.6, "reachSeed": "ta 上次提想试燕麦拿铁",
+      "status": "activated", "activatedAt": 1782345030000, "memoryItemId": "..." }
+  ]
+}
 ```
 
-仅当 `now - lastInteractionAt >= 60min` 时才生成；否则返回 `generated: 0`。
+角色生活记忆现由 cron 自动生成：
+- `daily-life-plan`（每天 04:00）：LLM 给每个 `allow_auto_life=1` 的角色排今日 10-18 条 beat
+- `life-beat-tick`（每 15min）：扫到点的 pending beat → 落 `memory_items` + 视情触发 proactive seed
 
 ### 16) Proactive Plans
 

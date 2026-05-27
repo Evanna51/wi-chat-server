@@ -1,11 +1,9 @@
 /**
  * registeredFetch — fetch 包装器：timeout + callRegistry 注册。
  *
- * 替代 fetchWithTimeout。新代码用这个，能拿到：
+ * 能拿到：
  *   - 自动取消（admin / supersede）
  *   - 在飞调用追踪（监控 / debug）
- *
- * 老的 fetchWithTimeout 现在转发到这里（kind="http"，无 scope，无 supersede）。
  *
  * @param {string|URL} url
  * @param {object}   [fetchOptions]   传给原生 fetch 的 options（method/headers/body/...）

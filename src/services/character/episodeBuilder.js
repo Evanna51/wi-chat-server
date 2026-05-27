@@ -121,7 +121,7 @@ function buildPrompt({ characterBackground, memories, knownTopics }) {
 
   return [
     `你是这个角色的叙事助手。把以下记忆按"主题 + 时间相关性"聚合成 K 个 narrative_episode，同时识别长期话题的 mention 和候选新话题。`,
-    `所有输出里用"你"指代角色、用"ta"指代用户，不要写具体名字。`,
+    `所有输出里用"你"指代角色、用"她"指代用户，不要写具体名字。`,
     "",
     "── 角色档案 ──",
     renderBackgroundForIntrospection(characterBackground, 400),

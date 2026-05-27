@@ -30,6 +30,8 @@ const {
   composeForChatV3Default,
 } = require("../services/character/promptComposer");
 const { decideRegister } = require("../services/character/registerRouter");
+const { applyStateDelta } = require("../services/characterStateService");
+const { getTemporalSnapshot } = require("../utils/temporalContext");
 const { buildAttention1h } = require("../services/character/attentionWindow");
 const { getSkillById } = require("../services/character/dialogueSkillsCatalog");
 const { evaluate: evaluateBehaviorIntent } = require("../services/character/behaviorPlanner");
@@ -53,9 +55,9 @@ const authMiddleware = (req, res, next) => {
 
 // ── helpers (与 api.js 内部 safe* helper 等价；本地复用避免循环 require) ─────
 
-function safeGetCoreFacts(assistantId) {
+function safeGetCoreFacts(assistantId, characterName) {
   try {
-    return getCoreFacts(assistantId, { limit: 15 });
+    return getCoreFacts(assistantId, { limit: 15, characterName });
   } catch (_e) {
     return [];
   }
@@ -101,6 +103,8 @@ router.get("/character/:id", authMiddleware, (req, res) => {
       voice_skills: composed.slots.voice_skills || "",
       background: composed.slots.background || "",
       constraints: composed.slots.constraints || "",
+      inner_thought: composed.slots.inner_thought || "",
+      temporal_context: composed.slots.temporal_context || "",
       attention_1h: composed.slots.attention_1h || "",
       narrative: composed.slots.narrative || "",
       facts: composed.slots.facts || "",
@@ -171,7 +175,7 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
     }
 
     // ── 用户事实（pinned）──
-    const coreFacts = safeGetCoreFacts(assistantId);
+    const coreFacts = safeGetCoreFacts(assistantId, profile.character_name);
     const coreMemories = safeGetCoreMemories(assistantId);
     const facts = coreFacts.length ? coreFacts : coreMemories;
 
@@ -187,6 +191,9 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       facts_core: !!facts.length,
       facts_retrieved: !!(config.memoryRetrievalEnabled && sessionId), // 能不能跑 RAG
     };
+
+    // ── 时间锚：现在几点 + 距用户上次说话多久 + 是不是新会话 ──
+    const temporal = getTemporalSnapshot(assistantId);
 
     // ── 启发式 behavior intent（cheap，~10ms）——给 router 看角色当前内心倾向 ──
     let characterIntent = null;
@@ -206,6 +213,7 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       available,
       identity,
       characterIntent,
+      temporal,                                // cognition router 也吃时间锚
     });
 
     // ── 跑 router 决定的 server_tools（当前只有 search_memory → retrieveMemory）──
@@ -257,6 +265,15 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       .map((id) => getSkillById(id, identity))
       .filter(Boolean);
 
+    // ── state_delta：cognition router 的"这一轮我心情怎么动"立刻落 character_state ──
+    // 故意放在 compose 之前的话，prompt 里 buildStatePromptFragment 看到的是新状态，
+    // 但角色独白 (inner) 是基于旧状态算出来的，会冲突。所以放在 compose **之后**：
+    // 本轮 prompt 用旧 state + 新 inner（一致：旧状态的角色，刚被这一句触动而 shift）；
+    // 下一轮 prompt 看到的就是 shift 后的新 state。
+    let stateDeltaResult = null;
+    // 实际 apply 在 compose 之后做，这里先占位以便 payload 引用
+    const _pendingStateDelta = decision.state_delta;
+
     // ── V3 compose ──
     const composed = composeForChatV3({
       profile,
@@ -270,6 +287,7 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       activeEpisodes: ctx.recentEpisodes,
       activeTopics: ctx.activeTopics,
       salientPhrase: ctx.salientPhrase,
+      temporal,                                  // <temporal_context> slot 数据
       prefill: "", // V3 不放 prefill —— 角色独白由 LLM 自然生成
     });
 
@@ -282,12 +300,22 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
       voice_skills: composed.slots.voice_skills || "",
       background: composed.slots.background || "",
       constraints: composed.slots.constraints || "",
+      inner_thought: composed.slots.inner_thought || "",
+      temporal_context: composed.slots.temporal_context || "",
       attention_1h: composed.slots.attention_1h || "",
       narrative: composed.slots.narrative || "",
       facts: composed.slots.facts || "",
       tool_protocol: composed.slots.tool_protocol || "",
       avoid: composed.slots.avoid || "",
     };
+
+    // ── 应用 state_delta（compose 已用旧 state，现在把"这一轮的 shift"沉淀到 DB）──
+    try {
+      stateDeltaResult = applyStateDelta(assistantId, _pendingStateDelta);
+    } catch (err) {
+      console.warn("[chat/context] applyStateDelta failed:", err.message);
+      stateDeltaResult = { applied: false, reason: "exception" };
+    }
 
     return res.json({
       ok: true,
@@ -314,7 +342,14 @@ router.post("/chat/context", authMiddleware, async (req, res) => {
 
       // ── 决策可见性（debug + 监控）──
       routerDecision: {
-        register: decision.register,
+        register: decision.register,                  // 兼容老字段（= register_tags[0]）
+        register_tags: decision.register_tags || [],
+        response_stance: decision.response_stance || null,
+        // inner 内心独白：客户端 UI 想暴露 "她当下在想什么" 时可读取（默认不展示给用户）
+        inner: decision.inner || null,
+        // state_delta：本轮 cognition 决定的 mood/relationship shift（已落 DB）
+        state_delta: decision.state_delta || null,
+        state_delta_applied: stateDeltaResult || null,
         skill_ids: decision.skill_ids,
         budget: decision.budget,
         layers: decision.layers,

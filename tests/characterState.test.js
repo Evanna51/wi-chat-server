@@ -47,10 +47,11 @@ function injectState(assistantId, fields) {
 console.log("\n[Suite 1] ensureDefaultState");
 {
   const aid = makeAid("default");
-  ensureDefaultState(aid, { familiarityHint: 36 });
+  ensureDefaultState(aid);
   const s = getRawState(aid);
   assert(s !== null, "row exists");
-  assert(s.relationship_level === 3, `level from familiarity 36 = 3 (got ${s.relationship_level})`);
+  assert(s.relationship_level === 0, `default level = 0 (got ${s.relationship_level})`);
+  assert(s.intimacy_score === 0, `default intimacy = 0 (got ${s.intimacy_score})`);
   assert(s.mood_emotion === "calm", `default emotion = calm (got ${s.mood_emotion})`);
   assert(s.mood_updated_at > 0, "mood_updated_at set");
 }
@@ -78,11 +79,12 @@ console.log("\n[Suite 2] onUserMessage heuristics (two-tier)");
 console.log("\n[Suite 3] silence detection");
 {
   const aid = makeAid("silence");
-  ensureDefaultState(aid, { familiarityHint: 60 });
+  ensureDefaultState(aid);
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000 - 1000;
   injectState(aid, {
     last_user_message_at: sevenDaysAgo,
     relationship_level: 5,
+    intimacy_score: 60,
     mood_emotion: "calm",
     mood_intensity: 0.3,
   });

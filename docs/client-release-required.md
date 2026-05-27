@@ -22,14 +22,14 @@
 
 ## CR-02 不再读 `familiarity` 字段（对应服务端 T-03）
 
-- **服务端动作**：删除 `character_state.familiarity` 列、`/api/character/bootstrap` 与 `/api/relationship/state` 的 payload 不再带 `familiarity`。
+- **服务端动作**：已删除 `character_state.familiarity` 列（migration 036, 2026-05-25），`/api/character/bootstrap` / `/api/relationship/state` payload 不再带 `familiarity`。
 - **客户端需要做**：
-  1. UI 展示亲密度档位**只读 `relationship.level`**（-2 ~ 9 整数，12 档），不要再读 `familiarity` / `relationshipState.familiarity`。
+  1. UI 展示亲密度档位**只读 `relationship.level`**（-2 ~ 9 整数，12 档）。
   2. 如有"亲密度进度条"/"档位描述"基于 `familiarity / 100` 的公式，迁移到 `relationship.intimacyScore` (0-200) 或直接用 `level`。
   3. 移除请求体里任何手动传 `familiarityHint` 的地方（如有）。
 - **影响**：
   - 客户端如继续读 `familiarity` 会拿到 `undefined`，UI 可能显示错误档位。
-- **状态**：⏳ 待客户端发版
+- **状态**：✅ 服务端已删除（2026-05-25）。Android 客户端检查为空（无 familiarity 引用），无需改动。
 
 ---
 

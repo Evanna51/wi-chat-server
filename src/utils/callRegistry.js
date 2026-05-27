@@ -35,7 +35,7 @@ const KIND_DEFAULTS = Object.freeze({
   embed:           { supersede: false },
   vector_query:    { supersede: false },
 
-  // 通用兜底（fetchWithTimeout 路径）
+  // 通用兜底（registeredFetch kind="http" 默认走这条）
   http:            { supersede: false },
 });
 

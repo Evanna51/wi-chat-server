@@ -1,7 +1,7 @@
 /**
  * reflectionService — Phase 3: 关系反思（T-CC3-02）
  *
- * AI 对"最近一段时间，你跟 ta 之间发生了什么、你怎么看"的元认知层。
+ * AI 对"最近一段时间，你跟 她 之间发生了什么、你怎么看"的元认知层。
  * 不是 retrieval、不是 narrative —— 是 synthesis。
  *
  * 数据流：
@@ -200,7 +200,7 @@ function buildReflectionPrompt({
 
   return [
     `你是这个角色。给自己写一段对最近关系的反思——不是要发给用户，是给自己看。`,
-    `用"你"自指、用"ta"指代用户，不要写具体名字。`,
+    `用"你"自指、用"她"指代用户，不要写具体名字。`,
     "",
     `── 反思类型 ──`,
     `${reflectionType}${triggerReason ? `（触发：${triggerReason}）` : ""}`,
@@ -236,7 +236,7 @@ function buildReflectionPrompt({
     `         + "可以接续上次反思的判断，但要诚实修正。",`,
     `  "emotionalTrend": "improving|declining|stable|volatile",`,
     `  "relationshipDirection": "deepening|cooling|stable|tense|reconnecting",`,
-    `  "userNeeds": ["string", ...]   // ta 现在主要的需要：被肯定/陪伴/空间/建议/倾听...`,
+    `  "userNeeds": ["string", ...]   // 她 现在主要的需要：被肯定/陪伴/空间/建议/倾听...`,
     `  "concerns": ["string", ...]    // 你担心的事`,
     `  "opportunities": ["string", ...] // 接近/增进的机会`,
     `}`,
@@ -550,7 +550,7 @@ function buildReflectionPromptFragment(assistantId) {
     lines.push(`方向：${r.relationshipDirection}`);
   }
   if (r.userNeeds?.length) {
-    lines.push(`ta 此刻需要：${r.userNeeds.slice(0, 3).join("、")}`);
+    lines.push(`她 此刻需要：${r.userNeeds.slice(0, 3).join("、")}`);
   }
   if (r.opportunities?.length) {
     lines.push(`接近机会：${r.opportunities.slice(0, 2).join("；")}`);

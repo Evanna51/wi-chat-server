@@ -218,6 +218,78 @@ console.log("\n[Suite 5] priority competition");
   assert(r.scores.reciprocate_vulnerable_share === 80, "vshare scored");
 }
 
+// ── Suite 6: intimacy_outreach + life_check_in 亲密度系数（2026-05-24 加）─────
+console.log("\n[Suite 6] intimacy_outreach + life_check_in adaptive threshold");
+{
+  // a) closeness ≥ 0.5 + 沉默 4-24h → intimacy_outreach (closeness driver)
+  const aid1 = makeAid("intim_close");
+  setupAssistant(aid1);
+  setSilenceHours(aid1, 5);
+  setDynamics(aid1, { emotional_closeness: 0.6 });
+  const r1 = bp.evaluate(aid1);
+  assert(r1.intent === "intimacy_outreach", `closeness=0.6 sil=5h → ${r1.intent}`);
+  assert(r1.driver?.driver === "closeness", `driver sub = closeness (got ${r1.driver?.driver})`);
+  assert(r1.suggestedSocialMode === "intimate", "intimate mode");
+
+  // b) intent_to_deepen 路径：closeness=0.45, level=0 → 0.45 ≥ 0.3
+  const aid2 = makeAid("intim_deepen");
+  setupAssistant(aid2);
+  setSilenceHours(aid2, 8);
+  db.prepare("UPDATE character_state SET relationship_level = 0 WHERE assistant_id = ?").run(aid2);
+  setDynamics(aid2, { emotional_closeness: 0.45 });
+  const r2 = bp.evaluate(aid2);
+  assert(r2.intent === "intimacy_outreach", `intent_to_deepen → ${r2.intent}`);
+  assert(r2.driver?.driver === "intent_to_deepen", `driver sub = intent_to_deepen (got ${r2.driver?.driver})`);
+
+  // c) closeness 高但 silence 超出两条 outreach 范围 → 让位给 life_check_in
+  //    需要把 level 设高，否则 intent_to_deepen 路径（closeness - level/10 ≥ 0.3）会还在 [6,48] 范围里继续命中
+  const aid3 = makeAid("intim_outrange");
+  setupAssistant(aid3);
+  setSilenceHours(aid3, 50); // 超出 closeness 路径 24h 和 intent_to_deepen 路径 48h
+  setDynamics(aid3, { emotional_closeness: 0.55 });
+  const r3 = bp.evaluate(aid3);
+  assert(r3.intent === "life_check_in", `closeness=0.55 sil=50h → ${r3.intent}`);
+  assert(r3.driver?.adaptiveThreshold === 6, `adaptive threshold = 6 for closeness 0.5-0.7 (got ${r3.driver?.adaptiveThreshold})`);
+
+  // d) life_check_in 亲密度系数：closeness ≥ 0.7 → threshold 4h
+  //    把 level 设高，让 intent_to_deepen 路径失败（0.75-0.7=0.05<0.3），同时 silence 超出 outreach 24h
+  const aid4 = makeAid("life_adaptive_07");
+  setupAssistant(aid4);
+  setSilenceHours(aid4, 25);
+  db.prepare("UPDATE character_state SET relationship_level = 7 WHERE assistant_id = ?").run(aid4);
+  setDynamics(aid4, { emotional_closeness: 0.75 });
+  const r4 = bp.evaluate(aid4);
+  assert(r4.intent === "life_check_in", `closeness=0.75 lvl=7 sil=25h → ${r4.intent}`);
+  assert(r4.driver?.adaptiveThreshold === 4, `threshold = 4 for closeness≥0.7 (got ${r4.driver?.adaptiveThreshold})`);
+
+  // e) closeness=0 → 默认 8h base
+  const aid5 = makeAid("life_default");
+  setupAssistant(aid5);
+  setSilenceHours(aid5, 10);
+  // 默认 closeness=0.2（migration 026），手动归零
+  setDynamics(aid5, { emotional_closeness: 0.0 });
+  const r5 = bp.evaluate(aid5);
+  assert(r5.intent === "life_check_in", `closeness=0 sil=10h → ${r5.intent}`);
+  assert(r5.driver?.adaptiveThreshold === 8, `threshold = 8 default (got ${r5.driver?.adaptiveThreshold})`);
+
+  // f) intimacy_outreach prompt fragment 含 "不需要借口" 抗偏置 hint
+  const frag = bp.buildIntentPromptFragment(r1);
+  assert(frag.includes("覆盖主 prompt"), "intimacy_outreach fragment has anti-bias override hint");
+  assert(frag.includes("不需要刚发生了什么当借口"), "fragment has \"no need for event\" wording");
+
+  // g) 其他 intent 的 fragment **不含** 这条特别说明（避免泄漏）
+  const fragLifeCheck = bp.buildIntentPromptFragment(r5);
+  assert(!fragLifeCheck.includes("覆盖主 prompt"), "life_check_in fragment does NOT have anti-bias hint");
+
+  // h) silenceHours < 1h → 强制 none，覆盖 intimacy_outreach
+  const aid6 = makeAid("intim_too_recent");
+  setupAssistant(aid6);
+  setSilenceHours(aid6, 0.5);
+  setDynamics(aid6, { emotional_closeness: 0.8 });
+  const r6 = bp.evaluate(aid6);
+  assert(r6.intent === "none", `sil<1h 即便 closeness 高也强制 none (got ${r6.intent})`);
+}
+
 cleanupAll();
 console.log("\n──────────────────────────────────────────────────");
 console.log(`结果: ${passed} passed, ${failed} failed`);

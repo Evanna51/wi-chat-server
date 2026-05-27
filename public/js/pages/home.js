@@ -81,12 +81,12 @@ export async function viewHome() {
   for (const a of list) {
     const cardIsChar = isCharacterTypeLike(a.assistantType);
 
-    // 头部：name + id + ghost tags（类型 / 熟悉度，所有 type 都有）
+    // 头部：name + id + ghost tags（类型 / 总轮次，所有 type 都有）
     const ghostTags = el("div", { class: "ghost-tag-row" }, [
       el("span", { class: "ghost-tag", title: "assistant_type" },
         `类型 · ${assistantTypeLabel(a.assistantType)}`),
-      el("span", { class: "ghost-tag", title: "familiarity" },
-        `熟悉度 · ${a.state?.familiarity ?? 0}/100`),
+      el("span", { class: "ghost-tag", title: "total_turns" },
+        `轮次 · ${a.state?.totalTurns ?? 0}`),
     ]);
 
     // 中部：自驱开关（仅 character 类型）—— 非 character 时这区域占位以保持高度

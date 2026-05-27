@@ -733,12 +733,12 @@ async function viewHome() {
   for (const a of list) {
     const cardIsChar = isCharacterTypeLike(a.assistantType);
 
-    // 头部：name + id + ghost tags（类型 / 熟悉度，所有 type 都有）
+    // 头部：name + id + ghost tags（类型 / 总轮次，所有 type 都有）
     const ghostTags = el("div", { class: "ghost-tag-row" }, [
       el("span", { class: "ghost-tag", title: "assistant_type" },
         `类型 · ${assistantTypeLabel(a.assistantType)}`),
-      el("span", { class: "ghost-tag", title: "familiarity" },
-        `熟悉度 · ${a.state?.familiarity ?? 0}/100`),
+      el("span", { class: "ghost-tag", title: "total_turns" },
+        `轮次 · ${a.state?.totalTurns ?? 0}`),
     ]);
 
     // 中部：自驱开关（仅 character 类型）—— 非 character 时这区域占位以保持高度
@@ -952,7 +952,6 @@ async function viewCharacter(assistantId, tabId = "overview") {
       )
     );
   }
-  badges.push(el("span", { class: "badge badge--neutral" }, `熟悉度: ${a.state?.familiarity ?? 0}/100`));
   badges.push(el("span", { class: "badge badge--neutral" }, `轮次: ${a.state?.totalTurns ?? 0}`));
 
   const head = el("section", { class: "char-head" }, [
@@ -1001,12 +1000,23 @@ async function renderOverviewTab(body, a) {
   ]);
   body.innerHTML = "";
 
+  const effectiveBg = a.lore || a.characterBackground;
   const profile = el("article", {}, [
     el("header", {}, [el("strong", {}, "Profile")]),
     el("dl", { class: "config-dl" }, [
       el("dt", {}, "characterName"),
       el("dd", {}, a.characterName || ""),
-      el("dt", {}, "characterBackground"),
+      el("dt", {}, [
+        "lore（实际进 prompt）",
+        el("small", { class: "muted", style: "margin-left:6px" },
+          `extraction: ${a.extractionStatus || "?"}  ·  ${(a.lore || "").length} 字`),
+      ]),
+      el("dd", { class: "wrap-pre" }, a.lore || "(未提炼，fallback 到 characterBackground)"),
+      el("dt", {}, [
+        "characterBackground（init 原始值）",
+        el("small", { class: "muted", style: "margin-left:6px" },
+          `${(a.characterBackground || "").length} 字${a.lore ? "  ·  lore 存在时不进 prompt" : "  ·  lore 为空，当前作为 fallback"}`),
+      ]),
       el("dd", { class: "wrap-pre" }, a.characterBackground || "(空)"),
       el("dt", {}, "lastSessionId"),
       el("dd", { class: "mono" }, a.lastSessionId || "—"),
@@ -1021,8 +1031,6 @@ async function renderOverviewTab(body, a) {
   const stateBlock = el("article", {}, [
     el("header", {}, [el("strong", {}, "State")]),
     el("dl", { class: "config-dl" }, [
-      el("dt", {}, "familiarity"),
-      el("dd", {}, String(a.state?.familiarity ?? 0)),
       el("dt", {}, "totalTurns"),
       el("dd", {}, String(a.state?.totalTurns ?? 0)),
       el("dt", {}, "activeSessionId"),

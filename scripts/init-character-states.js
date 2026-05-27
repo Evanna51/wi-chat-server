@@ -9,14 +9,12 @@ const { ensureDefaultState } = require("../src/services/characterStateService");
 
 const dryRun = process.argv.includes("--dry-run");
 
-const profiles = db.prepare("SELECT assistant_id, familiarity FROM assistant_profile ap LEFT JOIN character_state cs USING(assistant_id)").all().length
-  ? db.prepare(`
-      SELECT ap.assistant_id, COALESCE(cs.familiarity, 0) AS familiarity
-      FROM assistant_profile ap
-      LEFT JOIN character_state cs ON cs.assistant_id = ap.assistant_id
-      WHERE cs.mood_updated_at IS NULL OR cs.assistant_id IS NULL
-    `).all()
-  : [];
+const profiles = db.prepare(`
+  SELECT ap.assistant_id
+  FROM assistant_profile ap
+  LEFT JOIN character_state cs ON cs.assistant_id = ap.assistant_id
+  WHERE cs.mood_updated_at IS NULL OR cs.assistant_id IS NULL
+`).all();
 
 if (!profiles.length) {
   console.log("[init-states] 没有需要初始化的 assistant，已全部就绪。");
@@ -25,10 +23,10 @@ if (!profiles.length) {
 
 console.log(`[init-states] 找到 ${profiles.length} 个需要初始化的 assistant${dryRun ? "（dry-run，不写入）" : ""}`);
 
-for (const { assistant_id, familiarity } of profiles) {
-  console.log(`  ${assistant_id}  familiarity=${familiarity}`);
+for (const { assistant_id } of profiles) {
+  console.log(`  ${assistant_id}`);
   if (!dryRun) {
-    ensureDefaultState(assistant_id, { familiarityHint: familiarity || 0 });
+    ensureDefaultState(assistant_id);
   }
 }
 

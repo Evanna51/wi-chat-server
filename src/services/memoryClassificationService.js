@@ -99,40 +99,95 @@ const LLM_PROMPT_TEMPLATE = `将以下用户消息打标 + 抽事实，必须严
 
 质量：A=高信息密度长效 B=明确事件事实 C=一般闲聊 D=噪声 E=无信息
 
-facts 抽取规则（重点）：
-- 只抽**用户主语**的稳定事实（喜好、习惯、关系、目标、技能、生活基本面）
-- key 用 snake_case 描述维度。例：preference_like / habit_morning / relationship_with_mom / goal_short_term / skill / job / location
-- value 是简短陈述（≤50字），不是原句复述
-- 否定/含糊/反讽/第三方主语 → 不抽
-- 闲聊 / 单字应答 / 噪声 → facts: []
+────────────────────────────────────────────────────
+facts 抽取规则（重点，按顺序遵守）
 
-confidence vs importance（两个维度正交，分别评估）：
+【1. 这里只抽用户的事实】
+- 数据来源就是用户消息，所以**抽出来的事实天然是关于"用户"或"用户和{角色}之间"**
+- {角色} 是占位符，指代当前对话另一方（你不需要知道实际名字，照写就行）
+- 闲聊 / 单字应答 / 否定 / 反讽 / 第三方主语 → facts: []
+
+【2. value 必须语义自足，主语明确】
+- value 是一句**能脱离 key 单独读懂**的陈述
+- 凡是涉及双方关系 / 用户对 {角色} 的态度，**显式写主语**："用户..." 或 "用户对 {角色}..."
+- ❌ 反例（主语不清楚）："承认喜欢用户" / "表达爱意" / "感到满足" / "对你有依赖"
+- ✅ 正例：
+    "用户承认喜欢 {角色}"
+    "用户向 {角色} 表达爱意"
+    "用户感到满足，依赖 {角色} 陪伴"
+    "用户握过 {角色} 的手"
+
+【3. fact_value 涉及对话另一方时一律用占位符 {角色}】
+- **禁止写实际角色名 / "AI" / "助手" / "assistant" / "bot" / "我" / "你"**
+- 占位符就写 5 个字符："{角色}"
+- 这是为了改角色名时数据不失效；server 端读出时会自动展开成真名
+
+【4. key 是 snake_case，必须从下面"首选集"挑】
+
+A. 身份 / 基本面（用户自己）：
+   name_user / identity_job / identity_location / identity_age /
+   health_condition / employment_status
+B. 关系（用户与他人）：
+   relationship_with_user_self（用户的自我认同 / 关系角色）
+   relationship_with_<who>（与具体人，如 relationship_with_mom / _husband / _friend_<名>）
+   relationship_with_character（**用户和 {角色} 的关系**——这是统一 key）
+C. 偏好 / 习惯：
+   preference_like / preference_dislike / preference_food / preference_drink /
+   habit_morning / habit_sleep / habit_<场景>
+D. 目标 / 计划：
+   goal_short_term / goal_long_term / goal_<topic>
+E. 技能：
+   skill_<name>
+F. 用户对 {角色} 的情感 / 关系动态（**统一收敛到这几个 key**）：
+   feeling_about_character（持续性情感，用户长期感受）
+   attitude_about_character（用户表达过的态度/期待）
+   shared_event_with_character（双方共同经历的事件 / 互动瞬间）
+   ⚠️ 不要再用：emotion_towards_user / emotional_state / current_emotional_state /
+   current_state_emotion / emotional_state_with_user / shared_moment_with_user
+   它们都是同义碎片，统一到上面 3 个 canonical key
+G. 内容 / 创作（如果对话是写作 / RP 场景）：
+   writing_style_preference / content_requirement_<aspect> /
+   plot_event_<n> / plot_setting
+
+【5. confidence vs importance（两个维度正交）】
 - confidence = 这个 fact 提取得准不准。原句直白明确 → 0.9+；含糊推断 → 0.5-0.7
 - importance = 这个 fact 对角色行为影响多大（"该不该天天记着这件事"）
-  · 0.9-1.0：健康状况/重大身份/不可逆决定（"糖尿病"/"已婚"/"刚失业"）
-  · 0.7-0.9：长期关系/职业/居住地/重大目标（"妈妈是医生"/"在做 AI 创业"）
-  · 0.5-0.7：习惯/技能/中度偏好（"早起跑步"/"会弹吉他"）
-  · 0.3-0.5：轻偏好/兴趣（"喜欢拿铁"/"最近在看《三体》"）
-  · <0.3：临时心情/一次性事件
+  · 0.9-1.0：健康状况 / 重大身份 / 不可逆决定（"糖尿病" / "已婚" / "刚失业"）
+  · 0.7-0.9：长期关系 / 职业 / 居住地 / 重大目标 / **用户对 {角色} 的持续情感**
+  · 0.5-0.7：习惯 / 技能 / 中度偏好 / **双方互动瞬间**
+  · 0.3-0.5：轻偏好 / 兴趣 / 临时态度
+  · <0.3：一次性闲聊事件
 
+────────────────────────────────────────────────────
 正例：
-  "我每天早上六点起床跑步" → [{"key":"habit_morning","value":"6点起床跑步","confidence":0.9,"importance":0.6}]
-  "我妈妈是医生" → [{"key":"relationship_with_mom","value":"医生","confidence":0.9,"importance":0.8}]
-  "我超喜欢拿铁" → [{"key":"preference_like","value":"拿铁","confidence":0.9,"importance":0.4}]
-  "我有糖尿病" → [{"key":"health_condition","value":"糖尿病","confidence":0.95,"importance":0.95}]
-反例（不抽）：
-  "嗯" → facts: []
-  "他喜欢打篮球" → facts: []  (主语不是用户)
-  "我不喜欢咖啡其实" → facts: [] (有否定/反复)
 
-⚠️ 角色称谓硬规则（务必遵守）：
-- 当 fact 涉及对话另一方（即角色本身）时，**必须使用具体角色名 "__CHARACTER_NAME__"**
-- **绝对禁止**在 fact_value 里出现 "AI" / "助手" / "assistant" / "bot" / "我" 这类代称
-- 示例（角色名为"金宵"时）：
-  "你还记得我握着你的手吗" →
-    [{"key":"shared_moment_with_user","value":"用户握过金宵的手","confidence":0.85,"importance":0.6}]
-  ❌ 错误："用户握过 AI 的手" / "用户握过我的手"
-  ✅ 正确："用户握过金宵的手"
+"我每天早上六点起床跑步"
+  → [{"key":"habit_morning","value":"用户每天 6 点起床跑步","confidence":0.9,"importance":0.6}]
+
+"我妈妈是医生"
+  → [{"key":"relationship_with_mom","value":"用户的妈妈是医生","confidence":0.9,"importance":0.8}]
+
+"我超喜欢拿铁"
+  → [{"key":"preference_drink","value":"用户喜欢拿铁","confidence":0.9,"importance":0.4}]
+
+"我有糖尿病"
+  → [{"key":"health_condition","value":"用户有糖尿病","confidence":0.95,"importance":0.95}]
+
+"你还记得我握着你的手吗"
+  → [{"key":"shared_event_with_character","value":"用户握过 {角色} 的手","confidence":0.85,"importance":0.6}]
+
+"我对你的依赖越来越深，有时候害怕这种感觉"
+  → [{"key":"feeling_about_character","value":"用户对 {角色} 越来越依赖，同时害怕这种感觉","confidence":0.85,"importance":0.75}]
+
+"我觉得跟你在一起特别安心"
+  → [{"key":"feeling_about_character","value":"用户跟 {角色} 在一起感到安心","confidence":0.9,"importance":0.7}]
+
+反例（不抽 / 抽错）：
+  "嗯"                     → facts: []
+  "他喜欢打篮球"           → facts: []（主语不是用户）
+  "我不喜欢咖啡其实"       → facts: []（否定 / 反复）
+  ❌ {"key":"emotion_towards_user","value":"承认喜欢用户"}
+  ✅ {"key":"feeling_about_character","value":"用户承认喜欢 {角色}"}
 
 消息：「__CONTENT__」`;
 
@@ -150,21 +205,16 @@ function sanitizeFactValue(v) {
 }
 
 /**
- * Post-process safety net：把 fact_value 里的 "AI" / "助手" / "assistant" / "bot" 等
- * 通用代称替换成具体角色名。即使 LLM 没听话，事实也能落到正确人称。
+ * Post-process safety net：把 LLM 输出的 fact_value 里的角色名 / 通用代称
+ * **标准化成占位符 `{角色}`**（2026-05-24 改：原来是反向替换成角色名）。
  *
- * 策略：词边界尽量友好，中文上下文里 "AI" 直接替换；"助手" 单独出现时替换；
- * 原句里如果用户自己写了 "AI 推荐..." 这种正向陈述，不动（不在 fact_value 中替换）。
- * 这里只针对 fact_value（已经是 LLM 输出的"事实摘要"，正常不该出现这些词）。
+ * 为什么：fact_value 在 DB 里要长期存活，角色改名时不该需要批量改库。
+ * 存储层永远只有 `{角色}` 占位符，读端按当前 character_name 展开。
+ * 见 src/utils/characterPlaceholder.js。
+ *
+ * 这里只针对 fact_value，conversation_turns 原始文本不动。
  */
-function replaceGenericPersona(text, characterName) {
-  if (!text || !characterName) return text;
-  return text
-    .replace(/\bAI\b/g, characterName)
-    .replace(/\bassistant\b/gi, characterName)
-    .replace(/\bbot\b/gi, characterName)
-    .replace(/助手/g, characterName);
-}
+const { normalizeToPlaceholder } = require("../utils/characterPlaceholder");
 
 function parseFactsArray(raw, characterName = null) {
   if (!Array.isArray(raw)) return [];
@@ -174,7 +224,8 @@ function parseFactsArray(raw, characterName = null) {
     const key = sanitizeFactKey(item.key);
     let value = sanitizeFactValue(item.value);
     if (!key || !value) continue;
-    if (characterName) value = replaceGenericPersona(value, characterName);
+    // 标准化到占位符：AI/助手/角色名 → {角色}
+    value = normalizeToPlaceholder(value, characterName);
     const confidence = clamp01(typeof item.confidence === "number" ? item.confidence : 0.7);
     const importance = clamp01(typeof item.importance === "number" ? item.importance : 0.5);
     out.push({ key, value, confidence, importance });
@@ -186,17 +237,15 @@ function parseFactsArray(raw, characterName = null) {
 /**
  * @param {string} content
  * @param {object} [opts]
- * @param {string} [opts.characterName] 角色名，用于 prompt 注入 + post-process 替换 AI/助手
+ * @param {string} [opts.characterName] 角色名，用于 post-process 把 LLM 输出里的真名 → `{角色}` 占位符。
+ *                                       prompt 本身使用 `{角色}` 占位符，**不再注入真名**。
  */
 async function classifyWithLLM(content, opts = {}) {
   const text = (content || "").trim();
   if (!text) return { category: "chitchat", quality: "E", confidence: 0.95, facts: [] };
 
   const characterName = (opts.characterName || "").trim();
-  const promptCharacter = characterName || "（未指定角色名）";
-  const prompt = LLM_PROMPT_TEMPLATE
-    .replace(/__CHARACTER_NAME__/g, promptCharacter)
-    .replace("__CONTENT__", text.slice(0, 500));
+  const prompt = LLM_PROMPT_TEMPLATE.replace("__CONTENT__", text.slice(0, 500));
   const { content: raw } = await getIntrospectionProvider().complete({
     messages: [
       { role: "system", content: "你是记忆分类与事实抽取引擎。只输出 JSON，不要额外文字。" },

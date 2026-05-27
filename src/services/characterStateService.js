@@ -453,6 +453,120 @@ function onUserMessage(assistantId, { content = "", now = Date.now() } = {}) {
   }
 }
 
+// ── applyStateDelta（cognition router → 每轮 turn-level state shift）──────
+//
+// 2026-05-24：cognition router 在每轮决策时输出 state_delta 块，server 同步把它
+// 落到 character_state。语义：state 是慢均值，inner_thought 是即时心情；这里
+// 是把"这一轮的即时心情"沉淀进慢均值，让下一轮 prompt 里 buildStatePromptFragment
+// 看到的状态已经"挪动过"。
+//
+// 单轮上限（防 LLM 给极端值导致状态跳变）：
+//   - mood_valence_delta:    ±0.3
+//   - mood_intensity_delta:  ±0.3
+//   - intimacy_delta:        ±2.0（intimacy_score 0..200，2.0 ≈ 6 轮升一级）
+//   - energy_delta:          ±0.3
+//   - suppressed_intensity_delta: ±0.3
+// mood_emotion_hint 可选——非空时 server 用 resolveEmotion 验证，命中合法 id 才写。
+const STATE_DELTA_CAPS = {
+  mood_valence: 0.3,
+  mood_intensity: 0.3,
+  intimacy: 2.0,
+  energy: 0.3,
+  suppressed_intensity: 0.3,
+};
+
+function _clampDelta(v, cap) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return clamp(n, -cap, cap);
+}
+
+function applyStateDelta(assistantId, delta = {}) {
+  if (!assistantId || !delta || typeof delta !== "object") {
+    return { applied: false, reason: "no_input" };
+  }
+  // 用 raw state（不要 effective —— effective 已经跑过 decay，再叠 delta 会双重计算）
+  const state = getRawState(assistantId);
+  if (!state) return { applied: false, reason: "no_state_row" };
+
+  const now = Date.now();
+  const vDelta = _clampDelta(delta.mood_valence_delta, STATE_DELTA_CAPS.mood_valence);
+  const iDelta = _clampDelta(delta.mood_intensity_delta, STATE_DELTA_CAPS.mood_intensity);
+  const xDelta = _clampDelta(delta.intimacy_delta, STATE_DELTA_CAPS.intimacy);
+  const eDelta = _clampDelta(delta.energy_delta, STATE_DELTA_CAPS.energy);
+  const sDelta = _clampDelta(delta.suppressed_intensity_delta, STATE_DELTA_CAPS.suppressed_intensity);
+
+  // 全空 delta → no-op（不写库，省 SQL + updated_at 抖动）
+  const allZero = !vDelta && !iDelta && !xDelta && !eDelta && !sDelta && !delta.mood_emotion_hint;
+  if (allZero) return { applied: false, reason: "all_zero" };
+
+  const newValence   = clamp((state.mood_valence || 0) + vDelta, -1, 1);
+  const newIntensity = clamp((state.mood_intensity || 0.3) + iDelta, 0.1, 1.0);
+  const newIntimacy  = clamp((state.intimacy_score || 0) + xDelta, 0, 200);
+  const newEnergy    = clamp((state.energy || 0.7) + eDelta, 0, 1);
+  const newSupInt    = clamp((state.suppressed_emotion_intensity || 0) + sDelta, 0, 1);
+  const newLevel     = clamp(
+    Math.max(state.relationship_level || 0, levelFromScore(newIntimacy)),
+    -2, 9
+  );
+
+  // mood_emotion_hint：可选，必须命中 emotionTaxonomy 才采纳
+  let newEmotion = state.mood_emotion;
+  let entry = null;
+  const hint = (delta.mood_emotion_hint || "").toString().trim();
+  if (hint) {
+    try {
+      const resolved = resolveEmotion(hint);
+      if (resolved && resolved.id && resolved.id !== "neutral") {
+        newEmotion = resolved.id;
+        entry = resolved;
+      }
+    } catch { /* ignore — 命中不了就保持原 emotion */ }
+  }
+
+  const fields = {
+    mood_valence:      Math.round(newValence * 1000) / 1000,
+    mood_intensity:    Math.round(newIntensity * 1000) / 1000,
+    intimacy_score:    Math.round(newIntimacy * 1000) / 1000,
+    energy:            Math.round(newEnergy * 1000) / 1000,
+    suppressed_emotion_intensity: Math.round(newSupInt * 1000) / 1000,
+    relationship_level: newLevel,
+    mood_updated_at:   now,
+    energy_updated_at: now,
+  };
+  if (newEmotion !== state.mood_emotion) {
+    fields.mood_emotion = newEmotion;
+    if (entry) {
+      fields.mood_arousal = entry.arousal;
+      // valence 已经被 delta 调过；hint 来的 valence 不强制覆盖（避免冲突）
+    }
+  }
+  if (sDelta > 0 && newSupInt >= 0.1) {
+    fields.suppressed_emotion_updated_at = now;
+  }
+  updateStateFields(assistantId, fields);
+
+  return {
+    applied: true,
+    deltas: {
+      mood_valence: vDelta,
+      mood_intensity: iDelta,
+      intimacy: xDelta,
+      energy: eDelta,
+      suppressed_intensity: sDelta,
+      mood_emotion_hint: hint || null,
+    },
+    after: {
+      mood_emotion: newEmotion,
+      mood_valence: fields.mood_valence,
+      mood_intensity: fields.mood_intensity,
+      intimacy_score: fields.intimacy_score,
+      energy: fields.energy,
+      relationship_level: newLevel,
+    },
+  };
+}
+
 function applyMoodEvent(assistantId, { emotion, intensityDelta = 0, intimacyDelta = 0 }) {
   const state = getRawState(assistantId);
   if (!state) return;
@@ -521,24 +635,20 @@ function buildStatePromptFragment(assistantId, now = Date.now()) {
   return lines.join("\n");
 }
 
-function ensureDefaultState(assistantId, { familiarityHint = 0 } = {}) {
+function ensureDefaultState(assistantId) {
   const existing = getRawState(assistantId);
   if (existing && existing.mood_updated_at) return;
-  const level = Math.min(9, Math.floor(familiarityHint / 12));
-  const score = LEVEL_THRESHOLDS[level] || 0;
-  const now   = Date.now();
+  const now = Date.now();
   if (!existing) {
     db.prepare(
       `INSERT OR IGNORE INTO character_state
-       (assistant_id, familiarity, total_turns, relationship_level, intimacy_score,
+       (assistant_id, total_turns, relationship_level, intimacy_score,
         mood_emotion, mood_intensity, mood_valence, mood_arousal, mood_updated_at,
         energy, energy_updated_at, created_at, updated_at)
-       VALUES (?, 0, 0, ?, ?, 'calm', 0.3, 0.1, 0.2, ?, 0.7, ?, ?, ?)`
-    ).run(assistantId, level, score, now, now, now, now);
+       VALUES (?, 0, 0, 0, 'calm', 0.3, 0.1, 0.2, ?, 0.7, ?, ?, ?)`
+    ).run(assistantId, now, now, now, now);
   } else {
     updateStateFields(assistantId, {
-      relationship_level: level,
-      intimacy_score: score,
       mood_updated_at: now,
       energy_updated_at: now,
     });
@@ -550,6 +660,8 @@ module.exports = {
   getEffectiveState,
   onUserMessage,
   applyMoodEvent,
+  applyStateDelta,
+  STATE_DELTA_CAPS,
   clearFocus,
   buildStatePromptFragment,
   ensureDefaultState,
